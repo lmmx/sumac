@@ -67,16 +67,21 @@ def print_find(
     inventory: ledger.Inventory,
     locations: dict[str, models.Location],
     product_id: str,
+    exact: bool = False,
 ) -> None:
     table = Table(title=f"Locations of {product_id!r}")
+    table.add_column("product")
     table.add_column("location")
     table.add_column("quantity", justify="right")
     found = False
     for loc_id, entries in sorted(inventory.by_location.items()):
-        qty = entries.get(product_id)
-        if qty is not None:
-            found = True
-            table.add_row(config.location_path(locations, loc_id), f"{qty.amount} {qty.unit}")
+        for pid, qty in sorted(entries.items()):
+            matches = (pid == product_id) if exact else (product_id.lower() in pid.lower())
+            if matches:
+                found = True
+                table.add_row(
+                    pid, config.location_path(locations, loc_id), f"{qty.amount} {qty.unit}"
+                )
     console.print(table)
     if not found:
         console.print(f"[yellow]{product_id!r} not found in current inventory[/yellow]")

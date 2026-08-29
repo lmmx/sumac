@@ -261,12 +261,18 @@ def status(
 
 
 @app.command()
-def find(product_id: str, data_dir: DataDirOption = Path("data")) -> None:
-    """Show every location currently holding PRODUCT_ID."""
+def find(
+    product_id: str,
+    exact: Annotated[
+        bool, typer.Option(help="Exact match only (default is partial/substring match)")
+    ] = False,
+    data_dir: DataDirOption = Path("data"),
+) -> None:
+    """Show every location currently holding PRODUCT_ID (partial match by default)."""
     key = _key(data_dir)
     inventory = ledger.build_inventory(data_dir, key)
     locations = config.load_locations(data_dir, key)
-    render.print_find(inventory, locations, product_id)
+    render.print_find(inventory, locations, product_id, exact=exact)
 
 
 @app.command(name="log")
