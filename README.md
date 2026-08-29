@@ -9,6 +9,14 @@ and threat model, and `docs/LAYOUT.md` for what's read-only vs mutable.
 
 ## Install
 
+Published on PyPI as `sumac-home` (`sumac` was taken); the command is still `sumac`.
+
+```sh
+uv tool install sumac-home     # or: pip install sumac-home
+```
+
+For development (this checkout):
+
 ```sh
 uv sync
 ```

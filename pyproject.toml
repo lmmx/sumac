@@ -1,5 +1,5 @@
 [project]
-name = "sumac"
+name = "sumac-home"
 version = "0.1.0"
 description = "Home grocery inventory app"
 readme = "README.md"
