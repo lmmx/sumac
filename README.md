@@ -1,5 +1,6 @@
 # sumac
-🍋 sumac: home grocery inventory app
+
+**🍋 sumac: home grocery inventory app**
 
 Encrypted-at-rest grocery inventory for a household sharing one git repo and one passphrase.
 Locations, products, and quantities are never visible to someone holding the repo without the

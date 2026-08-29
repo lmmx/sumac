@@ -1,7 +1,7 @@
 [project]
 name = "sumac"
 version = "0.1.0"
-description = "Encrypted home grocery inventory app"
+description = "Home grocery inventory app"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
