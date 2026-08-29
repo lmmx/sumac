@@ -6,14 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from sumac import SCHEMA_VERSION, crypto, ledger, store
+from sumac import SCHEMA_VERSION, ledger, store
 from sumac.errors import SchemaVersionError
 
 T0 = datetime(2026, 1, 1, tzinfo=None).astimezone()
-
-
-def _key() -> bytes:
-    return crypto.derive_key("pw", b"0" * crypto.SALT_SIZE, 1, 8192)
 
 
 def _change_obj(
@@ -67,8 +63,7 @@ def _snapshot_obj(
     }
 
 
-def test_movement_between_locations(data_dir: Path, osuser: str) -> None:
-    key = _key()
+def test_movement_between_locations(data_dir: Path, osuser: str, key: bytes) -> None:
     store.append(
         data_dir,
         key,
@@ -96,8 +91,9 @@ def test_movement_between_locations(data_dir: Path, osuser: str) -> None:
     assert inventory.at("fridge")["milk"].amount == Decimal("2")
 
 
-def test_snapshot_resets_and_later_changes_apply_on_top(data_dir: Path, osuser: str) -> None:
-    key = _key()
+def test_snapshot_resets_and_later_changes_apply_on_top(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
     store.append(
         data_dir,
         key,
@@ -129,8 +125,7 @@ def test_snapshot_resets_and_later_changes_apply_on_top(data_dir: Path, osuser: 
     assert inventory.at("fridge")["milk"].amount == Decimal("1")
 
 
-def test_supersede_drops_original(data_dir: Path, osuser: str) -> None:
-    key = _key()
+def test_supersede_drops_original(data_dir: Path, osuser: str, key: bytes) -> None:
     store.append(
         data_dir,
         key,
@@ -157,8 +152,7 @@ def test_supersede_drops_original(data_dir: Path, osuser: str) -> None:
     assert inventory.at("fridge")["milk"].amount == Decimal("3")
 
 
-def test_unit_mismatch_raises(data_dir: Path, osuser: str) -> None:
-    key = _key()
+def test_unit_mismatch_raises(data_dir: Path, osuser: str, key: bytes) -> None:
     store.append(
         data_dir,
         key,
@@ -184,8 +178,7 @@ def test_unit_mismatch_raises(data_dir: Path, osuser: str) -> None:
         ledger.build_inventory(data_dir, key)
 
 
-def test_zero_quantity_drops_entry(data_dir: Path, osuser: str) -> None:
-    key = _key()
+def test_zero_quantity_drops_entry(data_dir: Path, osuser: str, key: bytes) -> None:
     store.append(
         data_dir,
         key,
@@ -211,8 +204,7 @@ def test_zero_quantity_drops_entry(data_dir: Path, osuser: str) -> None:
     assert "milk" not in inventory.at("fridge")
 
 
-def test_schema_version_too_new_raises(data_dir: Path, osuser: str) -> None:
-    key = _key()
+def test_schema_version_too_new_raises(data_dir: Path, osuser: str, key: bytes) -> None:
     obj = _change_obj("c1", T0, osuser, "purchase", "milk", "1", "l", to_location="fridge")
     obj["schema_version"] = SCHEMA_VERSION + 1
     store.append(data_dir, key, f"log:{osuser}", obj)
@@ -220,8 +212,7 @@ def test_schema_version_too_new_raises(data_dir: Path, osuser: str) -> None:
         ledger.load_records(data_dir, key)
 
 
-def test_verify_all_detects_actor_mismatch(data_dir: Path, osuser: str) -> None:
-    key = _key()
+def test_verify_all_detects_actor_mismatch(data_dir: Path, osuser: str, key: bytes) -> None:
     obj = _change_obj("c1", T0, osuser, "purchase", "milk", "1", "l", to_location="fridge")
     obj["actor"] = "someone-else"
     store.append(data_dir, key, f"log:{osuser}", obj)
@@ -230,8 +221,7 @@ def test_verify_all_detects_actor_mismatch(data_dir: Path, osuser: str) -> None:
     assert len(result.actor_mismatches) == 1
 
 
-def test_verify_all_ok_on_clean_data(data_dir: Path, osuser: str) -> None:
-    key = _key()
+def test_verify_all_ok_on_clean_data(data_dir: Path, osuser: str, key: bytes) -> None:
     store.append(
         data_dir,
         key,

@@ -3,9 +3,9 @@ name = "sumac"
 version = "0.1.0"
 description = "Encrypted home grocery inventory app"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
-    "pynacl>=1.5",
+    "sealedlog",
     "pydantic>=2",
     "rich>=13",
     "typer>=0.12",
@@ -23,6 +23,7 @@ packages = ["src/sumac"]
 
 [dependency-groups]
 dev = [
+    "pynacl>=1.5",
     "ruff>=0.6",
     "ty>=0.0.1a1",
     "pytest>=8",
@@ -30,7 +31,7 @@ dev = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

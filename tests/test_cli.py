@@ -3,11 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from sealedlog.errors import WrongPassphraseError
 from typer.testing import CliRunner
 
 from sumac import paths
 from sumac.cli import app
-from sumac.errors import VaultExistsError, WrongPassphraseError
+from sumac.errors import VaultExistsError
 
 runner = CliRunner()
 PASSPHRASE_ENV = {"SUMAC_PASSPHRASE": "test-pass"}

@@ -5,7 +5,9 @@ from __future__ import annotations
 import getpass
 import os
 
-from sumac import crypto
+from sealedlog import Vault
+
+from sumac import vault as sumac_vault
 
 ENV_VAR = "SUMAC_PASSPHRASE"
 
@@ -19,11 +21,11 @@ def resolve_passphrase() -> str:
     return getpass.getpass("sumac passphrase: ")
 
 
-def get_key(header: crypto.VaultHeader) -> bytes:
-    """Resolve the passphrase and derive the key, caching within this process."""
+def get_key(vault: Vault) -> bytes:
+    """Resolve the passphrase and unlock the vault, caching the key within this process."""
     global _key_cache
     if _key_cache is None:
-        _key_cache = crypto.check_passphrase(header, resolve_passphrase())
+        _key_cache = sumac_vault.unlock(vault, resolve_passphrase())
     return _key_cache
 
 

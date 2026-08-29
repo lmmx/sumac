@@ -5,14 +5,6 @@ class SumacError(Exception):
     """Base for all sumac errors."""
 
 
-class WrongPassphraseError(SumacError):
-    """Passphrase does not match the vault verifier."""
-
-
-class DecryptionError(SumacError):
-    """A line failed to authenticate under its expected AAD."""
-
-
 class ForeignStreamError(SumacError):
     """Attempted to append to a stream_id that isn't the current user's."""
 

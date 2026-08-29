@@ -11,18 +11,20 @@ from typing import Annotated
 from uuid import uuid4
 
 import typer
+from sealedlog import Vault
+from sealedlog.errors import SealError
 
 from sumac import (
     FORMAT_VERSION,
     SCHEMA_VERSION,
     config,
-    crypto,
     ledger,
     models,
     paths,
     render,
     store,
 )
+from sumac import vault as sumac_vault
 from sumac.errors import SumacError, VaultExistsError, VaultNotFoundError
 from sumac.models import ChangeKind, InventoryChange, InventorySnapshot, Quantity, SnapshotEntry
 from sumac.passphrase import get_key, resolve_passphrase
@@ -36,15 +38,15 @@ DataDirOption = Annotated[
 ]
 
 
-def _load_header(data_dir: Path) -> crypto.VaultHeader:
+def _load_vault(data_dir: Path) -> Vault:
     vpath = paths.vault_path(data_dir)
     if not vpath.exists():
         raise VaultNotFoundError(f"no vault at {vpath}; run `sumac init` first")
-    return crypto.VaultHeader.from_dict(json.loads(vpath.read_text(encoding="utf-8")))
+    return Vault.from_dict(json.loads(vpath.read_text(encoding="utf-8")))
 
 
 def _key(data_dir: Path) -> bytes:
-    return get_key(_load_header(data_dir))
+    return get_key(_load_vault(data_dir))
 
 
 def _slugify(name: str) -> str:
@@ -120,9 +122,10 @@ def init(data_dir: DataDirOption = Path("data")) -> None:
     if vpath.exists():
         raise VaultExistsError(f"vault already exists at {vpath}")
     passphrase = resolve_passphrase()
-    header = crypto.new_header(passphrase, format_version=FORMAT_VERSION)
+    vault = sumac_vault.create(passphrase)
     data_dir.mkdir(parents=True, exist_ok=True)
-    vpath.write_text(json.dumps(header.to_dict(), indent=2) + "\n", encoding="utf-8")
+    doc = {"format_version": FORMAT_VERSION, **vault.to_dict()}
+    vpath.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
     paths.log_dir(data_dir).mkdir(parents=True, exist_ok=True)
     render.print_success(f"Initialized sumac vault at {data_dir}")
 
@@ -234,6 +237,6 @@ def verify(data_dir: DataDirOption = Path("data")) -> None:
 def main() -> None:
     try:
         app()
-    except SumacError as e:
+    except (SumacError, SealError) as e:
         render.print_error(str(e))
         raise SystemExit(1) from None

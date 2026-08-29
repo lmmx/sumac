@@ -5,25 +5,26 @@ from pathlib import Path
 
 import nacl.pwhash.argon2id as argon2id
 import pytest
+from sealedlog import Vault
 
-from sumac import crypto, passphrase
+from sumac import passphrase
+from sumac import vault as sumac_vault
 
 
 @pytest.fixture(autouse=True)
 def _fast_kdf(monkeypatch: pytest.MonkeyPatch) -> None:
     """Argon2id at MIN cost so tests don't pay real KDF latency."""
-    original = crypto.new_header
+    original = sumac_vault.create
 
-    def fast_new_header(
+    def fast_create(
         pw: str,
         *,
-        format_version: int,
         opslimit: int = argon2id.OPSLIMIT_MIN,
         memlimit: int = argon2id.MEMLIMIT_MIN,
-    ) -> crypto.VaultHeader:
-        return original(pw, format_version=format_version, opslimit=opslimit, memlimit=memlimit)
+    ) -> Vault:
+        return original(pw, opslimit=opslimit, memlimit=memlimit)
 
-    monkeypatch.setattr(crypto, "new_header", fast_new_header)
+    monkeypatch.setattr(sumac_vault, "create", fast_create)
 
 
 @pytest.fixture(autouse=True)
@@ -42,3 +43,9 @@ def osuser(monkeypatch: pytest.MonkeyPatch) -> str:
 @pytest.fixture
 def data_dir(tmp_path: Path) -> Path:
     return tmp_path / "data"
+
+
+@pytest.fixture
+def key(_fast_kdf: None) -> bytes:
+    vault = sumac_vault.create("pw")
+    return sumac_vault.unlock(vault, "pw")
