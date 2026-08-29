@@ -98,6 +98,56 @@ def test_log_shows_recorded_events(data_dir: Path) -> None:
     assert "purchase" in result.output
 
 
+def test_add_array_creates_numbered_sublocations(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Fridge", "--id", "fridge")
+    result = _run(data_dir, "config", "add-array", "Shelf", "--parent", "fridge", "--count", "3")
+    assert result.exit_code == 0, result.output
+    result = _run(data_dir, "config", "show")
+    assert result.exit_code == 0
+    for i in (1, 2, 3):
+        assert f"Shelf {i}" in result.output
+
+
+def test_add_grid_creates_grid_sublocations(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    result = _run(
+        data_dir, "config", "add-grid", "Bin", "--parent", "pantry", "--rows", "2", "--cols", "2"
+    )
+    assert result.exit_code == 0, result.output
+    result = _run(data_dir, "config", "show")
+    assert result.exit_code == 0
+    for cell in ("Bin R1C1", "Bin R1C2", "Bin R2C1", "Bin R2C2"):
+        assert cell in result.output
+
+
+def test_status_rolls_up_sublocations(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Fridge", "--id", "fridge")
+    _run(data_dir, "config", "add-location", "Door", "--id", "fridge-door", "--parent", "fridge")
+    _run(data_dir, "add", "purchase", "milk", "1", "l", "--to", "fridge")
+    _run(data_dir, "add", "purchase", "eggs", "6", "ct", "--to", "fridge-door")
+
+    result = _run(data_dir, "status", "fridge")
+    assert result.exit_code == 0
+    assert "milk" in result.output
+    assert "eggs" in result.output
+
+
+def test_status_on_leaf_excludes_siblings(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Fridge", "--id", "fridge")
+    _run(data_dir, "config", "add-location", "Door", "--id", "fridge-door", "--parent", "fridge")
+    _run(data_dir, "add", "purchase", "milk", "1", "l", "--to", "fridge")
+    _run(data_dir, "add", "purchase", "eggs", "6", "ct", "--to", "fridge-door")
+
+    result = _run(data_dir, "status", "fridge-door")
+    assert result.exit_code == 0
+    assert "eggs" in result.output
+    assert "milk" not in result.output
+
+
 def test_another_user_cannot_write_into_alices_log(
     data_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

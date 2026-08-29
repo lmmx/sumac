@@ -42,6 +42,24 @@ sumac verify                                              # re-authenticate ever
 
 All commands take `--data-dir` (default `data`, or `$SUMAC_DATA_DIR`).
 
+### Locations nest
+
+A location can have a parent, so shelves, doors, bins, drawers — anything — nest under a
+container to arbitrary depth. There's no separate "shelf" or "grid" type; a sub-location is just
+another location with `--parent` set.
+
+```sh
+sumac config add-location "Door" --id fridge-door --parent fridge
+sumac config add-array "Shelf" --parent fridge --count 4       # Shelf 1..4 under fridge
+sumac config add-grid "Bin" --parent pantry --rows 3 --cols 4  # Bin R1C1..R3C4 under pantry
+sumac config show                                              # renders the tree
+```
+
+`sumac status <location>` and `sumac find` both include everything nested under a location, not
+just that exact node — `sumac status fridge` sums the fridge itself, its door, and its shelves in
+one pass. Query a sub-location directly (e.g. `sumac status fridge-door`) to scope to just that
+node and its own descendants.
+
 ## Development
 
 ```sh

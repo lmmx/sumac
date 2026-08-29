@@ -152,6 +152,56 @@ def config_add_location(
     render.print_success(f"Added location {loc_id!r}")
 
 
+def _location_id_prefix(parent: str | None, name: str, id_prefix: str | None) -> str:
+    if id_prefix:
+        return id_prefix
+    base = _slugify(name)
+    return f"{parent}-{base}" if parent else base
+
+
+@config_app.command("add-array")
+def config_add_array(
+    name: str,
+    count: Annotated[int, typer.Option(min=1, help="How many sub-locations to create.")],
+    parent: Annotated[str | None, typer.Option(help="Parent location id.")] = None,
+    start: Annotated[int, typer.Option(help="Starting index.")] = 1,
+    id_prefix: Annotated[str | None, typer.Option(help="Override the generated id prefix.")] = None,
+    data_dir: DataDirOption = Path("data"),
+) -> None:
+    """Create a numbered row of sub-locations under --parent, e.g. 4 fridge shelves."""
+    key = _key(data_dir)
+    actor = paths.current_user()
+    prefix = _location_id_prefix(parent, name, id_prefix)
+    for i in range(start, start + count):
+        location = models.Location(id=f"{prefix}-{i}", name=f"{name} {i}", parent_id=parent)
+        config.add_location(data_dir, key, actor, location)
+    render.print_success(f"Added {count} locations {prefix}-{start}..{prefix}-{start + count - 1}")
+
+
+@config_app.command("add-grid")
+def config_add_grid(
+    name: str,
+    rows: Annotated[int, typer.Option(min=1, help="Number of rows.")],
+    cols: Annotated[int, typer.Option(min=1, help="Number of columns.")],
+    parent: Annotated[str | None, typer.Option(help="Parent location id.")] = None,
+    id_prefix: Annotated[str | None, typer.Option(help="Override the generated id prefix.")] = None,
+    data_dir: DataDirOption = Path("data"),
+) -> None:
+    """Create a rows x cols grid of sub-locations under --parent, e.g. a pantry shelf grid."""
+    key = _key(data_dir)
+    actor = paths.current_user()
+    prefix = _location_id_prefix(parent, name, id_prefix)
+    count = 0
+    for r in range(1, rows + 1):
+        for c in range(1, cols + 1):
+            location = models.Location(
+                id=f"{prefix}-r{r}c{c}", name=f"{name} R{r}C{c}", parent_id=parent
+            )
+            config.add_location(data_dir, key, actor, location)
+            count += 1
+    render.print_success(f"Added {count} locations {prefix}-r1c1..{prefix}-r{rows}c{cols}")
+
+
 @app.command()
 def add(
     kind: ChangeKind,
@@ -201,11 +251,13 @@ def status(
     location: Annotated[str | None, typer.Argument()] = None,
     data_dir: DataDirOption = Path("data"),
 ) -> None:
-    """Show current inventory, optionally scoped to one location."""
+    """Show current inventory. Given a location, includes its sub-locations
+    (shelves, doors, grid cells, ...), not just that exact node."""
     key = _key(data_dir)
     inventory = ledger.build_inventory(data_dir, key)
     locations = config.load_locations(data_dir, key)
-    render.print_status(inventory, locations, location)
+    scope = config.descendants(locations, location) if location else None
+    render.print_status(inventory, locations, scope)
 
 
 @app.command()

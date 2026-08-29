@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from rich.console import Console
 from rich.table import Table
+from rich.tree import Tree
 
-from sumac import ledger, models
+from sumac import config, ledger, models
 
 console = Console()
 error_console = Console(stderr=True)
@@ -20,32 +21,41 @@ def print_error(message: str) -> None:
 
 
 def print_locations(locations: dict[str, models.Location]) -> None:
-    table = Table(title="Locations")
-    table.add_column("id")
-    table.add_column("name")
-    table.add_column("parent")
-    for loc in sorted(locations.values(), key=lambda location: location.id):
-        table.add_row(loc.id, loc.name, loc.parent_id or "")
-    console.print(table)
+    if not locations:
+        console.print("[yellow]no locations configured yet[/yellow]")
+        return
 
+    children_of: dict[str | None, list[models.Location]] = {}
+    for loc in locations.values():
+        children_of.setdefault(loc.parent_id, []).append(loc)
+    for siblings in children_of.values():
+        siblings.sort(key=lambda location: location.id)
 
-def _location_name(locations: dict[str, models.Location], location_id: str) -> str:
-    loc = locations.get(location_id)
-    return loc.name if loc else location_id
+    def add(node: Tree, loc: models.Location) -> None:
+        branch = node.add(f"{loc.name} [dim]({loc.id})[/dim]")
+        for child in children_of.get(loc.id, []):
+            add(branch, child)
+
+    tree = Tree("Locations")
+    known_ids = set(locations)
+    roots = [loc for loc in locations.values() if loc.parent_id not in known_ids]
+    for root in sorted(roots, key=lambda location: location.id):
+        add(tree, root)
+    console.print(tree)
 
 
 def print_status(
     inventory: ledger.Inventory,
     locations: dict[str, models.Location],
-    location_id: str | None,
+    scope: set[str] | None,
 ) -> None:
-    loc_ids = [location_id] if location_id else sorted(inventory.by_location)
+    loc_ids = sorted(scope & set(inventory.by_location)) if scope else sorted(inventory.by_location)
     if not loc_ids:
         console.print("[yellow]no inventory recorded yet[/yellow]")
         return
     for loc_id in loc_ids:
         entries = inventory.at(loc_id)
-        table = Table(title=_location_name(locations, loc_id))
+        table = Table(title=config.location_path(locations, loc_id))
         table.add_column("product")
         table.add_column("quantity", justify="right")
         for product_id, qty in sorted(entries.items()):
@@ -66,7 +76,7 @@ def print_find(
         qty = entries.get(product_id)
         if qty is not None:
             found = True
-            table.add_row(_location_name(locations, loc_id), f"{qty.amount} {qty.unit}")
+            table.add_row(config.location_path(locations, loc_id), f"{qty.amount} {qty.unit}")
     console.print(table)
     if not found:
         console.print(f"[yellow]{product_id!r} not found in current inventory[/yellow]")
