@@ -2,6 +2,10 @@ version = 1
 revision = 3
 requires-python = ">=3.12"
 
+[options]
+exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
+exclude-newer-span = "PT0S"
+
 [[package]]
 name = "annotated-doc"
 version = "0.0.5"
@@ -382,7 +386,7 @@ wheels = [
 
 [[package]]
 name = "sumac-home"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "pydantic" },
