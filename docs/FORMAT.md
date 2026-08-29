@@ -26,8 +26,9 @@ product name.
 
 The line-sealing primitive — AEAD, nonces, base64 framing, AAD, Argon2id key derivation, and
 the wrong-passphrase verifier — is not sumac's own code. It's provided by
-[`sealedlog`](/mnt/sealedlog), a standalone library extracted from an earlier version of this
-app; see its `docs/FORMAT.md` for the full spec. Summary of what that buys sumac:
+[`sealedlog`](https://pypi.org/project/sealedlog/), a standalone library extracted from an
+earlier version of this app; see its `docs/FORMAT.md` for the full spec. Summary of what that
+buys sumac:
 
 Each line is `base64(nonce‖ciphertext‖tag)`, sealed with XChaCha20-Poly1305 and a fresh random
 24-byte nonce. Appending is a byte-append, so git packs the history well. This costs per-line

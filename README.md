@@ -12,9 +12,8 @@ and threat model, and `docs/LAYOUT.md` for what's read-only vs mutable.
 uv sync
 ```
 
-Depends on [`sealedlog`](/mnt/sealedlog) (the encrypted append-only log primitive) as an
-editable path dependency — see `[tool.uv.sources]` in `pyproject.toml` if your checkout lives
-somewhere else.
+Depends on [`sealedlog`](https://pypi.org/project/sealedlog/) (the encrypted append-only log
+primitive) from PyPI.
 
 ## Passphrase
 

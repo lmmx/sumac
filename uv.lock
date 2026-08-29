@@ -362,19 +362,13 @@ wheels = [
 [[package]]
 name = "sealedlog"
 version = "0.1.0"
-source = { editable = "/mnt/sealedlog" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pynacl" },
 ]
-
-[package.metadata]
-requires-dist = [{ name = "pynacl", specifier = ">=1.5" }]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=8" },
-    { name = "ruff", specifier = ">=0.6" },
-    { name = "ty", specifier = ">=0.0.1a1" },
+sdist = { url = "https://files.pythonhosted.org/packages/8f/b2/d61e6a665c6d0c977f99faed8daab8c07783b16c70c036154f42bc4484f9/sealedlog-0.1.0.tar.gz", hash = "sha256:c2281483be9bbee15f8101ef8dbed6639be8fbc69ce0ac155e65fca23b8c7d34", size = 4843, upload-time = "2026-08-29T14:31:43.321Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5a/1e/97adf4cb899001d84ab078831a5f76374201aac0b2d0b58428c3ba31fc58/sealedlog-0.1.0-py3-none-any.whl", hash = "sha256:ba9310a9079cf91c3acb5b99f2cc9fe7fcdf3c9ad6bff1f970eadfdfbce63a29", size = 7112, upload-time = "2026-08-29T14:31:44.328Z" },
 ]
 
 [[package]]
@@ -409,7 +403,7 @@ dev = [
 requires-dist = [
     { name = "pydantic", specifier = ">=2" },
     { name = "rich", specifier = ">=13" },
-    { name = "sealedlog", editable = "/mnt/sealedlog" },
+    { name = "sealedlog", specifier = ">=0.1.0" },
     { name = "typer", specifier = ">=0.12" },
 ]
 
