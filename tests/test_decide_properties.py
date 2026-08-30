@@ -21,25 +21,31 @@ from sumac import config, decide
 from sumac.errors import Rejected
 from sumac.models import ChangeKind, Location, Product
 
-_LOCATION_IDS = ["pantry", "fridge", "hob-right-shelf-bottom"]
+_LOCATIONS = {
+    "pantry": Location(id="pantry", name="Pantry"),
+    "pantry-shelf": Location(id="pantry-shelf", name="Shelf", parent_id="pantry"),
+    "fridge": Location(id="fridge", name="Fridge"),
+    "hob-right-shelf-bottom": Location(id="hob-right-shelf-bottom", name="Bottom"),
+}
+_LOCATION_IDS = list(_LOCATIONS)
+_DISPLAY_PATHS = [config.location_path(_LOCATIONS, lid) for lid in _LOCATION_IDS]
 _PRODUCT_IDS = ["milk", "flour", "eggs"]
 
 
 def _base_cfg() -> config.Config:
-    locations = {lid: Location(id=lid, name=lid) for lid in _LOCATION_IDS}
-    products = {pid: Product(id=pid, name=pid, unit="unit") for pid in _PRODUCT_IDS}
     return config.Config(
-        known_locations=locations,
-        active_locations=locations,
-        known_products=products,
-        active_products=products,
+        known_locations=_LOCATIONS,
+        active_locations=_LOCATIONS,
+        known_products={pid: Product(id=pid, name=pid, unit="unit") for pid in _PRODUCT_IDS},
+        active_products={pid: Product(id=pid, name=pid, unit="unit") for pid in _PRODUCT_IDS},
         anomalies=(),
     )
 
 
 _kind = st.sampled_from(list(ChangeKind))
 _maybe_location = st.one_of(
-    st.none(), st.sampled_from([*_LOCATION_IDS, "bogus-location", "Pantry"])
+    st.none(),
+    st.sampled_from([*_LOCATION_IDS, *_DISPLAY_PATHS, "bogus-location"]),
 )
 _product_id = st.sampled_from([*_PRODUCT_IDS, "new-product", "milc"])
 _amount = st.decimals(
@@ -85,11 +91,16 @@ def test_gate_soundness_accepted_writes_reference_only_known_entities(
     except Rejected:
         return  # rejection is a legal outcome
 
-    auto_registered = any(w.stream == "config" for w in writes)
+    config_writes = [w for w in writes if w.stream == "config"]
     for w in writes:
         if w.stream == "config":
             continue
         payload = w.obj["payload"]
         for loc in (payload["from_location"], payload["to_location"]):
             assert loc is None or loc in cfg.known_locations
-        assert payload["product_id"] in cfg.known_products or auto_registered
+        pid = payload["product_id"]
+        if pid not in cfg.known_products:
+            # Not just "some config write happened" — the registration must
+            # be for *this* product, or an unknown product could accept
+            # silently under the wrong id's cover.
+            assert any(cw.obj["product"]["id"] == pid for cw in config_writes)

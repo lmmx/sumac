@@ -183,9 +183,10 @@ def config_retire_product(
 
 @config_app.command("check-units")
 def config_check_units(data_dir: DataDirOption = Path("data")) -> None:
-    """For every product observed in the log, report unregistered products
-    (with a suggested `add-product` using their most-common observed unit)
-    and registered products with a unit that doesn't convert to canonical."""
+    """Report unregistered products and unconvertible units observed in the
+    log (legacy data — `sumac add` auto-registers now, so these can only
+    come from before decide existed), and every auto-registered product
+    that hasn't since been confirmed by a deliberate `add-product`."""
     key = _key(data_dir)
     observed = ledger.observed_product_units(data_dir, key)
     cfg = config.build_config(data_dir, key)

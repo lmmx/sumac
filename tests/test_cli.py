@@ -208,11 +208,51 @@ def test_check_units_flags_unconvertible_unit_for_registered_product(data_dir: P
 
 def test_check_units_clean_when_registered_and_convertible(data_dir: Path) -> None:
     _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
     _run(data_dir, "config", "add-product", "Flour", "kg", "--id", "flour")
-    _run(data_dir, "add", "purchase", "flour", "1", "kg", "--to", "pantry")
+    add_result = _run(data_dir, "add", "purchase", "flour", "1", "kg", "--to", "pantry")
+    assert add_result.exit_code == 0, add_result.output
+
     result = _run(data_dir, "config", "check-units")
     assert result.exit_code == 0
     assert "every observed" in result.output
+
+
+def test_check_units_reports_unconfirmed_auto_registration(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    add_result = _run(data_dir, "add", "purchase", "kimchi", "1", "jar", "--to", "pantry")
+    assert add_result.exit_code == 0, add_result.output
+
+    result = _run(data_dir, "config", "check-units")
+    assert result.exit_code == 1
+    assert "never confirmed" in result.output
+    assert "kimchi" in result.output
+
+
+def test_check_units_does_not_flag_deliberately_registered_product(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "config", "add-product", "Kimchi", "jar", "--id", "kimchi")
+    add_result = _run(data_dir, "add", "purchase", "kimchi", "1", "jar", "--to", "pantry")
+    assert add_result.exit_code == 0, add_result.output
+
+    result = _run(data_dir, "config", "check-units")
+    assert result.exit_code == 0
+    assert "never confirmed" not in result.output
+
+
+def test_check_units_confirming_an_auto_registration_clears_the_flag(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "add", "purchase", "kimchi", "1", "jar", "--to", "pantry")
+
+    # confirm it — redefining clears the auto marker, per §3.5a
+    _run(data_dir, "config", "add-product", "Kimchi", "jar", "--id", "kimchi")
+
+    result = _run(data_dir, "config", "check-units")
+    assert result.exit_code == 0
+    assert "never confirmed" not in result.output
 
 
 def test_add_change_and_status(data_dir: Path) -> None:

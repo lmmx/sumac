@@ -98,6 +98,18 @@ def _resolve_product(
     if known is not None and known.retired:
         raise Rejected("retired_product", value=product_id)
 
+    # Confirmed, not assumed: `Config.active_products` is always exactly
+    # `known_products` filtered to `not retired` (see config.build_config
+    # and every hand-built Config in the test suite) — there is no way to be
+    # known but neither active nor retired. So having fallen through both
+    # checks above, `product_id` cannot be in `known_products` at all; the
+    # auto-registration below can never collide with — and latest-revision-
+    # wins can never silently clobber — an existing registration under this
+    # id, deliberate or otherwise.
+    assert known is None, (
+        "known_products entry reached auto-register: active/retired invariant broke"
+    )
+
     suggestion = near_matches(product_id, cfg.active_products)
     warning = None
     if suggestion:

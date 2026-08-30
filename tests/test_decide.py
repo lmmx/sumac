@@ -223,3 +223,24 @@ def test_retired_product_does_not_trigger_reregistration() -> None:
     )
     with pytest.raises(Rejected):
         _decide(product_id="milk", cfg=cfg)
+
+
+def test_auto_register_tripwire_fires_if_active_known_invariant_breaks() -> None:
+    """Regression guard for the auto-register-can't-clobber argument in
+    decide.py: `config.build_config` always derives `active_products` as
+    `known_products` filtered to `not retired`, so a known, non-retired
+    product can never be missing from `active_products` in practice — but
+    nothing in the `Config` dataclass itself enforces that. If some future
+    caller ever hand-builds one that breaks the invariant, the assertion in
+    `_resolve_product` must fire rather than silently auto-registering over
+    an existing product."""
+    product = Product(id="milk", name="Milk", unit="l", retired=False)
+    cfg = config.Config(
+        known_locations={"pantry": Location(id="pantry", name="Pantry")},
+        active_locations={"pantry": Location(id="pantry", name="Pantry")},
+        known_products={"milk": product},
+        active_products={},  # broken: milk is known and not retired, but omitted here
+        anomalies=(),
+    )
+    with pytest.raises(AssertionError):
+        _decide(product_id="milk", cfg=cfg)

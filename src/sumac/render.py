@@ -71,7 +71,19 @@ def print_products(products: dict[str, models.Product]) -> None:
 
 
 def print_unit_check(observed: dict[str, Counter[str]], cfg: config.Config) -> bool:
-    """Returns True if every observed (product, unit) pair converts cleanly."""
+    """Returns True if every observed (product, unit) pair converts cleanly
+    and no auto-registration is still unconfirmed.
+
+    Since Phase 3, `sumac add` auto-registers on first use (docs/journal
+    §3.5a) — an unregistered or unconvertible pair can no longer arise
+    through it, only through data written before decide existed. The
+    unregistered/unconvertible sections below are that legacy-data report.
+    The unconfirmed-auto-registrations section is the *current* job: the
+    `near_matches` warning at write time is easy to miss in the moment,
+    so this is the backstop §3.5a promised — everything auto-registered
+    (`metadata: {"auto": true}`) that hasn't since been redefined (which
+    clears the flag, since a fresh `add-product` call doesn't carry it
+    forward) is still worth a human glance."""
     unregistered: list[tuple[str, str]] = []  # (product_id, suggested add-product command)
     unconvertible: list[tuple[str, str, int]] = []  # (product_id, unit, times observed)
 
@@ -86,7 +98,13 @@ def print_unit_check(observed: dict[str, Counter[str]], cfg: config.Config) -> b
             if not cfg.can_convert(product_id, unit):
                 unconvertible.append((product_id, unit, n))
 
-    if not unregistered and not unconvertible:
+    unconfirmed = [
+        (pid, p.unit)
+        for pid, p in sorted(cfg.known_products.items())
+        if p.metadata.get("auto") is True
+    ]
+
+    if not unregistered and not unconvertible and not unconfirmed:
         console.print("[green]✓ every observed product/unit pair converts[/green]")
         return True
 
@@ -106,6 +124,18 @@ def print_unit_check(observed: dict[str, Counter[str]], cfg: config.Config) -> b
         for product_id, unit, n in unconvertible:
             table.add_row(product_id, unit, str(n))
         console.print(table)
+
+    if unconfirmed:
+        table = Table(title=f"{len(unconfirmed)} auto-registered, never confirmed")
+        table.add_column("product")
+        table.add_column("unit")
+        for product_id, unit in unconfirmed:
+            table.add_row(product_id, unit)
+        console.print(table)
+        console.print(
+            "[dim]Confirm a real one with `sumac config add-product`; "
+            "typos with `sumac correct` once that exists.[/dim]"
+        )
 
     return False
 
