@@ -25,10 +25,15 @@ class LocationSchema(BaseModel):
     name: str = Field(min_length=1)
     parent_id: str | None = None
     metadata: MetadataDict
+    retired: bool = False
 
     def to_domain(self) -> models.Location:
         return models.Location(
-            id=self.id, name=self.name, parent_id=self.parent_id, metadata=self.metadata
+            id=self.id,
+            name=self.name,
+            parent_id=self.parent_id,
+            metadata=self.metadata,
+            retired=self.retired,
         )
 
 

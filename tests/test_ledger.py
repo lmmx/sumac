@@ -439,3 +439,37 @@ def test_build_inventory_does_not_raise_on_unreadable_config(
     inventory = ledger.build_inventory(data_dir, key)
     assert any(a.reason == "config_unreadable" for a in inventory.anomalies)
     assert any(a.reason == "unknown_location" for a in inventory.anomalies)
+
+
+def test_build_inventory_surfaces_circular_parent_without_crashing(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    config.add_location(data_dir, key, osuser, models.Location(id="a", name="A", parent_id="b"))
+    config.add_location(data_dir, key, osuser, models.Location(id="b", name="B", parent_id="a"))
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _change_obj("c1", T0, osuser, "purchase", "milk", "1", "l", to_location="a"),
+    )
+    inventory = ledger.build_inventory(data_dir, key)
+    assert inventory.at("a")["milk"].amount == Decimal("1")
+    assert any(a.reason == "circular_parent" for a in inventory.anomalies)
+
+
+def test_build_inventory_folds_movement_to_retired_location(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    """Referential integrity is monotone (§3.4): retiring a location stops new
+    writes (Phase 3's job) but must not un-resolve historical ones."""
+    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+    config.retire_location(data_dir, key, osuser, "pantry")
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _change_obj("c1", T0, osuser, "purchase", "milk", "1", "l", to_location="pantry"),
+    )
+    inventory = ledger.build_inventory(data_dir, key)
+    assert inventory.at("pantry")["milk"].amount == Decimal("1")
+    assert inventory.anomalies == ()

@@ -25,7 +25,7 @@ from sumac import (
     store,
 )
 from sumac import vault as sumac_vault
-from sumac.errors import SumacError, VaultExistsError, VaultNotFoundError
+from sumac.errors import RetireNonemptyError, SumacError, VaultExistsError, VaultNotFoundError
 from sumac.models import ChangeKind, InventoryChange, InventorySnapshot, Quantity, SnapshotEntry
 from sumac.passphrase import get_key, resolve_passphrase
 
@@ -150,6 +150,24 @@ def config_add_location(
     location = models.Location(id=loc_id, name=name, parent_id=parent)
     config.add_location(data_dir, key, paths.current_user(), location)
     render.print_success(f"Added location {loc_id!r}")
+
+
+@config_app.command("retire-location")
+def config_retire_location(
+    id: str,
+    data_dir: DataDirOption = Path("data"),
+) -> None:
+    """Retire a location. Never deletes — historical records naming it still
+    resolve; new writes to it are for a later phase to reject. Rejected if the
+    location itself currently holds stock (its sub-locations aren't checked —
+    each is retired, and checked, on its own)."""
+    key = _key(data_dir)
+    holdings = ledger.build_inventory(data_dir, key).at(id)
+    if holdings:
+        listing = ", ".join(f"{q.amount} {q.unit} {p}" for p, q in sorted(holdings.items()))
+        raise RetireNonemptyError(f"cannot retire {id!r}: still holds {listing}")
+    config.retire_location(data_dir, key, paths.current_user(), id)
+    render.print_success(f"Retired location {id!r}")
 
 
 def _location_id_prefix(parent: str | None, name: str, id_prefix: str | None) -> str:

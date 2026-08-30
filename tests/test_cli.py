@@ -8,7 +8,7 @@ from typer.testing import CliRunner
 
 from sumac import paths
 from sumac.cli import app
-from sumac.errors import VaultExistsError
+from sumac.errors import RetireNonemptyError, VaultExistsError
 
 runner = CliRunner()
 PASSPHRASE_ENV = {"SUMAC_PASSPHRASE": "test-pass"}
@@ -51,6 +51,42 @@ def test_add_location_and_show(data_dir: Path) -> None:
     result = _run(data_dir, "config", "show")
     assert result.exit_code == 0
     assert "Fridge" in result.output
+
+
+def test_retire_location_shows_in_config(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Fridge", "--id", "fridge")
+    result = _run(data_dir, "config", "retire-location", "fridge")
+    assert result.exit_code == 0, result.output
+    result = _run(data_dir, "config", "show")
+    assert "retired" in result.output
+
+
+def test_retire_unknown_location_fails(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    result = _run(data_dir, "config", "retire-location", "nonexistent")
+    assert result.exit_code != 0
+
+
+def test_retire_nonempty_location_fails(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "add", "purchase", "milk", "1", "l", "--to", "pantry")
+    result = _run(data_dir, "config", "retire-location", "pantry")
+    assert result.exit_code != 0
+    assert isinstance(result.exception, RetireNonemptyError)
+    assert "milk" in str(result.exception)
+
+
+def test_retire_location_with_stock_only_in_sublocation_succeeds(data_dir: Path) -> None:
+    """`retire-location` checks the named location's own holdings, not its
+    sub-locations' — each sub-location is retired (and checked) on its own."""
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Fridge", "--id", "fridge")
+    _run(data_dir, "config", "add-location", "Door", "--id", "fridge-door", "--parent", "fridge")
+    _run(data_dir, "add", "purchase", "milk", "1", "l", "--to", "fridge-door")
+    result = _run(data_dir, "config", "retire-location", "fridge")
+    assert result.exit_code == 0, result.output
 
 
 def test_add_change_and_status(data_dir: Path) -> None:

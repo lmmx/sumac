@@ -19,3 +19,11 @@ class VaultExistsError(SumacError):
 
 class VaultNotFoundError(SumacError):
     """No vault.json in the data dir; run `sumac init` first."""
+
+
+class UnknownLocationError(SumacError):
+    """A command names a location id that has never been defined."""
+
+
+class RetireNonemptyError(SumacError):
+    """Attempted to retire a location that still holds stock."""

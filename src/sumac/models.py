@@ -34,6 +34,7 @@ class Location:
     name: str
     parent_id: str | None = None
     metadata: Mapping[str, JsonValue] = field(default_factory=dict)
+    retired: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,3 +109,14 @@ class Record:
     actor: str
     supersedes: str | None
     payload: InventorySnapshot | InventoryChange
+
+
+@dataclass(frozen=True, slots=True)
+class Anomaly:
+    """A record, line, or config entry the fold could not apply or resolve.
+    Never raised — only recorded. Shared between `ledger` (data-level anomalies)
+    and `config` (e.g. `circular_parent`) so both surface through one channel."""
+
+    record_id: str | None
+    reason: str  # "line_failure" | "invalid_record" | "unknown_location" | "unit_mismatch" | ...
+    detail: str

@@ -32,7 +32,8 @@ def print_locations(locations: dict[str, models.Location]) -> None:
         siblings.sort(key=lambda location: location.id)
 
     def add(node: Tree, loc: models.Location) -> None:
-        branch = node.add(f"{loc.name} [dim]({loc.id})[/dim]")
+        retired = " [dim]\\[retired][/dim]" if loc.retired else ""
+        branch = node.add(f"{loc.name} [dim]({loc.id})[/dim]{retired}")
         for child in children_of.get(loc.id, []):
             add(branch, child)
 

@@ -22,19 +22,10 @@ from sealedlog.errors import SealError
 
 from sumac import SCHEMA_VERSION, config, paths, store
 from sumac.errors import SumacError
-from sumac.models import InventoryChange, InventorySnapshot, Location, Quantity, Record
+from sumac.models import Anomaly, InventoryChange, InventorySnapshot, Location, Quantity, Record
 from sumac.schemas import RecordSchema
 
 _READ_TIME_ERRORS = (SumacError, SealError, ValidationError)
-
-
-@dataclass(frozen=True, slots=True)
-class Anomaly:
-    """A record (or line) the fold could not apply. Never raised — only recorded."""
-
-    record_id: str | None
-    reason: str  # "line_failure" | "invalid_record" | "unknown_location" | "unit_mismatch" | ...
-    detail: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,7 +124,9 @@ def build_inventory(data_dir: Path, key: bytes, as_of: datetime | None = None) -
         records = [r for r in records if r.ts <= as_of]
 
     try:
-        locations = config.load_locations(data_dir, key)
+        cfg = config.build_config(data_dir, key)
+        locations = cfg.known_locations
+        anomalies.extend(cfg.anomalies)
     except _READ_TIME_ERRORS as e:
         anomalies.append(Anomaly(None, "config_unreadable", str(e)))
         locations = {}
