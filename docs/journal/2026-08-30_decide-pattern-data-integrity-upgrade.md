@@ -156,6 +156,121 @@ An `Acquired` has no `frm` field to forget. A `Moved` cannot be constructed with
 
 This is a schema change (§5, phase 4) requiring an upcaster, and it eliminates an entire bug class permanently.
 
+### 3.3a Phase 4a design: the v1→v2 upcaster
+
+The list above is illustrative, not a spec — no field types, no envelope layout, no v1→v2 mapping. Design pass before any code, per the Phase 3 review: handing an implementation phase an untyped sketch is how an upcaster goes subtly wrong against 107 real records that can't be rewritten.
+
+**Real-data shape, checked before designing the mapping (aggregate counts, no content):**
+
+| | |
+|---|---|
+| Live records | 107 (75 `snapshot`, 32 `change`) |
+| `change` kind counts | `waste`=7, `purchase`=9, `consumption`=5, `movement`=5, `correction`=6, `discovery`=0 |
+| Records with `supersedes` set | **0** |
+| `correction` shape | 3× to-only (purchase-shaped), 3× from-only (consumption/waste-shaped) |
+| Snapshot entry-count range | 0 to 34 entries per record; **19 of 75 have exactly 0 entries** |
+
+Three things this changes about the design:
+
+1. **`discovery` is unused** — real, but doesn't need real-data-driven design; the structural mapping (behaves like `purchase`, per `__post_init__`) is enough.
+2. **`correction` never uses `supersedes`.** It isn't an early form of §3.6's correction mechanism — it's a plain delta, used both to add stock (3×) and remove it (3×), for accounting reasons rather than a real transaction. It has no home in the six-type list as written; see below.
+3. **Snapshots are the dominant record type, not an edge case, and their shape varies enormously — including a legitimate zero-entry "this location is empty" assertion, 19 times.** This is the "one v1 record becomes N v2 events" case flagged for review, and the real distribution makes it the highest-risk part of this design, not a footnote.
+
+**Snapshot → `Counted`: recommend against decomposing it.** The naive reading of the six-type list turns one `InventorySnapshot` (location, N entries) into N `Counted` events (product, location, amount). This has a real correctness problem: a 0-entry snapshot — 19 of them, real, not hypothetical — would upcast to **zero** events, silently losing the "this shelf was checked and is empty" fact. `InventorySnapshot`'s reset semantics ("resets rather than merges") mean an empty shelf must *clear* whatever the fold currently believes is there; an upcaster that emits nothing for a 0-entry record can't do that.
+
+Making it correct requires the upcaster to know, for every non-empty product previously believed present at that location, that it's now absent — i.e. it needs *running fold state*, not just the one record being transformed. That turns the upcaster from a stateless per-record function into something that re-implements a chunk of the fold internally, for the single largest and most-varied record shape in the real log.
+
+**Recommendation: don't decompose. Keep a location-wide `Snapshot` as its own v2 event, alongside a new, separate, per-product `Counted`.** They serve different purposes that the six-type list conflates: `Snapshot` is "this is everything at this location, full stop" (what 70% of the real log actually is); `Counted` is "adjust this one product's count" (what §3.5's insufficient-stock behavior in Phase 4b needs, and what the real log's `correction` records — see below — turn out to actually be). Keeping both is a smaller, safer upcaster: `InventorySnapshot` maps to `Snapshot` close to 1:1, no fold-state tracking, no synthesized zeroing events, no risk of misreading an empty shelf as "nothing happened here."
+
+**`correction` → no clean fit in the six types; recommend a `reason` field.** A delta-shaped accounting adjustment isn't `Acquired`/`Consumed`/`Discarded` (those are real transactions) and isn't `Counted` (that's an absolute value, and `correction` never recorded one — computing an absolute count backwards from a historical running balance risks fabricating a number the original record never asserted, especially since the *reason* someone corrects the record is often that the running balance was already wrong). Recommend: add `reason: str | None = None` to `Acquired`, `Consumed`, and `Discarded`, and map `correction` directionally — to-only → `Acquired(reason="correction")`, from-only → `Consumed(reason="correction")` — preserving "this wasn't a real purchase/use" without inventing data. `discovery` gets the same treatment: `Acquired(reason="discovery")`.
+
+**Open call, not resolved here:** `Consumed` vs. `Discarded` for a from-only `correction` is a naming choice, not a semantic one — `reason="correction"` is what actually preserves the truth either way. Went with `Consumed` above as the more neutral default (an unspecified removal isn't necessarily "binned"), but this is a judgment call worth a second opinion before it's built.
+
+**v2 payload schemas, field by field:**
+
+```python
+@dataclass(frozen=True, slots=True)
+class Acquired:
+    product_id: str
+    to: str  # location id
+    amount: Decimal  # canonical units
+    unit: str  # canonical unit, frozen at event time —
+    # never re-derived from current config
+    reason: str | None = None  # "correction" | "discovery" | None (ordinary purchase)
+    nominal_basis: dict[str, str] | None = None
+    # audit only, never read by the fold — e.g. {"raw_amount": "2", "raw_unit": "jar", "ratio": "340"}
+
+
+@dataclass(frozen=True, slots=True)
+class Consumed:
+    product_id: str
+    frm: str
+    amount: Decimal
+    unit: str
+    reason: str | None = None  # "correction" | None (ordinary consumption)
+
+
+@dataclass(frozen=True, slots=True)
+class Discarded:
+    product_id: str
+    frm: str
+    amount: Decimal
+    unit: str
+
+
+@dataclass(frozen=True, slots=True)
+class Moved:
+    product_id: str
+    frm: str
+    to: str
+    amount: Decimal
+    unit: str
+    nominal_basis: dict[str, str] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Counted:
+    product_id: str
+    at: str
+    amount: Decimal
+    unit: str
+    reason: str | None = None  # e.g. "implied_by_movement" (§3.5)
+    # New in v2, not produced by the v1 upcaster — v1 never recorded a
+    # single-product absolute count. Phase 4b's decide is the only producer.
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotEntry:
+    product_id: str
+    amount: Decimal
+    unit: str
+
+
+@dataclass(frozen=True, slots=True)
+class Snapshot:
+    location_id: str
+    entries: tuple[SnapshotEntry, ...]  # empty tuple is valid and means "empty"
+    # Kept as its own v2 event rather than decomposed — see above.
+
+
+@dataclass(frozen=True, slots=True)
+class Retired:
+    entity_type: Literal["location", "product"]
+    entity_id: str
+```
+
+Envelope: no new field beyond the existing `schema_version` — "ship `schema_v`" in the original Phase 4a line reads, on reflection, as "make `schema_version` discrimination drive the upcast decision," not a second version field. `type` gains new values once the writer emits v2 in Phase 4b (`"acquired"`, `"consumed"`, …, replacing today's coarse `"change"`/`"snapshot"`); 4a's writer still only ever produces `"change"`/`"snapshot"` on disk, so this only matters for the in-memory v2 objects until 4b.
+
+**Open question, deliberately not resolved:** should `Snapshot` entries carry `nominal_basis` too? Real snapshots are usually a direct physical count (already in the product's natural unit), so conversion is less likely to matter here than for a purchase — but "less likely" isn't "never." Flagging rather than deciding, since it's a small, contained addition either way.
+
+**Where the upcaster runs.** In `ledger._load`, after `RecordSchema.model_validate(obj).to_domain()` succeeds — operating on the already-validated **v1 domain object** (`models.Record`), not the raw JSON. No new pydantic ingest schema is needed for 4a: nothing on disk is v2-shaped yet (the writer still emits v1), so there's nothing to validate on ingest as v2 until Phase 4b. `upcast(v1_record: models.Record) -> list[V2Record]` is a pure domain-to-domain transform; `_load`'s `parsed.append(...)` becomes `parsed.extend(upcast(v1_record))`, since one v1 record can become more than one v2 record for... actually, given the `Snapshot`-stays-together decision above, every mapping in this design is 1:1 except none are 1:N anymore — the one case that would have been 1:N (`InventorySnapshot`) is exactly the case being kept together. Confirms the "don't decompose" call is also the simpler implementation, not just the safer one.
+
+Record ids for upcast events: since every real mapping is 1:1, the v1 record's own id carries over unchanged — no synthesized ids, no id-collision bookkeeping, no special-casing for how `supersedes` resolves across the v1/v2 boundary. Another reason the "keep Snapshot together" call is worth taking: the alternative (1:N) would have needed a resolution story for exactly this, and the real data shows 0 records currently use `supersedes` at all — so this is untested territory either way, but 1:1 keeps it simple rather than open.
+
+**Consequence for `evolve`.** Since every v1 record upcasts 1:1, `ledger._load` can upcast unconditionally and `evolve`/`build_inventory` only ever needs to fold v2 events — no permanent dual-shape fold. But *proving* the upcaster correct (the acceptance criterion below) needs both versions running side by side: today's fold (operating on `InventoryChange`/`InventorySnapshot` directly) stays as the reference implementation until the new v2 fold (operating on the types above via `match`) is shown to agree with it on the entire real log. Once proven, the v1-direct fold path is dead code and comes out — kept only long enough to be the thing being checked against.
+
+**Acceptance criterion, clarified.** "`fold(v1_events) == fold(upcast(v1_events))`" as originally stated compares holdings only, which isn't enough: an upcaster that silently turns one of the real log's 24 current `unknown_location` anomalies into a clean fold — by, say, dropping an unresolvable location reference instead of preserving it — would still show correct *holdings* everywhere it succeeded, while quietly disappearing the anomaly. The comparison must cover **both** `Inventory.by_location` and `Inventory.anomalies` (by `(record_id, reason)`, not exact `detail` text — the detail string is allowed to read differently once records carry `frm`/`to` instead of `from_location`/`to_location`, as long as the *set* of anomalous records and their reasons is unchanged). Confirmed as part of this design pass, not left for the implementation to discover.
+
 ### 3.4 Config is a validated projection
 
 Config is a stream like any other, but its fold has invariants of its own and produces the read model that `decide` validates against.
@@ -422,10 +537,10 @@ Ordered by dependency. Each phase is independently shippable and leaves the repo
 
 **Gate soundness, pulled forward from Phase 6 per the earlier review:** no sequence of commands accepted by `decide` produces an anomaly — `tests/test_decide_properties.py`, Hypothesis, in-memory (decide is pure, no files/crypto needed). It found a real bug on first run: `InventoryChange.__post_init__` raises a bare `ValueError` for a missing endpoint (e.g. `purchase` with no `--to`), which isn't a `SumacError` — uncaught, `cli.main()`'s handler wouldn't have caught it, so that command would have crashed with a raw traceback instead of a clean rejection. Fixed by catching it and raising `Rejected("missing_endpoint", ...)`; now in §4's table.
 
-**Phase 4a — Upcaster only, read path, no writes.** Ship `schema_v` on the envelope and the v1→v2 upcaster. **The writer still emits v1.** Nothing observable changes.
-*Acceptance:* `fold(v1_events) == fold(upcast(v1_events))` on the actual log, compared as full inventory output, not spot checks. If this holds, the upcaster is correct against every event ever written.
+**Phase 4a — Upcaster only, read path, no writes.** Design in §3.3a: the v2 payload types (with a `reason` field on `Acquired`/`Consumed` that isn't in §3.3's original sketch, and `Snapshot` kept as its own event rather than decomposed into per-product `Counted`), the v1→v2 mapping table, and where the upcaster sits in `_load`. **The writer still emits v1.** Nothing observable changes.
+*Acceptance, per §3.3a:* `fold(v1_events) == fold(upcast(v1_events))` on the actual log, compared as full inventory output *and* the anomaly set (by `(record_id, reason)`) — not holdings alone, since an upcaster that silently drops an anomaly would pass a holdings-only check. If this holds, the upcaster is correct against every event ever written.
 
-**Phase 4b — Writer emits v2.** Only after 4a has run for a while. Split `Change` into the distinct types of §3.3. Fully reversible: revert the writer, the upcaster keeps handling both.
+**Phase 4b — Writer emits v2.** Only after 4a has run for a while. `decide` constructs the v2 types directly (§3.3a already defines them; this phase wires the write path to them and adds the pydantic ingest schema v2 JSON needs once it's actually on disk). Fully reversible: revert the writer, the upcaster keeps handling both.
 *Acceptance:* round-trip write-then-fold produces expected state for each new event type.
 
 **Phase 5 — Corrections via supersedes.** Add the `Correction` payload type and wire `Record.supersedes` per §3.6 (semantics decided: cancel not replace, permanent claims). `sumac correct <record-id> --reason ...`. `sumac doctor` emits ready-to-paste correction commands for each anomaly.
