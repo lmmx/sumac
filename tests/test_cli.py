@@ -1,17 +1,66 @@
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from sealedlog import Vault
 from sealedlog.errors import WrongPassphraseError
 from typer.testing import CliRunner
 
-from sumac import paths
+from sumac import SCHEMA_VERSION, paths, store
+from sumac import vault as sumac_vault
 from sumac.cli import app
 from sumac.errors import RetireNonemptyError, VaultExistsError
 
 runner = CliRunner()
 PASSPHRASE_ENV = {"SUMAC_PASSPHRASE": "test-pass"}
+
+
+def _real_key(data_dir: Path) -> bytes:
+    """The actual key behind a data dir `_run(data_dir, "init")` created —
+    derived directly rather than via `sumac.passphrase`, whose env-var
+    resolution only applies inside a `CliRunner.invoke` call, not after."""
+    vault = Vault.from_dict(json.loads(paths.vault_path(data_dir).read_text(encoding="utf-8")))
+    return sumac_vault.unlock(vault, PASSPHRASE_ENV["SUMAC_PASSPHRASE"])
+
+
+def _append_raw_change(
+    data_dir: Path,
+    actor: str,
+    product_id: str,
+    amount: str,
+    unit: str,
+    *,
+    to_location: str,
+) -> None:
+    """Appends a change bypassing `decide` entirely — for tests that need a
+    record `sumac add` would now reject (e.g. an unregistered location), to
+    exercise the read-side tolerance (`status`/`find`/`doctor`) rather than
+    the write-side gate."""
+    key = _real_key(data_dir)
+    store.append(
+        data_dir,
+        key,
+        f"log:{actor}",
+        {
+            "schema_version": SCHEMA_VERSION,
+            "type": "change",
+            "id": "raw-1",
+            "ts": datetime.now(UTC).isoformat(),
+            "actor": actor,
+            "supersedes": None,
+            "payload": {
+                "kind": "purchase",
+                "product_id": product_id,
+                "quantity": {"amount": amount, "unit": unit},
+                "from_location": None,
+                "to_location": to_location,
+                "metadata": {},
+            },
+        },
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -134,8 +183,11 @@ def test_check_units_clean_when_nothing_observed(data_dir: Path) -> None:
 
 
 def test_check_units_suggests_command_for_unregistered_product(data_dir: Path) -> None:
+    """`sumac add` now auto-registers on first use (Phase 3), so an
+    unregistered product can no longer arise through it — check-units is a
+    legacy-data tool now. Simulate a pre-decide record directly."""
     _run(data_dir, "init")
-    _run(data_dir, "add", "purchase", "milk", "1", "l", "--to", "pantry")
+    _append_raw_change(data_dir, "alice", "milk", "1", "l", to_location="pantry")
     result = _run(data_dir, "config", "check-units")
     assert result.exit_code == 1
     assert "milk" in result.output
@@ -143,10 +195,11 @@ def test_check_units_suggests_command_for_unregistered_product(data_dir: Path) -
 
 
 def test_check_units_flags_unconvertible_unit_for_registered_product(data_dir: Path) -> None:
+    """Same reasoning: decide now rejects unit_unconvertible at write time,
+    so this shape is legacy-data-only too."""
     _run(data_dir, "init")
     _run(data_dir, "config", "add-product", "Flour", "kg", "--id", "flour")
-    _run(data_dir, "add", "purchase", "flour", "1", "kg", "--to", "pantry")
-    _run(data_dir, "add", "purchase", "flour", "1", "lb", "--to", "pantry")
+    _append_raw_change(data_dir, "alice", "flour", "1", "lb", to_location="pantry")
     result = _run(data_dir, "config", "check-units")
     assert result.exit_code == 1
     assert "lb" in result.output
@@ -185,7 +238,7 @@ def test_snapshot_and_find(data_dir: Path) -> None:
 
 def test_find_shows_anomaly_banner(data_dir: Path) -> None:
     _run(data_dir, "init")
-    _run(data_dir, "add", "purchase", "milk", "1", "l", "--to", "hob-right-below-bottom")
+    _append_raw_change(data_dir, "alice", "milk", "1", "l", to_location="hob-right-below-bottom")
     result = _run(data_dir, "find", "milk")
     assert "could not be applied" in result.output
 
@@ -218,7 +271,7 @@ def test_doctor_clean_log(data_dir: Path) -> None:
 
 def test_doctor_flags_unknown_location(data_dir: Path) -> None:
     _run(data_dir, "init")
-    _run(data_dir, "add", "purchase", "milk", "1", "l", "--to", "hob-right-below-bottom")
+    _append_raw_change(data_dir, "alice", "milk", "1", "l", to_location="hob-right-below-bottom")
     result = _run(data_dir, "doctor")
     assert result.exit_code == 1
     assert "unknown_location" in result.output
@@ -226,6 +279,7 @@ def test_doctor_flags_unknown_location(data_dir: Path) -> None:
 
 def test_log_shows_recorded_events(data_dir: Path) -> None:
     _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
     _run(data_dir, "add", "purchase", "milk", "1", "l", "--to", "pantry")
     result = _run(data_dir, "log")
     assert result.exit_code == 0
@@ -286,6 +340,7 @@ def test_another_user_cannot_write_into_alices_log(
     data_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
     _run(data_dir, "add", "purchase", "milk", "1", "l", "--to", "pantry")
 
     monkeypatch.setattr("getpass.getuser", lambda: "bob")

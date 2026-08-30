@@ -22,6 +22,10 @@ def print_error(message: str) -> None:
     error_console.print(f"[red]✗ error:[/red] {message}")
 
 
+def print_warning(message: str) -> None:
+    console.print(f"[yellow]⚠[/yellow] {message}")
+
+
 def print_locations(locations: dict[str, models.Location]) -> None:
     if not locations:
         console.print("[yellow]no locations configured yet[/yellow]")

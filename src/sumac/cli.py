@@ -18,6 +18,7 @@ from sumac import (
     FORMAT_VERSION,
     SCHEMA_VERSION,
     config,
+    decide,
     ledger,
     models,
     paths,
@@ -26,7 +27,7 @@ from sumac import (
 )
 from sumac import vault as sumac_vault
 from sumac.errors import RetireNonemptyError, SumacError, VaultExistsError, VaultNotFoundError
-from sumac.models import ChangeKind, InventoryChange, InventorySnapshot, Quantity, SnapshotEntry
+from sumac.models import ChangeKind, InventorySnapshot, Quantity, SnapshotEntry
 from sumac.passphrase import get_key, resolve_passphrase
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
@@ -72,25 +73,6 @@ def _parse_snapshot_entry(spec: str) -> SnapshotEntry:
 
 def _quantity_obj(q: Quantity) -> dict:
     return {"amount": str(q.amount), "unit": q.unit}
-
-
-def _change_to_obj(record_id: str, ts: datetime, actor: str, change: InventoryChange) -> dict:
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "type": "change",
-        "id": record_id,
-        "ts": ts.isoformat(),
-        "actor": actor,
-        "supersedes": None,
-        "payload": {
-            "kind": change.kind.value,
-            "product_id": change.product_id,
-            "quantity": _quantity_obj(change.quantity),
-            "from_location": change.from_location,
-            "to_location": change.to_location,
-            "metadata": dict(change.metadata),
-        },
-    }
 
 
 def _snapshot_to_obj(record_id: str, ts: datetime, actor: str, snap: InventorySnapshot) -> dict:
@@ -276,15 +258,22 @@ def add(
     correction, or movement between locations."""
     key = _key(data_dir)
     actor = paths.current_user()
-    change = InventoryChange(
+    cfg = config.build_config(data_dir, key)
+    writes, warning = decide.decide_change(
         kind=kind,
         product_id=product_id,
-        quantity=Quantity(amount=_parse_decimal(amount), unit=unit),
+        amount=_parse_decimal(amount),
+        unit=unit,
         from_location=from_location,
         to_location=to_location,
+        actor=actor,
+        occurred_at=datetime.now(UTC),
+        cfg=cfg,
     )
-    obj = _change_to_obj(str(uuid4()), datetime.now(UTC), actor, change)
-    store.append(data_dir, key, f"log:{actor}", obj)
+    if warning:
+        render.print_warning(warning)
+    for w in writes:
+        store.append(data_dir, key, w.stream, w.obj)
     render.print_success(f"Recorded {kind.value} of {amount} {unit} {product_id}")
 
 
