@@ -126,6 +126,42 @@ def test_retire_unknown_product_fails(data_dir: Path) -> None:
     assert result.exit_code != 0
 
 
+def test_check_units_clean_when_nothing_observed(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    result = _run(data_dir, "config", "check-units")
+    assert result.exit_code == 0
+    assert "every observed" in result.output
+
+
+def test_check_units_suggests_command_for_unregistered_product(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "add", "purchase", "milk", "1", "l", "--to", "pantry")
+    result = _run(data_dir, "config", "check-units")
+    assert result.exit_code == 1
+    assert "milk" in result.output
+    assert "add-product" in result.output
+
+
+def test_check_units_flags_unconvertible_unit_for_registered_product(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-product", "Flour", "kg", "--id", "flour")
+    _run(data_dir, "add", "purchase", "flour", "1", "kg", "--to", "pantry")
+    _run(data_dir, "add", "purchase", "flour", "1", "lb", "--to", "pantry")
+    result = _run(data_dir, "config", "check-units")
+    assert result.exit_code == 1
+    assert "lb" in result.output
+    assert "unregistered" not in result.output.lower()
+
+
+def test_check_units_clean_when_registered_and_convertible(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-product", "Flour", "kg", "--id", "flour")
+    _run(data_dir, "add", "purchase", "flour", "1", "kg", "--to", "pantry")
+    result = _run(data_dir, "config", "check-units")
+    assert result.exit_code == 0
+    assert "every observed" in result.output
+
+
 def test_add_change_and_status(data_dir: Path) -> None:
     _run(data_dir, "init")
     _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")

@@ -41,10 +41,14 @@ class Location:
 class Product:
     id: str
     name: str
-    unit: str
+    unit: str  # canonical unit; nominal, not authoritative — see Config.convert
     category: str | None = None
     metadata: Mapping[str, JsonValue] = field(default_factory=dict)
     retired: bool = False
+    # alt unit -> how many canonical units one of it equals, e.g. {"jar": 340}
+    # for a canonical unit of "g" meaning 1 jar = 340 g. Nominal, not exact —
+    # see Config.convert and §3.4(c) of the design journal.
+    conversions: Mapping[str, Decimal] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

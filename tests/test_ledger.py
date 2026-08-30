@@ -478,3 +478,54 @@ def test_build_inventory_folds_movement_to_retired_location(
     inventory = ledger.build_inventory(data_dir, key)
     assert inventory.at("pantry")["milk"].amount == Decimal("1")
     assert inventory.anomalies == ()
+
+
+def test_observed_product_units_tallies_changes_and_snapshots(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _change_obj("c1", T0, osuser, "purchase", "flour", "1", "kg", to_location="pantry"),
+    )
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _change_obj(
+            "c2",
+            T0 + timedelta(minutes=1),
+            osuser,
+            "purchase",
+            "flour",
+            "1",
+            "lb",
+            to_location="pantry",
+        ),
+    )
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _snapshot_obj("s1", T0 + timedelta(minutes=2), osuser, "pantry", [("flour", "2", "kg")]),
+    )
+    observed = ledger.observed_product_units(data_dir, key)
+    assert observed["flour"] == {"kg": 2, "lb": 1}
+
+
+def test_observed_product_units_includes_records_that_cannot_fold(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    """Backfill needs what was actually written, not just what currently folds —
+    a movement to an unregistered location still recorded a real unit."""
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _change_obj(
+            "c1", T0, osuser, "purchase", "milk", "1", "l", to_location="hob-right-below-bottom"
+        ),
+    )
+    observed = ledger.observed_product_units(data_dir, key)
+    assert observed["milk"] == {"l": 1}

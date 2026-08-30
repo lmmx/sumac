@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -64,6 +65,7 @@ def add_product(data_dir: Path, key: bytes, actor: str, product: models.Product)
             "category": product.category,
             "metadata": dict(product.metadata),
             "retired": product.retired,
+            "conversions": {u: str(r) for u, r in product.conversions.items()},
         },
     }
     store.append(data_dir, key, store.CONFIG_STREAM_ID, obj)
@@ -166,6 +168,24 @@ class Config:
     known_products: dict[str, models.Product]
     active_products: dict[str, models.Product]
     anomalies: tuple[models.Anomaly, ...]
+
+    def convert(self, product_id: str, amount: Decimal, unit: str) -> models.Quantity | None:
+        """`amount` of `unit` expressed in `product_id`'s canonical unit, or `None`
+        if `product_id` isn't known or `unit` has no conversion path to it. Nominal,
+        per §3.4(c): resolved once at decide-time and frozen into the event — never
+        called from `evolve`, which never converts."""
+        product = self.known_products.get(product_id)
+        if product is None:
+            return None
+        if unit == product.unit:
+            return models.Quantity(amount, product.unit)
+        ratio = product.conversions.get(unit)
+        if ratio is None:
+            return None
+        return models.Quantity(amount * ratio, product.unit)
+
+    def can_convert(self, product_id: str, unit: str) -> bool:
+        return self.convert(product_id, Decimal(0), unit) is not None
 
 
 def build_config(data_dir: Path, key: bytes) -> Config:

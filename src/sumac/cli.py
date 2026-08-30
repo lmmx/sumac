@@ -199,6 +199,19 @@ def config_retire_product(
     render.print_success(f"Retired product {id!r}")
 
 
+@config_app.command("check-units")
+def config_check_units(data_dir: DataDirOption = Path("data")) -> None:
+    """For every product observed in the log, report unregistered products
+    (with a suggested `add-product` using their most-common observed unit)
+    and registered products with a unit that doesn't convert to canonical."""
+    key = _key(data_dir)
+    observed = ledger.observed_product_units(data_dir, key)
+    cfg = config.build_config(data_dir, key)
+    ok = render.print_unit_check(observed, cfg)
+    if not ok:
+        raise typer.Exit(code=1)
+
+
 def _location_id_prefix(parent: str | None, name: str, id_prefix: str | None) -> str:
     if id_prefix:
         return id_prefix

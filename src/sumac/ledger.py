@@ -13,6 +13,7 @@ what already made it into the log, via `Anomaly`.
 
 from __future__ import annotations
 
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -69,6 +70,25 @@ def load_records(data_dir: Path, key: bytes) -> list[Record]:
     """All live records (superseded ones dropped, unfoldable ones dropped as
     anomalies), ordered for deterministic folding."""
     return _load(data_dir, key).records
+
+
+def observed_product_units(data_dir: Path, key: bytes) -> dict[str, Counter[str]]:
+    """For every product_id recorded in a change or snapshot entry, how many
+    times each unit was used with it — including records the fold can't yet
+    apply for unrelated reasons (unknown location, etc.), since the point is
+    what units were actually written, not what currently folds.
+
+    Feeds Phase 2c's canonical-unit backfill: a product's most-observed unit is
+    a reasonable canonical-unit default, and `sumac config check-units` uses
+    this to find (product, unit) pairs `Config.convert` can't yet resolve."""
+    counts: dict[str, Counter[str]] = defaultdict(Counter)
+    for r in _load(data_dir, key).records:
+        if isinstance(r.payload, InventoryChange):
+            counts[r.payload.product_id][r.payload.quantity.unit] += 1
+        elif isinstance(r.payload, InventorySnapshot):
+            for entry in r.payload.entries:
+                counts[entry.product_id][entry.quantity.unit] += 1
+    return dict(counts)
 
 
 def load_locations_or_empty(data_dir: Path, key: bytes) -> dict[str, Location]:

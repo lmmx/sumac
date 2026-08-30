@@ -46,6 +46,17 @@ class ProductSchema(BaseModel):
     category: str | None = None
     metadata: MetadataDict
     retired: bool = False
+    conversions: dict[str, Decimal] = Field(default_factory=dict)
+
+    @field_validator("conversions", mode="before")
+    @classmethod
+    def _parse_conversions(cls, v: object) -> dict[str, Decimal]:
+        if not isinstance(v, dict):
+            raise ValueError(f"conversions must be a mapping, got {v!r}")
+        try:
+            return {str(unit): Decimal(str(ratio)) for unit, ratio in v.items()}
+        except InvalidOperation as e:
+            raise ValueError(f"invalid decimal in conversions: {v!r}") from e
 
     def to_domain(self) -> models.Product:
         return models.Product(
@@ -55,6 +66,7 @@ class ProductSchema(BaseModel):
             category=self.category,
             metadata=self.metadata,
             retired=self.retired,
+            conversions=self.conversions,
         )
 
 

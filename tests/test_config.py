@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
 from sumac import SCHEMA_VERSION, config, paths, store
 from sumac.errors import UnknownLocationError, UnknownProductError
-from sumac.models import Location, Product
+from sumac.models import Location, Product, Quantity
 
 
 def test_add_and_load_location(data_dir: Path, osuser: str, key: bytes) -> None:
@@ -272,3 +273,69 @@ def test_corrupted_config_line_becomes_anomaly_others_still_resolve(
     cfg = config.build_config(data_dir, key)
     assert any(a.reason == "line_failure" for a in cfg.anomalies)
     assert set(cfg.known_locations) == {"fridge", "pantry"}
+
+
+def test_product_conversions_round_trip(data_dir: Path, osuser: str, key: bytes) -> None:
+    product = Product(
+        id="rice-pudding",
+        name="Rice Pudding",
+        unit="g",
+        conversions={"jar": Decimal("340")},
+    )
+    config.add_product(data_dir, key, osuser, product)
+    loaded = config.load_products(data_dir, key)["rice-pudding"]
+    assert loaded.unit == "g"
+    assert loaded.conversions == {"jar": Decimal("340")}
+
+
+def test_convert_identity_when_unit_matches_canonical(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    config.add_product(data_dir, key, osuser, Product(id="milk", name="Milk", unit="l"))
+    cfg = config.build_config(data_dir, key)
+    assert cfg.convert("milk", Decimal("2"), "l") == Quantity(Decimal("2"), "l")
+
+
+def test_convert_applies_conversion_ratio(data_dir: Path, osuser: str, key: bytes) -> None:
+    config.add_product(
+        data_dir,
+        key,
+        osuser,
+        Product(
+            id="rice-pudding", name="Rice Pudding", unit="g", conversions={"jar": Decimal("340")}
+        ),
+    )
+    cfg = config.build_config(data_dir, key)
+    result = cfg.convert("rice-pudding", Decimal("2"), "jar")
+    assert result is not None
+    assert result.amount == Decimal("680")
+    assert result.unit == "g"
+
+
+def test_convert_returns_none_for_unknown_product(data_dir: Path, osuser: str, key: bytes) -> None:
+    cfg = config.build_config(data_dir, key)
+    assert cfg.convert("nonexistent", Decimal("1"), "l") is None
+
+
+def test_convert_returns_none_for_unconvertible_unit(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    config.add_product(data_dir, key, osuser, Product(id="milk", name="Milk", unit="l"))
+    cfg = config.build_config(data_dir, key)
+    assert cfg.convert("milk", Decimal("1"), "kg") is None
+
+
+def test_can_convert_mirrors_convert(data_dir: Path, osuser: str, key: bytes) -> None:
+    config.add_product(
+        data_dir,
+        key,
+        osuser,
+        Product(
+            id="rice-pudding", name="Rice Pudding", unit="g", conversions={"jar": Decimal("340")}
+        ),
+    )
+    cfg = config.build_config(data_dir, key)
+    assert cfg.can_convert("rice-pudding", "g") is True
+    assert cfg.can_convert("rice-pudding", "jar") is True
+    assert cfg.can_convert("rice-pudding", "oz") is False
+    assert cfg.can_convert("nonexistent", "g") is False

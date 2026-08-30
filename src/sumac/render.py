@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections import Counter
+
 from rich.console import Console
 from rich.table import Table
 from rich.tree import Tree
@@ -62,6 +64,46 @@ def print_products(products: dict[str, models.Product]) -> None:
             "[dim]retired[/dim]" if p.retired else "",
         )
     console.print(table)
+
+
+def print_unit_check(observed: dict[str, Counter[str]], cfg: config.Config) -> bool:
+    """Returns True if every observed (product, unit) pair converts cleanly."""
+    unregistered: list[tuple[str, str]] = []  # (product_id, suggested add-product command)
+    unconvertible: list[tuple[str, str, int]] = []  # (product_id, unit, times observed)
+
+    for product_id, units in sorted(observed.items()):
+        product = cfg.known_products.get(product_id)
+        if product is None:
+            canonical, _count = units.most_common(1)[0]
+            cmd = f"sumac config add-product {product_id} {canonical} --id {product_id}"
+            unregistered.append((product_id, cmd))
+            continue
+        for unit, n in sorted(units.items()):
+            if not cfg.can_convert(product_id, unit):
+                unconvertible.append((product_id, unit, n))
+
+    if not unregistered and not unconvertible:
+        console.print("[green]✓ every observed product/unit pair converts[/green]")
+        return True
+
+    if unregistered:
+        table = Table(title=f"{len(unregistered)} unregistered products")
+        table.add_column("product")
+        table.add_column("suggested command")
+        for product_id, cmd in unregistered:
+            table.add_row(product_id, cmd)
+        console.print(table)
+
+    if unconvertible:
+        table = Table(title=f"{len(unconvertible)} (product, unit) pairs need a conversion")
+        table.add_column("product")
+        table.add_column("unit")
+        table.add_column("times observed", justify="right")
+        for product_id, unit, n in unconvertible:
+            table.add_row(product_id, unit, str(n))
+        console.print(table)
+
+    return False
 
 
 def print_anomaly_banner(anomalies: tuple[models.Anomaly, ...]) -> None:
