@@ -12,8 +12,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from sumac import SCHEMA_VERSION, paths, store
-from sumac.errors import SchemaVersionError
+from pydantic import ValidationError
+from sealedlog.errors import SealError
+
+from sumac import SCHEMA_VERSION, config, paths, store
+from sumac.errors import SchemaVersionError, SumacError
 from sumac.models import InventoryChange, InventorySnapshot, Quantity, Record
 from sumac.schemas import RecordSchema
 
@@ -112,3 +115,91 @@ def verify_all(data_dir: Path, key: bytes) -> VerifyResult:
 
     ok = not line_failures and not actor_mismatches
     return VerifyResult(ok=ok, line_failures=line_failures, actor_mismatches=actor_mismatches)
+
+
+@dataclass(frozen=True, slots=True)
+class DoctorFinding:
+    """One record (or line) that a tolerant fold could not apply.
+
+    Phase 0 of docs/journal/2026-08-30_decide-pattern-data-integrity-upgrade.md — diagnostic
+    only, superseded by the real `Anomaly` channel in Phase 1."""
+
+    path: Path
+    record_id: str | None
+    reason: str
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class DoctorReport:
+    findings: tuple[DoctorFinding, ...]
+    total_lines: int
+
+
+def diagnose(data_dir: Path, key: bytes) -> DoctorReport:
+    """Tolerant fold: never raises, reports every line/record it could not apply.
+
+    Line-level decrypt/auth failures use `store.verify_stream` (already tolerant).
+    Record-level schema and domain-construction failures, and fold-time failures
+    (unit mismatch, unknown location), are caught here since `RecordSchema.to_domain()`
+    and `_apply_delta` both raise today."""
+    findings: list[DoctorFinding] = []
+    total_lines = 0
+    raw: list[tuple[Path, dict]] = []
+
+    for log_path in paths.all_log_paths(data_dir):
+        stream_id = f"log:{log_path.stem}"
+        objs, failures = store.verify_stream(log_path, key, stream_id)
+        total_lines += len(objs) + len(failures)
+        for f in failures:
+            findings.append(DoctorFinding(f.path, None, "line_failure", f.error))
+        raw.extend((log_path, obj) for obj in objs)
+
+    parsed: list[tuple[Path, Record]] = []
+    for path, obj in raw:
+        record_id = obj.get("id") if isinstance(obj, dict) else None
+        version = obj.get("schema_version") if isinstance(obj, dict) else None
+        if isinstance(version, int) and version > SCHEMA_VERSION:
+            findings.append(
+                DoctorFinding(path, record_id, "schema_too_new", f"schema_version={version}")
+            )
+            continue
+        try:
+            parsed.append((path, RecordSchema.model_validate(obj).to_domain()))
+        except (ValidationError, ValueError) as e:
+            findings.append(DoctorFinding(path, record_id, "invalid_record", str(e)))
+
+    superseded = {r.supersedes for _, r in parsed if r.supersedes is not None}
+    live = [(path, r) for path, r in parsed if r.id not in superseded]
+    live.sort(key=lambda item: (item[1].ts, item[1].actor, item[1].id))
+
+    try:
+        locations = config.load_locations(data_dir, key)
+    except (SumacError, SealError, ValidationError) as e:
+        findings.append(
+            DoctorFinding(paths.config_path(data_dir), None, "config_unreadable", str(e))
+        )
+        locations = {}
+    state: dict[str, dict[str, Quantity]] = {}
+
+    for path, r in live:
+        if isinstance(r.payload, InventorySnapshot):
+            loc_id = r.payload.location_id
+            if loc_id not in locations:
+                findings.append(DoctorFinding(path, r.id, "unknown_location", loc_id))
+            state[loc_id] = {e.product_id: e.quantity for e in r.payload.entries}
+            continue
+
+        change = r.payload
+        for loc_id in (change.from_location, change.to_location):
+            if loc_id is not None and loc_id not in locations:
+                findings.append(DoctorFinding(path, r.id, "unknown_location", loc_id))
+        try:
+            if change.from_location is not None:
+                _apply_delta(state, change.from_location, change.product_id, -change.quantity)
+            if change.to_location is not None:
+                _apply_delta(state, change.to_location, change.product_id, change.quantity)
+        except ValueError as e:
+            findings.append(DoctorFinding(path, r.id, "unit_mismatch", str(e)))
+
+    return DoctorReport(findings=tuple(findings), total_lines=total_lines)

@@ -90,6 +90,23 @@ def test_verify_detects_tampering(data_dir: Path) -> None:
     assert result.exit_code != 0
 
 
+def test_doctor_clean_log(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "add", "purchase", "milk", "1", "l", "--to", "pantry")
+    result = _run(data_dir, "doctor")
+    assert result.exit_code == 0, result.output
+    assert "no anomalies" in result.output
+
+
+def test_doctor_flags_unknown_location(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "add", "purchase", "milk", "1", "l", "--to", "hob-right-below-bottom")
+    result = _run(data_dir, "doctor")
+    assert result.exit_code == 1
+    assert "unknown_location" in result.output
+
+
 def test_log_shows_recorded_events(data_dir: Path) -> None:
     _run(data_dir, "init")
     _run(data_dir, "add", "purchase", "milk", "1", "l", "--to", "pantry")

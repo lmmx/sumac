@@ -113,6 +113,20 @@ def print_log(records: list[models.Record]) -> None:
     console.print(table)
 
 
+def print_doctor(report: ledger.DoctorReport) -> None:
+    if not report.findings:
+        console.print(f"[green]✓ {report.total_lines} lines, no anomalies[/green]")
+        return
+    table = Table(title=f"{len(report.findings)} anomalies out of {report.total_lines} lines")
+    table.add_column("reason")
+    table.add_column("record")
+    table.add_column("path")
+    table.add_column("detail")
+    for f in report.findings:
+        table.add_row(f.reason, f.record_id or "-", str(f.path), f.detail)
+    console.print(table)
+
+
 def print_verify(result: ledger.VerifyResult) -> None:
     if result.ok:
         console.print("[green]✓ all lines verified[/green]")

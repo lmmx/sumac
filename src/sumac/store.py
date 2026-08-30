@@ -88,7 +88,12 @@ def verify_stream(path: Path, key: bytes, stream_id: str) -> tuple[list[dict], l
     failures: list[LineFailure] = []
     for lineno, line in enumerate(_read_lines(path), start=1):
         try:
-            ok.append(json.loads(aead.open_(key, aad, line)))
+            plaintext = aead.open_(key, aad, line)
         except AuthenticationError as e:
             failures.append(LineFailure(path=path, lineno=lineno, error=str(e)))
+            continue
+        try:
+            ok.append(json.loads(plaintext))
+        except json.JSONDecodeError as e:
+            failures.append(LineFailure(path=path, lineno=lineno, error=f"not valid JSON: {e}"))
     return ok, failures

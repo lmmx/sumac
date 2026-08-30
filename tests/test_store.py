@@ -3,8 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from sealedlog import aead
+from sealedlog._aad import build_aad
 
-from sumac import paths, store
+from sumac import NAMESPACE, paths, store
 from sumac.errors import ForeignStreamError
 
 
@@ -55,6 +57,24 @@ def test_verify_stream_reports_line_and_position(data_dir: Path, osuser: str, ke
     assert ok == []
     assert len(failures) == 1
     assert failures[0].lineno == 1
+
+
+def test_verify_stream_reports_authenticated_non_json_line(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    """A line that authenticates but whose plaintext isn't JSON must be a LineFailure,
+    not an uncaught JSONDecodeError — this is what makes verify_stream (and doctor,
+    which relies on it) genuinely tolerant rather than tolerant-except-for-this."""
+    path = paths.log_path(data_dir, osuser)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    aad = build_aad(NAMESPACE, f"log:{osuser}")
+    sealed = aead.seal(key, aad, b"not json{")
+    path.write_text(sealed + "\n")
+
+    ok, failures = store.verify_stream(path, key, f"log:{osuser}")
+    assert ok == []
+    assert len(failures) == 1
+    assert "JSON" in failures[0].error
 
 
 def test_iter_all_logs_spans_users(

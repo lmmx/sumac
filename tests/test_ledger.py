@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from sumac import SCHEMA_VERSION, ledger, store
+from sumac import SCHEMA_VERSION, config, ledger, models, paths, store
 from sumac.errors import SchemaVersionError
 
 T0 = datetime(2026, 1, 1, tzinfo=None).astimezone()
@@ -230,3 +230,113 @@ def test_verify_all_ok_on_clean_data(data_dir: Path, osuser: str, key: bytes) ->
     )
     result = ledger.verify_all(data_dir, key)
     assert result.ok
+
+
+def test_diagnose_clean_log_has_no_findings(data_dir: Path, osuser: str, key: bytes) -> None:
+    config.add_location(data_dir, key, osuser, models.Location(id="fridge", name="Fridge"))
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _change_obj("c1", T0, osuser, "purchase", "milk", "1", "l", to_location="fridge"),
+    )
+    report = ledger.diagnose(data_dir, key)
+    assert report.findings == ()
+    assert report.total_lines == 1
+
+
+def test_diagnose_flags_unknown_location(data_dir: Path, osuser: str, key: bytes) -> None:
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _change_obj(
+            "c1",
+            T0,
+            osuser,
+            "movement",
+            "milk",
+            "1",
+            "l",
+            from_location="pantry",
+            to_location="hob-right-below-bottom",
+        ),
+    )
+    report = ledger.diagnose(data_dir, key)
+    reasons = {(f.reason, f.detail) for f in report.findings}
+    assert ("unknown_location", "pantry") in reasons
+    assert ("unknown_location", "hob-right-below-bottom") in reasons
+
+
+def test_diagnose_does_not_raise_on_unit_mismatch(data_dir: Path, osuser: str, key: bytes) -> None:
+    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _change_obj("c1", T0, osuser, "purchase", "flour", "1", "kg", to_location="pantry"),
+    )
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _change_obj(
+            "c2",
+            T0 + timedelta(minutes=1),
+            osuser,
+            "purchase",
+            "flour",
+            "1",
+            "lb",
+            to_location="pantry",
+        ),
+    )
+    report = ledger.diagnose(data_dir, key)
+    assert any(f.reason == "unit_mismatch" for f in report.findings)
+
+
+def test_diagnose_does_not_raise_on_malformed_movement(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    obj = _change_obj("c1", T0, osuser, "movement", "milk", "1", "l", to_location="pantry")
+    obj["payload"]["from_location"] = None  # movement missing an endpoint
+    store.append(data_dir, key, f"log:{osuser}", obj)
+    report = ledger.diagnose(data_dir, key)
+    assert any(f.reason == "invalid_record" for f in report.findings)
+
+
+def test_diagnose_reports_line_failures(data_dir: Path, osuser: str, key: bytes) -> None:
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _change_obj("c1", T0, osuser, "purchase", "milk", "1", "l", to_location="fridge"),
+    )
+    log_path = paths.log_path(data_dir, osuser)
+    with log_path.open("a", encoding="utf-8") as f:
+        f.write("not-valid-base64!!!\n")
+    report = ledger.diagnose(data_dir, key)
+    assert any(f.reason == "line_failure" for f in report.findings)
+
+
+def test_diagnose_does_not_raise_on_unreadable_config(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    """`config.load_locations` raises when a config line fails to decrypt (it uses
+    `SealedLog.__iter__`, which stops at the first bad line), so it's a genuine current
+    crash path for `diagnose` — unlike a circular parent, which `load_locations` doesn't
+    detect at all yet (that's Phase 2a's `build_config`, not implemented here)."""
+    config.add_location(data_dir, key, osuser, models.Location(id="fridge", name="Fridge"))
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _change_obj("c1", T0, osuser, "purchase", "milk", "1", "l", to_location="fridge"),
+    )
+    config_path = paths.config_path(data_dir)
+    with config_path.open("a", encoding="utf-8") as f:
+        f.write("not-valid-base64!!!\n")
+
+    report = ledger.diagnose(data_dir, key)
+    assert any(f.reason == "config_unreadable" for f in report.findings)
+    assert any(f.reason == "unknown_location" and f.detail == "fridge" for f in report.findings)

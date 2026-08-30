@@ -292,6 +292,16 @@ def verify(data_dir: DataDirOption = Path("data")) -> None:
         raise typer.Exit(code=1)
 
 
+@app.command()
+def doctor(data_dir: DataDirOption = Path("data")) -> None:
+    """Tolerant fold: report every record that cannot be applied, without crashing."""
+    key = _key(data_dir)
+    report = ledger.diagnose(data_dir, key)
+    render.print_doctor(report)
+    if report.findings:
+        raise typer.Exit(code=1)
+
+
 def main() -> None:
     try:
         app()
