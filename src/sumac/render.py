@@ -64,7 +64,7 @@ def print_products(products: dict[str, models.Product]) -> None:
     console.print(table)
 
 
-def print_anomaly_banner(anomalies: tuple[ledger.Anomaly, ...]) -> None:
+def print_anomaly_banner(anomalies: tuple[models.Anomaly, ...]) -> None:
     if anomalies:
         n = len(anomalies)
         event = "event" if n == 1 else "events"

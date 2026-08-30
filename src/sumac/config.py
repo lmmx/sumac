@@ -14,8 +14,10 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sumac import SCHEMA_VERSION, models, store
-from sumac.errors import SchemaVersionError, UnknownLocationError, UnknownProductError
+from pydantic import ValidationError
+
+from sumac import SCHEMA_VERSION, models, paths, store
+from sumac.errors import UnknownLocationError, UnknownProductError
 from sumac.schemas import ConfigRecordSchema
 
 
@@ -47,20 +49,7 @@ def retire_location(data_dir: Path, key: bytes, actor: str, location_id: str) ->
 def load_locations(data_dir: Path, key: bytes) -> dict[str, models.Location]:
     """Latest-ts-wins per location id. Every location ever defined, retired or
     not — this is `known_locations`; see `build_config` for `active_locations`."""
-    latest: dict[str, tuple[datetime, models.Location]] = {}
-    for obj in store.iter_stream(data_dir, key, store.CONFIG_STREAM_ID):
-        if obj["schema_version"] > SCHEMA_VERSION:
-            raise SchemaVersionError(
-                f"config record schema_version {obj['schema_version']} is newer than "
-                f"supported ({SCHEMA_VERSION}); upgrade sumac"
-            )
-        record = ConfigRecordSchema.model_validate(obj)
-        if record.location is None:
-            continue
-        prior = latest.get(record.location.id)
-        if prior is None or record.ts >= prior[0]:
-            latest[record.location.id] = (record.ts, record.location.to_domain())
-    return {loc_id: loc for loc_id, (_, loc) in latest.items()}
+    return _load_config_records(data_dir, key).locations
 
 
 def add_product(data_dir: Path, key: bytes, actor: str, product: models.Product) -> None:
@@ -94,20 +83,60 @@ def retire_product(data_dir: Path, key: bytes, actor: str, product_id: str) -> N
 def load_products(data_dir: Path, key: bytes) -> dict[str, models.Product]:
     """Latest-ts-wins per product id. Every product ever defined, retired or
     not — this is `known_products`; see `build_config` for `active_products`."""
-    latest: dict[str, tuple[datetime, models.Product]] = {}
-    for obj in store.iter_stream(data_dir, key, store.CONFIG_STREAM_ID):
-        if obj["schema_version"] > SCHEMA_VERSION:
-            raise SchemaVersionError(
-                f"config record schema_version {obj['schema_version']} is newer than "
-                f"supported ({SCHEMA_VERSION}); upgrade sumac"
-            )
-        record = ConfigRecordSchema.model_validate(obj)
-        if record.product is None:
+    return _load_config_records(data_dir, key).products
+
+
+@dataclass(frozen=True, slots=True)
+class _ConfigLoadResult:
+    locations: dict[str, models.Location]
+    products: dict[str, models.Product]
+    anomalies: list[models.Anomaly]
+
+
+def _load_config_records(data_dir: Path, key: bytes) -> _ConfigLoadResult:
+    """One pass over the config stream, building both dicts — `load_locations`
+    and `load_products` are thin wrappers over this rather than each doing
+    their own pass.
+
+    Total, like `ledger._load`: a bad line (decrypt failure), a record naming
+    neither or both of location/product, or a too-new `schema_version` each
+    become an anomaly and are skipped, never a raise. One bad config line must
+    not make the rest of config unreadable — same blast-radius concern §3.1
+    raises for the main log, just one layer up the stack."""
+    latest_locations: dict[str, tuple[datetime, models.Location]] = {}
+    latest_products: dict[str, tuple[datetime, models.Product]] = {}
+    anomalies: list[models.Anomaly] = []
+
+    objs, failures = store.verify_stream(paths.config_path(data_dir), key, store.CONFIG_STREAM_ID)
+    for f in failures:
+        anomalies.append(models.Anomaly(None, "line_failure", f"{f.path}:{f.lineno}: {f.error}"))
+
+    for obj in objs:
+        version = obj.get("schema_version") if isinstance(obj, dict) else None
+        if isinstance(version, int) and version > SCHEMA_VERSION:
+            anomalies.append(models.Anomaly(None, "schema_too_new", f"schema_version={version}"))
             continue
-        prior = latest.get(record.product.id)
-        if prior is None or record.ts >= prior[0]:
-            latest[record.product.id] = (record.ts, record.product.to_domain())
-    return {prod_id: p for prod_id, (_, p) in latest.items()}
+        try:
+            record = ConfigRecordSchema.model_validate(obj)
+        except ValidationError as e:
+            anomalies.append(models.Anomaly(None, "invalid_config_record", str(e)))
+            continue
+
+        if record.location is not None:
+            prior = latest_locations.get(record.location.id)
+            if prior is None or record.ts >= prior[0]:
+                latest_locations[record.location.id] = (record.ts, record.location.to_domain())
+        else:
+            assert record.product is not None
+            prior = latest_products.get(record.product.id)
+            if prior is None or record.ts >= prior[0]:
+                latest_products[record.product.id] = (record.ts, record.product.to_domain())
+
+    return _ConfigLoadResult(
+        locations={loc_id: loc for loc_id, (_, loc) in latest_locations.items()},
+        products={prod_id: p for prod_id, (_, p) in latest_products.items()},
+        anomalies=anomalies,
+    )
 
 
 def _detect_location_cycles(known: dict[str, models.Location]) -> tuple[models.Anomaly, ...]:
@@ -140,16 +169,18 @@ class Config:
 
 
 def build_config(data_dir: Path, key: bytes) -> Config:
-    known_locations = load_locations(data_dir, key)
+    result = _load_config_records(data_dir, key)
+    known_locations = result.locations
     active_locations = {i: loc for i, loc in known_locations.items() if not loc.retired}
-    known_products = load_products(data_dir, key)
+    known_products = result.products
     active_products = {i: p for i, p in known_products.items() if not p.retired}
+    anomalies = (*result.anomalies, *_detect_location_cycles(known_locations))
     return Config(
         known_locations=known_locations,
         active_locations=active_locations,
         known_products=known_products,
         active_products=active_products,
-        anomalies=_detect_location_cycles(known_locations),
+        anomalies=anomalies,
     )
 
 

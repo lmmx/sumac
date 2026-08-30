@@ -346,13 +346,13 @@ def test_diagnose_reports_line_failures(data_dir: Path, osuser: str, key: bytes)
     assert any(f.reason == "line_failure" for f in report.anomalies)
 
 
-def test_diagnose_does_not_raise_on_unreadable_config(
+def test_diagnose_survives_one_bad_config_line_alongside_a_good_one(
     data_dir: Path, osuser: str, key: bytes
 ) -> None:
-    """`config.load_locations` raises when a config line fails to decrypt (it uses
-    `SealedLog.__iter__`, which stops at the first bad line), so it's a genuine current
-    crash path for `diagnose` — unlike a circular parent, which `load_locations` doesn't
-    detect at all yet (that's Phase 2a's `build_config`, not implemented here)."""
+    """A corrupted config line becomes a line_failure anomaly and is skipped — it
+    must not take a valid location registered earlier down with it. (Config reads
+    go through `store.verify_stream`, which processes every line rather than
+    stopping at the first bad one, so this is a config_unreadable-free path.)"""
     config.add_location(data_dir, key, osuser, models.Location(id="fridge", name="Fridge"))
     store.append(
         data_dir,
@@ -365,8 +365,9 @@ def test_diagnose_does_not_raise_on_unreadable_config(
         f.write("not-valid-base64!!!\n")
 
     report = ledger.diagnose(data_dir, key)
-    assert any(f.reason == "config_unreadable" for f in report.anomalies)
-    assert any(f.reason == "unknown_location" and f.detail == "fridge" for f in report.anomalies)
+    assert any(f.reason == "line_failure" for f in report.anomalies)
+    assert not any(f.reason == "unknown_location" for f in report.anomalies)
+    assert not any(f.reason == "config_unreadable" for f in report.anomalies)
 
 
 def test_build_inventory_flags_unknown_location_without_applying(
@@ -427,6 +428,10 @@ def test_build_inventory_does_not_raise_on_decrypt_failure(
 def test_build_inventory_does_not_raise_on_unreadable_config(
     data_dir: Path, osuser: str, key: bytes
 ) -> None:
+    """No location was ever validly registered here (the whole config file is
+    one corrupted line), so `fridge` is legitimately unknown_location — this
+    differs from test_diagnose_survives_one_bad_config_line_alongside_a_good_one,
+    where a valid registration coexists with a bad line."""
     config_path = paths.config_path(data_dir)
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text("not-valid-base64!!!\n")
@@ -437,7 +442,7 @@ def test_build_inventory_does_not_raise_on_unreadable_config(
         _change_obj("c1", T0, osuser, "purchase", "milk", "1", "l", to_location="fridge"),
     )
     inventory = ledger.build_inventory(data_dir, key)
-    assert any(a.reason == "config_unreadable" for a in inventory.anomalies)
+    assert any(a.reason == "line_failure" for a in inventory.anomalies)
     assert any(a.reason == "unknown_location" for a in inventory.anomalies)
 
 

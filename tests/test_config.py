@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from sumac import SCHEMA_VERSION, config, store
+from sumac import SCHEMA_VERSION, config, paths, store
 from sumac.errors import UnknownLocationError, UnknownProductError
 from sumac.models import Location, Product
 
@@ -218,3 +218,57 @@ def test_old_shape_location_record_without_product_key_still_loads(
     assert locations["fridge"].name == "Fridge"
     assert locations["fridge"].retired is False
     assert config.load_products(data_dir, key) == {}
+
+
+def test_malformed_config_record_becomes_anomaly_others_still_resolve(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    """A record setting neither (or both) of location/product must not take the
+    rest of config down with it — same blast-radius principle as the main log."""
+    config.add_location(data_dir, key, osuser, Location(id="fridge", name="Fridge"))
+    store.append(
+        data_dir,
+        key,
+        store.CONFIG_STREAM_ID,
+        {
+            "schema_version": SCHEMA_VERSION,
+            "ts": datetime.now(UTC).isoformat(),
+            "actor": osuser,
+        },  # neither location nor product set
+    )
+    config.add_location(data_dir, key, osuser, Location(id="pantry", name="Pantry"))
+
+    cfg = config.build_config(data_dir, key)
+    assert any(a.reason == "invalid_config_record" for a in cfg.anomalies)
+    assert set(cfg.known_locations) == {"fridge", "pantry"}
+
+
+def test_schema_too_new_config_record_becomes_anomaly_others_still_resolve(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    config.add_location(data_dir, key, osuser, Location(id="fridge", name="Fridge"))
+    obj = {
+        "schema_version": SCHEMA_VERSION + 1,
+        "ts": datetime.now(UTC).isoformat(),
+        "actor": osuser,
+        "location": {"id": "pantry", "name": "Pantry", "parent_id": None, "metadata": {}},
+    }
+    store.append(data_dir, key, store.CONFIG_STREAM_ID, obj)
+
+    cfg = config.build_config(data_dir, key)
+    assert any(a.reason == "schema_too_new" for a in cfg.anomalies)
+    assert set(cfg.known_locations) == {"fridge"}
+
+
+def test_corrupted_config_line_becomes_anomaly_others_still_resolve(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    config.add_location(data_dir, key, osuser, Location(id="fridge", name="Fridge"))
+    config_path = paths.config_path(data_dir)
+    with config_path.open("a", encoding="utf-8") as f:
+        f.write("not-valid-base64!!!\n")
+    config.add_location(data_dir, key, osuser, Location(id="pantry", name="Pantry"))
+
+    cfg = config.build_config(data_dir, key)
+    assert any(a.reason == "line_failure" for a in cfg.anomalies)
+    assert set(cfg.known_locations) == {"fridge", "pantry"}

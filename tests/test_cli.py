@@ -110,8 +110,12 @@ def test_retire_product_shows_in_config(data_dir: Path) -> None:
 def test_retire_product_with_stock_succeeds(data_dir: Path) -> None:
     """Unlike a location, retiring a product is permitted at any time."""
     _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
     _run(data_dir, "config", "add-product", "Milk", "l", "--id", "milk")
     _run(data_dir, "add", "purchase", "milk", "1", "l", "--to", "pantry")
+    status = _run(data_dir, "status")
+    assert "milk" in status.output, "setup didn't actually produce stock"
+
     result = _run(data_dir, "config", "retire-product", "milk")
     assert result.exit_code == 0, result.output
 
