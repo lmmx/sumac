@@ -265,6 +265,30 @@ Two things to note.
 
 `decide` is pure: no I/O, no clock, no filesystem. State and config are arguments. This is what makes it testable and what keeps it from drifting away from the fold.
 
+### 3.5a Bootstrapping the product registry
+
+Phase 3 makes `unknown_product` a hard rejection against `active_products`. That set is currently empty against the real log — Phase 2c's `check-units` (report-only, see the note on Phase 2c's acceptance below) found **472 distinct product ids** with no registry entry. Shipping Phase 3 as specified, unmodified, means every `sumac add` fails the moment the gate turns on, until all 472 are registered by hand. **This is a bigger version of the location problem** (§1's 24 `unknown_location` anomalies) and needs a decision here, not a surprise during Phase 3.
+
+**First: is it really 472 things, or ID drift?** Free-text product ids across a year of entries could mean `milk` / `Milk` / `whole-milk` are recorded as three unrelated products when fewer real ones are involved. Checked against the real log (aggregate only — counts, no ids):
+
+- 472 distinct raw product ids observed.
+- Only **3 pairs** collapse under normalization (case-fold, strip `-`/`_`/space, crude trailing-`s` fold) — 6 raw ids out of 472.
+- **353 of 472 (75%) appear exactly once** in the entire log.
+
+So it is not primarily an ID-hygiene problem — normalization barely moves the number (472 → 469 distinct). This is a household that genuinely buys ~469 distinct things, three-quarters of which were purchased once. That shape matters for which bootstrap strategy fits: a one-time cleanup solves a backlog; it does not solve a pattern that keeps generating new one-off product ids indefinitely, and this household's actual usage is the latter.
+
+**Three strategies:**
+
+1. **Auto-register on first use.** `decide` resolves an unknown product by emitting a registration alongside the change event, canonical unit = the unit used in the command. Self-sustaining — matches the observed long-tail-of-one-offs shape exactly, since new one-off products will keep appearing and each needs to clear the gate the moment it's bought, not in a batch later. Downside: a typo becomes a permanently registered "product" unless caught, so it needs a `near_matches` *warning* alongside the auto-registration (not a rejection — the point is the write still succeeds) so the household can catch and `sumac correct` a typo shortly after, rather than being blocked by one.
+
+   Architectural note: `decide` today returns `list[Event]` for the *log* stream only (`Moved`, `Counted`, …). A product registration is a *config*-stream write, a different stream_id with a different fold. Auto-register therefore needs either (a) `decide`'s return type to carry two kinds of writes so the CLI write path can route each to the right stream, or (b) the CLI write path itself to call `config.add_product` directly when `decide` reports `unknown_product` with "safe to auto-register" context, before retrying `decide`. `decide` stays pure either way (no I/O itself) — this is about what its *output* needs to express, not about it doing I/O.
+
+2. **`sumac config check-units --write`: bulk backfill.** Clears today's 472 in one pass. Does not address that 75% of products are one-off — the backlog re-forms the moment a new item is bought, so this becomes a repeating chore rather than a one-time migration, without `near_matches` typo protection at write time either. Would be the better fit if the shape were "12 staples with spelling drift"; it isn't.
+
+3. **Demote `unknown_product` to a warning, promote later.** Defers the pain rather than resolving it, and needs a manual "flag day" to turn the gate back on. Given the registry never naturally reaches "populated" under this usage pattern, there's no natural moment to promote it.
+
+**Recommendation: option 1, auto-register with a `near_matches` warning.** The real-data shape — long tail of one-offs, not spelling drift — is what makes "self-sustaining" the deciding property rather than "one-time cleanup." Not implemented; needs sign-off before Phase 3 starts, and the architectural note above needs resolving as part of that design, not discovered mid-implementation.
+
 ### 3.6 Corrections via supersedes
 
 `Record.supersedes` already implements most of this: `ledger.load_records` drops any record targeted by another record's `supersedes` field before folding, which is append-only, byte-intact, and cross-actor-safe. Extend that mechanism rather than introducing a parallel `MovementVoided` event type — less schema surface, identical guarantees.
@@ -348,8 +372,8 @@ Ordered by dependency. Each phase is independently shippable and leaves the repo
 **Phase 2b — Product registry.** Build from scratch, mirroring `config.py`'s location handling: storage stream, `add_product`, `load_products`, `Retired` for products, `active_products` / `known_products`. This is new code, not an extension.
 *Acceptance:* products round-trip through the config stream; retired products resolve in `known_products` only.
 
-**Phase 2c — Canonical units.** Add `canonical_unit` and permitted conversions to product definitions, backfilled from each product's most common observed unit in the existing log.
-*Acceptance:* every product in the current log has a canonical unit; `cfg.convert` is total over all observed (product, unit) pairs or reports which are unconvertible.
+**Phase 2c — Canonical units.** `Product.conversions` and `Config.convert`/`can_convert` shipped. `sumac config check-units` reports, for every (product, unit) pair observed in the log, whether it converts — a suggested `add-product` command for an unregistered product, a named gap for a registered one whose observed unit doesn't convert.
+*Acceptance, as shipped:* `cfg.convert` is total over all observed (product, unit) pairs *or* `check-units` reports which are unconvertible — **met**. "Every product in the current log has a canonical unit" — **not met**: `check-units` is a report, not a backfill, and zero of the 472 products it found are registered. Registering them is deliberately not done yet; it's blocked on the bootstrap-strategy decision in §3.5a, which affects *how* they get registered (auto vs. bulk vs. deferred) and shouldn't be pre-empted by backfilling ad hoc.
 
 **Phase 3 — Extract `decide`.** Pure function per §3.5, taking `(cmd, inventory, config)`. The CLI write path becomes: parse → build state → `decide` → append. All of §4 implemented with `near_matches` suggestions, plus the display-path resolution from §3.5 (checked before `near_matches`, not instead of it). Conversion resolution moves here.
 *Acceptance:* every row in §4 has a test asserting the specific rejection code. A grep for `raise` inside `evolve` returns nothing. A grep for `convert` inside `evolve` returns nothing.

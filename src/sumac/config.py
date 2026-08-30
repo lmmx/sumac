@@ -173,7 +173,17 @@ class Config:
         """`amount` of `unit` expressed in `product_id`'s canonical unit, or `None`
         if `product_id` isn't known or `unit` has no conversion path to it. Nominal,
         per §3.4(c): resolved once at decide-time and frozen into the event — never
-        called from `evolve`, which never converts."""
+        called from `evolve`, which never converts.
+
+        Resolves against `known_products`, not `active_products` — a deliberate
+        divergence from §3.4's "decide validates against active_*" rule. Resolution
+        (what a unit *means*) and permission (whether a write to it is currently
+        *allowed*) are different questions: retirement should stop new writes
+        (`retired_product`, decide's job, not this method's), but must not stop the
+        arithmetic from resolving — `check-units` needs to interpret a retired
+        product's historical units too, and a `decide` call that's already past its
+        own `active_products`/`retired_product` check shouldn't have this method
+        re-reject on the same grounds a second time under a different name."""
         product = self.known_products.get(product_id)
         if product is None:
             return None
