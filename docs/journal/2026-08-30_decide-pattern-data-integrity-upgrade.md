@@ -180,11 +180,26 @@ Three things this changes about the design:
 
 Making it correct requires the upcaster to know, for every non-empty product previously believed present at that location, that it's now absent — i.e. it needs *running fold state*, not just the one record being transformed. That turns the upcaster from a stateless per-record function into something that re-implements a chunk of the fold internally, for the single largest and most-varied record shape in the real log.
 
-**Recommendation: don't decompose. Keep a location-wide `Snapshot` as its own v2 event, alongside a new, separate, per-product `Counted`.** They serve different purposes that the six-type list conflates: `Snapshot` is "this is everything at this location, full stop" (what 70% of the real log actually is); `Counted` is "adjust this one product's count" (what §3.5's insufficient-stock behavior in Phase 4b needs, and what the real log's `correction` records — see below — turn out to actually be). Keeping both is a smaller, safer upcaster: `InventorySnapshot` maps to `Snapshot` close to 1:1, no fold-state tracking, no synthesized zeroing events, no risk of misreading an empty shelf as "nothing happened here."
+**Decided: don't decompose. `Snapshot` stays a location-wide v2 event; `Counted` is added as a new, separate, per-product primitive.** This supersedes §3.3's sketch (which implied decomposing a snapshot into one `Counted` per entry) — the empty-snapshot data-loss finding above is decisive on its own, and the 1:1 mapping that falls out of it (no synthesized ids, no supersedes-across-the-version-boundary question — see below) is worth more than the tidiness of a six-type list. `Snapshot` is "this is everything at this location, full stop" (what 70% of the real log actually is); `Counted` is "adjust this one product's count" (what §3.5's insufficient-stock behavior in Phase 4b needs, and what the real log's `correction` records — see below — turn out to actually be).
 
-**`correction` → no clean fit in the six types; recommend a `reason` field.** A delta-shaped accounting adjustment isn't `Acquired`/`Consumed`/`Discarded` (those are real transactions) and isn't `Counted` (that's an absolute value, and `correction` never recorded one — computing an absolute count backwards from a historical running balance risks fabricating a number the original record never asserted, especially since the *reason* someone corrects the record is often that the running balance was already wrong). Recommend: add `reason: str | None = None` to `Acquired`, `Consumed`, and `Discarded`, and map `correction` directionally — to-only → `Acquired(reason="correction")`, from-only → `Consumed(reason="correction")` — preserving "this wasn't a real purchase/use" without inventing data. `discovery` gets the same treatment: `Acquired(reason="discovery")`.
+**`correction` → no clean fit in the six types; decided: a `reason` field.** A delta-shaped accounting adjustment isn't `Acquired`/`Consumed`/`Discarded` (those are real transactions) and isn't `Counted` (that's an absolute value, and `correction` never recorded one — computing an absolute count backwards from a historical running balance risks fabricating a number the original record never asserted, especially since the *reason* someone corrects the record is often that the running balance was already wrong). Decided: add `reason: str | None = None` to `Acquired` and `Consumed`, and map `correction` directionally — to-only → `Acquired(reason="correction")`, from-only → `Consumed(reason="correction")` — preserving "this wasn't a real purchase/use" without inventing data. `discovery` gets the same treatment: `Acquired(reason="discovery")`.
 
-**Open call, not resolved here:** `Consumed` vs. `Discarded` for a from-only `correction` is a naming choice, not a semantic one — `reason="correction"` is what actually preserves the truth either way. Went with `Consumed` above as the more neutral default (an unspecified removal isn't necessarily "binned"), but this is a judgment call worth a second opinion before it's built.
+**Decided: `Consumed`, not `Discarded`, for a from-only `correction`.** `reason="correction"` is what actually carries the truth either way — this was cosmetic — but `Discarded` asserts the food was binned, a claim about the world the record doesn't support; `Consumed` is the weaker claim.
+
+**v1 → v2 mapping table:**
+
+| v1 `kind` / type | Shape | v2 event | Notes |
+|---|---|---|---|
+| `purchase` | to-only | `Acquired` | `reason=None` |
+| `discovery` | to-only | `Acquired` | `reason="discovery"` |
+| `correction`, to-only | to-only | `Acquired` | `reason="correction"` |
+| `consumption` | from-only | `Consumed` | `reason=None` |
+| `correction`, from-only | from-only | `Consumed` | `reason="correction"` |
+| `waste` | from-only | `Discarded` | — |
+| `movement` | from+to | `Moved` | — |
+| `InventorySnapshot` | location + N entries | `Snapshot` | 1:1, entries carry over unchanged in shape (see `nominal_basis` below) |
+
+`Counted` and `Retired` have no v1 source — both are v2-only, produced by Phase 4b's `decide`, never by this upcaster.
 
 **v2 payload schemas, field by field:**
 
@@ -244,6 +259,11 @@ class SnapshotEntry:
     product_id: str
     amount: Decimal
     unit: str
+    nominal_basis: dict[str, str] | None = None
+    # Decided: yes, entries carry this too — a physical count is often taken
+    # in a countable unit ("4 jars"), so conversion is exactly as relevant
+    # here as for a purchase, and it's free to add now vs. another schema
+    # change once 4b is writing v2 for real.
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,8 +280,6 @@ class Retired:
 ```
 
 Envelope: no new field beyond the existing `schema_version` — "ship `schema_v`" in the original Phase 4a line reads, on reflection, as "make `schema_version` discrimination drive the upcast decision," not a second version field. `type` gains new values once the writer emits v2 in Phase 4b (`"acquired"`, `"consumed"`, …, replacing today's coarse `"change"`/`"snapshot"`); 4a's writer still only ever produces `"change"`/`"snapshot"` on disk, so this only matters for the in-memory v2 objects until 4b.
-
-**Open question, deliberately not resolved:** should `Snapshot` entries carry `nominal_basis` too? Real snapshots are usually a direct physical count (already in the product's natural unit), so conversion is less likely to matter here than for a purchase — but "less likely" isn't "never." Flagging rather than deciding, since it's a small, contained addition either way.
 
 **Where the upcaster runs.** In `ledger._load`, after `RecordSchema.model_validate(obj).to_domain()` succeeds — operating on the already-validated **v1 domain object** (`models.Record`), not the raw JSON. No new pydantic ingest schema is needed for 4a: nothing on disk is v2-shaped yet (the writer still emits v1), so there's nothing to validate on ingest as v2 until Phase 4b. `upcast(v1_record: models.Record) -> list[V2Record]` is a pure domain-to-domain transform; `_load`'s `parsed.append(...)` becomes `parsed.extend(upcast(v1_record))`, since one v1 record can become more than one v2 record for... actually, given the `Snapshot`-stays-together decision above, every mapping in this design is 1:1 except none are 1:N anymore — the one case that would have been 1:N (`InventorySnapshot`) is exactly the case being kept together. Confirms the "don't decompose" call is also the simpler implementation, not just the safer one.
 
