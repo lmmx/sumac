@@ -201,7 +201,7 @@ The critical consequence: **`decide` resolves the conversion and stores the cano
 ### 3.5 `decide`
 
 ```python
-def decide(cmd: Command, s: Inventory, cfg: Config) -> list[Event]:
+def decide(cmd: Command, s: Inventory, cfg: Config) -> list[Write]:
     match cmd:
         case MoveCmd(product_id=p, frm=a, to=b, amount=q, unit=u):
             if a not in cfg.active_locations:
@@ -220,44 +220,75 @@ def decide(cmd: Command, s: Inventory, cfg: Config) -> list[Event]:
                 )
             if a == b:
                 raise Rejected("noop_move", value=a)
-            if p not in cfg.active_products:
-                raise Rejected("unknown_product", value=p)
             if q <= 0:
                 raise Rejected("non_positive_amount", value=q)
 
-            canon = cfg.convert(p, q, u)
-            if canon is None:
-                raise Rejected("unit_unconvertible", value=u, expected=cfg.unit_of(p))
-
-            events = []
-            if s.at(p, a) < canon:  # shelf is authoritative, not the log
-                events.append(
-                    Counted(
-                        product_id=p,
-                        at=a,
-                        amount=canon,
-                        reason="implied_by_movement",
-                        actor=cmd.actor,
-                        occurred_at=cmd.at,
+            writes = []
+            product = cfg.active_products.get(p)
+            if product is None:
+                near = near_matches(p, cfg.active_products)
+                if near:
+                    warn(
+                        f"{p!r} is not a registered product — did you mean {near[0]!r}? "
+                        f"Registering {p!r} instead; correct it with `sumac correct` if it was a typo."
+                    )
+                # canonical unit = whatever this first command used — see §3.5a's
+                # first-use unit trap; add-product redefines it later if wrong.
+                writes.append(
+                    Write(
+                        "config",
+                        Registered(
+                            product_id=p,
+                            unit=u,
+                            metadata={"auto": True},
+                            actor=cmd.actor,
+                        ),
                     )
                 )
-            events.append(
-                Moved(
-                    product_id=p,
-                    frm=a,
-                    to=b,
-                    amount=canon,
-                    nominal_basis=cfg.basis(p, u),
-                    actor=cmd.actor,
-                    occurred_at=cmd.at,
+                canon = q
+            elif product.retired:
+                raise Rejected("retired_product", value=p)
+            else:
+                canon = cfg.convert(p, q, u)
+                if canon is None:
+                    raise Rejected("unit_unconvertible", value=u, expected=cfg.unit_of(p))
+
+            if s.at(p, a) < canon:  # shelf is authoritative, not the log
+                writes.append(
+                    Write(
+                        f"log:{cmd.actor}",
+                        Counted(
+                            product_id=p,
+                            at=a,
+                            amount=canon,
+                            reason="implied_by_movement",
+                            actor=cmd.actor,
+                            occurred_at=cmd.at,
+                        ),
+                    )
+                )
+            writes.append(
+                Write(
+                    f"log:{cmd.actor}",
+                    Moved(
+                        product_id=p,
+                        frm=a,
+                        to=b,
+                        amount=canon,
+                        nominal_basis=cfg.basis(p, u),
+                        actor=cmd.actor,
+                        occurred_at=cmd.at,
+                    ),
                 )
             )
-            return events
+            return writes
 ```
 
-Two things to note.
+`Write(stream, payload)` targets `"config"` or `f"log:{actor}"` — the same `stream_id` shapes `store.py` already uses. Config writes are ordered first so a registration lands before the change that depends on it; the CLI write path appends the whole list, in order, to whichever stream each entry names.
 
-`near_matches` on a rejection is worth the twenty lines. `hob-right-below-bottom` would have been caught with `did you mean: hob-right-shelf-bottom?` and the whole incident would have been a typo fixed in three seconds.
+Three things to note.
+
+`near_matches` on a rejection is worth the twenty lines. `hob-right-below-bottom` would have been caught with `did you mean: hob-right-shelf-bottom?` and the whole incident would have been a typo fixed in three seconds. For an unknown *product*, the same lookup runs but only ever warns — see §3.5a for why this one auto-registers instead of rejecting.
 
 **Display paths should resolve, not reject.** The real-data audit (§1) turned up a second, distinct failure shape alongside the typo: a value like `"Pantry > White Unit R1C3"` — exactly `config.location_path`'s output format — written into `--to`. That's not a misspelling, it's a display string pasted from `sumac status` where a raw id belonged, and `near_matches` would only ever offer a weak fuzzy guess at it. Since `location_path` is a pure function from id to string, `decide` can check for an exact reverse match first — cheap, because the format is already generated by that function — and resolve the write to the real id instead of rejecting it. Check this *before* `near_matches`, since a display-path match is exact where a typo match is fuzzy, and the two failure modes shouldn't be conflated.
 
@@ -267,7 +298,7 @@ Two things to note.
 
 ### 3.5a Bootstrapping the product registry
 
-Phase 3 makes `unknown_product` a hard rejection against `active_products`. That set is currently empty against the real log — Phase 2c's `check-units` (report-only, see the note on Phase 2c's acceptance below) found **472 distinct product ids** with no registry entry. Shipping Phase 3 as specified, unmodified, means every `sumac add` fails the moment the gate turns on, until all 472 are registered by hand. **This is a bigger version of the location problem** (§1's 24 `unknown_location` anomalies) and needs a decision here, not a surprise during Phase 3.
+§4's original rejection catalogue made `unknown_product` a hard rejection against `active_products`, mirroring `unknown_location`. That set is currently empty against the real log — Phase 2c's `check-units` (report-only, see the note on Phase 2c's acceptance below) found **472 distinct product ids** with no registry entry. Shipping that as specified, unmodified, means every `sumac add` fails the moment the gate turns on, until all 472 are registered by hand. **This is a bigger version of the location problem** (§1's 24 `unknown_location` anomalies) and needed a decision here, not a surprise during Phase 3 — the decision below is why `unknown_product` no longer appears in §4's table, and why the `decide` sketch in §3.5 auto-registers instead of rejecting.
 
 **First: is it really 472 things, or ID drift?** Free-text product ids across a year of entries could mean `milk` / `Milk` / `whole-milk` are recorded as three unrelated products when fewer real ones are involved. Checked against the real log (aggregate only — counts, no ids):
 
@@ -281,13 +312,18 @@ So it is not primarily an ID-hygiene problem — normalization barely moves the 
 
 1. **Auto-register on first use.** `decide` resolves an unknown product by emitting a registration alongside the change event, canonical unit = the unit used in the command. Self-sustaining — matches the observed long-tail-of-one-offs shape exactly, since new one-off products will keep appearing and each needs to clear the gate the moment it's bought, not in a batch later. Downside: a typo becomes a permanently registered "product" unless caught, so it needs a `near_matches` *warning* alongside the auto-registration (not a rejection — the point is the write still succeeds) so the household can catch and `sumac correct` a typo shortly after, rather than being blocked by one.
 
-   Architectural note: `decide` today returns `list[Event]` for the *log* stream only (`Moved`, `Counted`, …). A product registration is a *config*-stream write, a different stream_id with a different fold. Auto-register therefore needs either (a) `decide`'s return type to carry two kinds of writes so the CLI write path can route each to the right stream, or (b) the CLI write path itself to call `config.add_product` directly when `decide` reports `unknown_product` with "safe to auto-register" context, before retrying `decide`. `decide` stays pure either way (no I/O itself) — this is about what its *output* needs to express, not about it doing I/O.
-
 2. **`sumac config check-units --write`: bulk backfill.** Clears today's 472 in one pass. Does not address that 75% of products are one-off — the backlog re-forms the moment a new item is bought, so this becomes a repeating chore rather than a one-time migration, without `near_matches` typo protection at write time either. Would be the better fit if the shape were "12 staples with spelling drift"; it isn't.
 
 3. **Demote `unknown_product` to a warning, promote later.** Defers the pain rather than resolving it, and needs a manual "flag day" to turn the gate back on. Given the registry never naturally reaches "populated" under this usage pattern, there's no natural moment to promote it.
 
-**Recommendation: option 1, auto-register with a `near_matches` warning.** The real-data shape — long tail of one-offs, not spelling drift — is what makes "self-sustaining" the deciding property rather than "one-time cleanup." Not implemented; needs sign-off before Phase 3 starts, and the architectural note above needs resolving as part of that design, not discovered mid-implementation.
+**Decided: option 1, auto-register with a `near_matches` warning.** The real-data shape — long tail of one-offs, not spelling drift — is what makes "self-sustaining" the deciding property rather than "one-time cleanup."
+
+**Architecture: `decide` returns writes for both streams, not just the log's.** `decide` today returns `list[Event]` implicitly meaning "log stream." Two ways to add a config-stream write for the registration: (a) widen `decide`'s return type so it can carry either kind, still emitted from the one pure call; (b) have the CLI write path call `config.add_product` itself when `decide` reports `unknown_product` as auto-registerable, then retry `decide`. Rejected (b): it moves the "safe to auto-register" decision outside `decide`, and opens a partial-failure window — the product registers but the process dies before the change appends, leaving a registered product with no corresponding movement and no way to tell that happened from a crash log alone. Taking (a): `decide` returns `list[Write]`, where a `Write` carries a stream target (`"config"` or `"log:<actor>"`) and a payload; config writes are ordered first in the list so a registration lands before the change that depends on it, and the CLI write path appends the whole list in order. `decide` still does no I/O — only its return type got richer.
+
+Two things worth writing down now so neither gets rediscovered as a bug later:
+
+- **The first-use unit trap.** Auto-register takes canonical unit from whichever command hits it first. Buying "1 jar of rice pudding" before ever recording grams registers `jar` as canonical, permanently, until someone notices. Not worth solving now: `sumac config add-product` redefines it (latest-revision-wins already handles superseding a canonical-unit choice), and `Counted` corrects whatever quantities drifted from the wrong initial conversion basis in the meantime.
+- **Auto-registrations must be marked, not indistinguishable from deliberate ones.** Every auto-registered product carries `metadata: {"auto": true}` (and the usual `actor` on the envelope, naming who triggered it, not who confirmed it). This is the typo backstop `near_matches`'s *warning* (rather than rejection) needs: `check-units` can later report "N products auto-registered and never confirmed," giving a household a list to review instead of relying on catching every warning in the moment it's printed.
 
 ### 3.6 Corrections via supersedes
 
@@ -332,10 +368,11 @@ Merge order: concatenate both segments, sort by `(occurred_at, actor, seq)`, fol
 
 Every one of these needs a unit test with a named case. This list is the acceptance criteria for phase 3, except `retire_nonempty`, which shipped in Phase 2a (see the note there) — its test lives in `test_cli.py`, not the `decide` suite.
 
+`unknown_product` is deliberately **not** in this table — §3.5a decided auto-register-with-a-warning over rejection, once the real-data audit showed a long tail of one-off products rather than a fixable backlog. `retired_product` stays a hard rejection: retiring is a deliberate signal to stop tracking something, and auto-registering around it would defeat that on the first purchase after.
+
 | Rejection | Trigger |
 |---|---|
 | `unknown_location` | `from`/`to`/`at` not in active locations |
-| `unknown_product` | `product_id` not in active products |
 | `retired_location` | Location exists but is retired |
 | `retired_product` | Product exists but is retired |
 | `noop_move` | `from == to` |
@@ -378,7 +415,7 @@ Ordered by dependency. Each phase is independently shippable and leaves the repo
 **Phase 3 — Extract `decide`.** Pure function per §3.5, taking `(cmd, inventory, config)`. The CLI write path becomes: parse → build state → `decide` → append. All of §4 implemented with `near_matches` suggestions, plus the display-path resolution from §3.5 (checked before `near_matches`, not instead of it). Conversion resolution moves here.
 *Acceptance:* every row in §4 has a test asserting the specific rejection code. A grep for `raise` inside `evolve` returns nothing. A grep for `convert` inside `evolve` returns nothing.
 
-Blocks on 2b and 2c — `unknown_product`, `retired_product`, and `unit_unconvertible` are untestable without the product registry.
+Blocks on 2b and 2c — `retired_product` and `unit_unconvertible` are untestable without the product registry. Also blocks on §3.5a's auto-register decision for the `unknown_product` path, which is no longer in the rejection catalogue but is very much part of Phase 3's `decide` (see the `MoveCmd` sketch above).
 
 Also add the **gate soundness** property here rather than deferring to Phase 6: no sequence of commands accepted by `decide` produces an anomaly. Exercising it while `decide` and `evolve` are freshly written catches drift immediately instead of four phases later.
 
