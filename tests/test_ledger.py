@@ -4,10 +4,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
-import pytest
-
 from sumac import SCHEMA_VERSION, config, ledger, models, paths, store
-from sumac.errors import SchemaVersionError
 
 T0 = datetime(2026, 1, 1, tzinfo=None).astimezone()
 
@@ -64,6 +61,8 @@ def _snapshot_obj(
 
 
 def test_movement_between_locations(data_dir: Path, osuser: str, key: bytes) -> None:
+    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+    config.add_location(data_dir, key, osuser, models.Location(id="fridge", name="Fridge"))
     store.append(
         data_dir,
         key,
@@ -94,6 +93,7 @@ def test_movement_between_locations(data_dir: Path, osuser: str, key: bytes) -> 
 def test_snapshot_resets_and_later_changes_apply_on_top(
     data_dir: Path, osuser: str, key: bytes
 ) -> None:
+    config.add_location(data_dir, key, osuser, models.Location(id="fridge", name="Fridge"))
     store.append(
         data_dir,
         key,
@@ -126,6 +126,7 @@ def test_snapshot_resets_and_later_changes_apply_on_top(
 
 
 def test_supersede_drops_original(data_dir: Path, osuser: str, key: bytes) -> None:
+    config.add_location(data_dir, key, osuser, models.Location(id="fridge", name="Fridge"))
     store.append(
         data_dir,
         key,
@@ -152,7 +153,8 @@ def test_supersede_drops_original(data_dir: Path, osuser: str, key: bytes) -> No
     assert inventory.at("fridge")["milk"].amount == Decimal("3")
 
 
-def test_unit_mismatch_raises(data_dir: Path, osuser: str, key: bytes) -> None:
+def test_unit_mismatch_becomes_anomaly(data_dir: Path, osuser: str, key: bytes) -> None:
+    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
     store.append(
         data_dir,
         key,
@@ -174,11 +176,14 @@ def test_unit_mismatch_raises(data_dir: Path, osuser: str, key: bytes) -> None:
             to_location="pantry",
         ),
     )
-    with pytest.raises(ValueError, match="unit mismatch"):
-        ledger.build_inventory(data_dir, key)
+    inventory = ledger.build_inventory(data_dir, key)
+    assert inventory.at("pantry")["flour"].amount == Decimal("1")
+    assert inventory.at("pantry")["flour"].unit == "kg"
+    assert any(a.reason == "unit_mismatch" for a in inventory.anomalies)
 
 
 def test_zero_quantity_drops_entry(data_dir: Path, osuser: str, key: bytes) -> None:
+    config.add_location(data_dir, key, osuser, models.Location(id="fridge", name="Fridge"))
     store.append(
         data_dir,
         key,
@@ -204,12 +209,34 @@ def test_zero_quantity_drops_entry(data_dir: Path, osuser: str, key: bytes) -> N
     assert "milk" not in inventory.at("fridge")
 
 
-def test_schema_version_too_new_raises(data_dir: Path, osuser: str, key: bytes) -> None:
-    obj = _change_obj("c1", T0, osuser, "purchase", "milk", "1", "l", to_location="fridge")
+def test_schema_too_new_becomes_anomaly(data_dir: Path, osuser: str, key: bytes) -> None:
+    """A too-new record (e.g. from a household member who's upgraded) must not brick
+    every command for everyone else until they upgrade too — it's quarantined like any
+    other unfoldable record, and the rest of the log still folds."""
+    config.add_location(data_dir, key, osuser, models.Location(id="fridge", name="Fridge"))
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _change_obj("c1", T0, osuser, "purchase", "milk", "1", "l", to_location="fridge"),
+    )
+    obj = _change_obj(
+        "c2",
+        T0 + timedelta(minutes=1),
+        osuser,
+        "purchase",
+        "eggs",
+        "6",
+        "ct",
+        to_location="fridge",
+    )
     obj["schema_version"] = SCHEMA_VERSION + 1
     store.append(data_dir, key, f"log:{osuser}", obj)
-    with pytest.raises(SchemaVersionError):
-        ledger.load_records(data_dir, key)
+
+    inventory = ledger.build_inventory(data_dir, key)
+    assert inventory.at("fridge")["milk"].amount == Decimal("1")
+    assert "eggs" not in inventory.at("fridge")
+    assert any(a.reason == "schema_too_new" for a in inventory.anomalies)
 
 
 def test_verify_all_detects_actor_mismatch(data_dir: Path, osuser: str, key: bytes) -> None:
@@ -241,7 +268,7 @@ def test_diagnose_clean_log_has_no_findings(data_dir: Path, osuser: str, key: by
         _change_obj("c1", T0, osuser, "purchase", "milk", "1", "l", to_location="fridge"),
     )
     report = ledger.diagnose(data_dir, key)
-    assert report.findings == ()
+    assert report.anomalies == ()
     assert report.total_lines == 1
 
 
@@ -263,7 +290,7 @@ def test_diagnose_flags_unknown_location(data_dir: Path, osuser: str, key: bytes
         ),
     )
     report = ledger.diagnose(data_dir, key)
-    reasons = {(f.reason, f.detail) for f in report.findings}
+    reasons = {(f.reason, f.detail) for f in report.anomalies}
     assert ("unknown_location", "pantry") in reasons
     assert ("unknown_location", "hob-right-below-bottom") in reasons
 
@@ -292,7 +319,7 @@ def test_diagnose_does_not_raise_on_unit_mismatch(data_dir: Path, osuser: str, k
         ),
     )
     report = ledger.diagnose(data_dir, key)
-    assert any(f.reason == "unit_mismatch" for f in report.findings)
+    assert any(f.reason == "unit_mismatch" for f in report.anomalies)
 
 
 def test_diagnose_does_not_raise_on_malformed_movement(
@@ -302,7 +329,7 @@ def test_diagnose_does_not_raise_on_malformed_movement(
     obj["payload"]["from_location"] = None  # movement missing an endpoint
     store.append(data_dir, key, f"log:{osuser}", obj)
     report = ledger.diagnose(data_dir, key)
-    assert any(f.reason == "invalid_record" for f in report.findings)
+    assert any(f.reason == "invalid_record" for f in report.anomalies)
 
 
 def test_diagnose_reports_line_failures(data_dir: Path, osuser: str, key: bytes) -> None:
@@ -316,7 +343,7 @@ def test_diagnose_reports_line_failures(data_dir: Path, osuser: str, key: bytes)
     with log_path.open("a", encoding="utf-8") as f:
         f.write("not-valid-base64!!!\n")
     report = ledger.diagnose(data_dir, key)
-    assert any(f.reason == "line_failure" for f in report.findings)
+    assert any(f.reason == "line_failure" for f in report.anomalies)
 
 
 def test_diagnose_does_not_raise_on_unreadable_config(
@@ -338,5 +365,77 @@ def test_diagnose_does_not_raise_on_unreadable_config(
         f.write("not-valid-base64!!!\n")
 
     report = ledger.diagnose(data_dir, key)
-    assert any(f.reason == "config_unreadable" for f in report.findings)
-    assert any(f.reason == "unknown_location" and f.detail == "fridge" for f in report.findings)
+    assert any(f.reason == "config_unreadable" for f in report.anomalies)
+    assert any(f.reason == "unknown_location" and f.detail == "fridge" for f in report.anomalies)
+
+
+def test_build_inventory_flags_unknown_location_without_applying(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _change_obj(
+            "c1",
+            T0,
+            osuser,
+            "movement",
+            "milk",
+            "1",
+            "l",
+            from_location="pantry",
+            to_location="hob-right-below-bottom",
+        ),
+    )
+    inventory = ledger.build_inventory(data_dir, key)
+    assert "milk" not in inventory.at("pantry")
+    assert "milk" not in inventory.at("hob-right-below-bottom")
+    assert any(a.reason == "unknown_location" for a in inventory.anomalies)
+
+
+def test_build_inventory_does_not_raise_on_malformed_movement(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    obj = _change_obj("c1", T0, osuser, "movement", "milk", "1", "l", to_location="pantry")
+    obj["payload"]["from_location"] = None  # movement missing an endpoint
+    store.append(data_dir, key, f"log:{osuser}", obj)
+    inventory = ledger.build_inventory(data_dir, key)
+    assert any(a.reason == "invalid_record" for a in inventory.anomalies)
+
+
+def test_build_inventory_does_not_raise_on_decrypt_failure(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    config.add_location(data_dir, key, osuser, models.Location(id="fridge", name="Fridge"))
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _change_obj("c1", T0, osuser, "purchase", "milk", "1", "l", to_location="fridge"),
+    )
+    log_path = paths.log_path(data_dir, osuser)
+    with log_path.open("a", encoding="utf-8") as f:
+        f.write("not-valid-base64!!!\n")
+
+    inventory = ledger.build_inventory(data_dir, key)
+    assert inventory.at("fridge")["milk"].amount == Decimal("1")
+    assert any(a.reason == "line_failure" for a in inventory.anomalies)
+
+
+def test_build_inventory_does_not_raise_on_unreadable_config(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    config_path = paths.config_path(data_dir)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text("not-valid-base64!!!\n")
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _change_obj("c1", T0, osuser, "purchase", "milk", "1", "l", to_location="fridge"),
+    )
+    inventory = ledger.build_inventory(data_dir, key)
+    assert any(a.reason == "config_unreadable" for a in inventory.anomalies)
+    assert any(a.reason == "unknown_location" for a in inventory.anomalies)

@@ -4,6 +4,11 @@ Ordering is `(ts, actor, id)` for determinism across machines. A location's
 baseline is its most recent snapshot at or before the query time — snapshots
 reset a location's products rather than merging into them — and only changes
 strictly after that baseline apply on top of it.
+
+The fold is total: it never raises on a record it can't interpret or apply.
+`decide` (not yet split out — see docs/journal/2026-08-30) is where semantic
+validity should be rejected before append; this module can only quarantine
+what already made it into the log, via `Anomaly`.
 """
 
 from __future__ import annotations
@@ -16,77 +21,185 @@ from pydantic import ValidationError
 from sealedlog.errors import SealError
 
 from sumac import SCHEMA_VERSION, config, paths, store
-from sumac.errors import SchemaVersionError, SumacError
-from sumac.models import InventoryChange, InventorySnapshot, Quantity, Record
+from sumac.errors import SumacError
+from sumac.models import InventoryChange, InventorySnapshot, Location, Quantity, Record
 from sumac.schemas import RecordSchema
+
+_READ_TIME_ERRORS = (SumacError, SealError, ValidationError)
+
+
+@dataclass(frozen=True, slots=True)
+class Anomaly:
+    """A record (or line) the fold could not apply. Never raised — only recorded."""
+
+    record_id: str | None
+    reason: str  # "line_failure" | "invalid_record" | "unknown_location" | "unit_mismatch" | ...
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class _LoadResult:
+    records: list[Record]
+    anomalies: list[Anomaly]
+
+
+def _load(data_dir: Path, key: bytes) -> _LoadResult:
+    """Tolerant read of every log: decrypt/schema/domain failures become
+    anomalies instead of propagating. A `schema_version` newer than this build
+    supports is just another reason a record can't be interpreted — quarantined
+    like any other, not raised — since one too-new record from another writer
+    must not brick every command until everyone upgrades."""
+    anomalies: list[Anomaly] = []
+    parsed: list[Record] = []
+
+    for log_path in paths.all_log_paths(data_dir):
+        stream_id = f"log:{log_path.stem}"
+        objs, failures = store.verify_stream(log_path, key, stream_id)
+        for f in failures:
+            anomalies.append(Anomaly(None, "line_failure", f"{f.path}:{f.lineno}: {f.error}"))
+        for obj in objs:
+            record_id = obj.get("id") if isinstance(obj, dict) else None
+            version = obj.get("schema_version") if isinstance(obj, dict) else None
+            if isinstance(version, int) and version > SCHEMA_VERSION:
+                anomalies.append(Anomaly(record_id, "schema_too_new", f"schema_version={version}"))
+                continue
+            try:
+                parsed.append(RecordSchema.model_validate(obj).to_domain())
+            except (ValidationError, ValueError) as e:
+                anomalies.append(Anomaly(record_id, "invalid_record", str(e)))
+
+    superseded = {r.supersedes for r in parsed if r.supersedes is not None}
+    live = [r for r in parsed if r.id not in superseded]
+    live.sort(key=lambda r: (r.ts, r.actor, r.id))
+    return _LoadResult(records=live, anomalies=anomalies)
 
 
 def load_records(data_dir: Path, key: bytes) -> list[Record]:
-    """All live records (superseded ones dropped), ordered for deterministic folding."""
-    records: list[Record] = []
-    for _osuser, obj in store.iter_all_logs(data_dir, key):
-        if obj["schema_version"] > SCHEMA_VERSION:
-            raise SchemaVersionError(
-                f"record schema_version {obj['schema_version']} is newer than supported "
-                f"({SCHEMA_VERSION}); upgrade sumac"
-            )
-        records.append(RecordSchema.model_validate(obj).to_domain())
+    """All live records (superseded ones dropped, unfoldable ones dropped as
+    anomalies), ordered for deterministic folding."""
+    return _load(data_dir, key).records
 
-    superseded = {r.supersedes for r in records if r.supersedes is not None}
-    live = [r for r in records if r.id not in superseded]
-    live.sort(key=lambda r: (r.ts, r.actor, r.id))
-    return live
+
+def load_locations_or_empty(data_dir: Path, key: bytes) -> dict[str, Location]:
+    """Never raises. A config the fold can't read shows up as a `config_unreadable`
+    anomaly via `build_inventory`; this just gives other callers (rendering) a
+    dict to work with instead of propagating the failure a second time."""
+    try:
+        return config.load_locations(data_dir, key)
+    except _READ_TIME_ERRORS:
+        return {}
 
 
 @dataclass(frozen=True, slots=True)
 class Inventory:
     by_location: dict[str, dict[str, Quantity]]
+    anomalies: tuple[Anomaly, ...] = ()
 
     def at(self, location_id: str) -> dict[str, Quantity]:
         return dict(self.by_location.get(location_id, {}))
 
 
-def _apply_delta(
+def _next_quantity(
     state: dict[str, dict[str, Quantity]], location_id: str, product_id: str, delta: Quantity
+) -> tuple[Quantity | None, str | None]:
+    """The quantity `location_id`/`product_id` would have after `delta`, without
+    mutating `state`. Returns `(None, error)` on a unit mismatch instead of
+    raising, so the caller can flag an anomaly and leave both sides of a
+    movement uncommitted rather than apply only one."""
+    current = state.get(location_id, {}).get(product_id)
+    if current is None:
+        return delta, None
+    try:
+        return current + delta, None
+    except ValueError as e:
+        return None, str(e)
+
+
+def _commit(
+    state: dict[str, dict[str, Quantity]], location_id: str, product_id: str, q: Quantity
 ) -> None:
     loc = state.setdefault(location_id, {})
-    current = loc.get(product_id)
-    new = delta if current is None else current + delta
-    if new.amount == 0:
+    if q.amount == 0:
         loc.pop(product_id, None)
     else:
-        loc[product_id] = new
+        loc[product_id] = q
 
 
 def build_inventory(data_dir: Path, key: bytes, as_of: datetime | None = None) -> Inventory:
-    records = load_records(data_dir, key)
+    load_result = _load(data_dir, key)
+    anomalies = list(load_result.anomalies)
+    records = load_result.records
     if as_of is not None:
         records = [r for r in records if r.ts <= as_of]
+
+    try:
+        locations = config.load_locations(data_dir, key)
+    except _READ_TIME_ERRORS as e:
+        anomalies.append(Anomaly(None, "config_unreadable", str(e)))
+        locations = {}
 
     state: dict[str, dict[str, Quantity]] = {}
     baseline_ts: dict[str, datetime] = {}
 
     for r in records:
-        if isinstance(r.payload, InventorySnapshot):
-            loc_id = r.payload.location_id
-            if loc_id not in baseline_ts or r.ts >= baseline_ts[loc_id]:
-                baseline_ts[loc_id] = r.ts
-                state[loc_id] = {e.product_id: e.quantity for e in r.payload.entries}
+        if not isinstance(r.payload, InventorySnapshot):
+            continue
+        loc_id = r.payload.location_id
+        if loc_id not in locations:
+            anomalies.append(Anomaly(r.id, "unknown_location", loc_id))
+            continue
+        if loc_id not in baseline_ts or r.ts >= baseline_ts[loc_id]:
+            baseline_ts[loc_id] = r.ts
+            state[loc_id] = {e.product_id: e.quantity for e in r.payload.entries}
 
     for r in records:
         if not isinstance(r.payload, InventoryChange):
             continue
         change = r.payload
+
+        bad_location = False
+        for loc_id in (change.from_location, change.to_location):
+            if loc_id is not None and loc_id not in locations:
+                anomalies.append(Anomaly(r.id, "unknown_location", loc_id))
+                bad_location = True
+        if bad_location:
+            continue
+
+        pending: list[tuple[str, str, Quantity]] = []
+        mismatch = False
+
         if change.from_location is not None:
             base = baseline_ts.get(change.from_location)
             if base is None or r.ts > base:
-                _apply_delta(state, change.from_location, change.product_id, -change.quantity)
-        if change.to_location is not None:
+                new_q, err = _next_quantity(
+                    state, change.from_location, change.product_id, -change.quantity
+                )
+                if err is not None:
+                    anomalies.append(Anomaly(r.id, "unit_mismatch", err))
+                    mismatch = True
+                else:
+                    assert new_q is not None
+                    pending.append((change.from_location, change.product_id, new_q))
+
+        if not mismatch and change.to_location is not None:
             base = baseline_ts.get(change.to_location)
             if base is None or r.ts > base:
-                _apply_delta(state, change.to_location, change.product_id, change.quantity)
+                new_q, err = _next_quantity(
+                    state, change.to_location, change.product_id, change.quantity
+                )
+                if err is not None:
+                    anomalies.append(Anomaly(r.id, "unit_mismatch", err))
+                    mismatch = True
+                else:
+                    assert new_q is not None
+                    pending.append((change.to_location, change.product_id, new_q))
 
-    return Inventory(by_location=state)
+        if mismatch:
+            continue
+        for loc_id, product_id, q in pending:
+            _commit(state, loc_id, product_id, q)
+
+    return Inventory(by_location=state, anomalies=tuple(anomalies))
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,88 +231,17 @@ def verify_all(data_dir: Path, key: bytes) -> VerifyResult:
 
 
 @dataclass(frozen=True, slots=True)
-class DoctorFinding:
-    """One record (or line) that a tolerant fold could not apply.
-
-    Phase 0 of docs/journal/2026-08-30_decide-pattern-data-integrity-upgrade.md — diagnostic
-    only, superseded by the real `Anomaly` channel in Phase 1."""
-
-    path: Path
-    record_id: str | None
-    reason: str
-    detail: str
-
-
-@dataclass(frozen=True, slots=True)
 class DoctorReport:
-    findings: tuple[DoctorFinding, ...]
+    anomalies: tuple[Anomaly, ...]
     total_lines: int
 
 
 def diagnose(data_dir: Path, key: bytes) -> DoctorReport:
-    """Tolerant fold: never raises, reports every line/record it could not apply.
-
-    Line-level decrypt/auth failures use `store.verify_stream` (already tolerant).
-    Record-level schema and domain-construction failures, and fold-time failures
-    (unit mismatch, unknown location), are caught here since `RecordSchema.to_domain()`
-    and `_apply_delta` both raise today."""
-    findings: list[DoctorFinding] = []
+    """`sumac doctor`'s view of `build_inventory`'s anomaly channel, plus a raw
+    line count for context ("N anomalies out of M lines")."""
+    inventory = build_inventory(data_dir, key)
     total_lines = 0
-    raw: list[tuple[Path, dict]] = []
-
     for log_path in paths.all_log_paths(data_dir):
-        stream_id = f"log:{log_path.stem}"
-        objs, failures = store.verify_stream(log_path, key, stream_id)
+        objs, failures = store.verify_stream(log_path, key, f"log:{log_path.stem}")
         total_lines += len(objs) + len(failures)
-        for f in failures:
-            findings.append(DoctorFinding(f.path, None, "line_failure", f.error))
-        raw.extend((log_path, obj) for obj in objs)
-
-    parsed: list[tuple[Path, Record]] = []
-    for path, obj in raw:
-        record_id = obj.get("id") if isinstance(obj, dict) else None
-        version = obj.get("schema_version") if isinstance(obj, dict) else None
-        if isinstance(version, int) and version > SCHEMA_VERSION:
-            findings.append(
-                DoctorFinding(path, record_id, "schema_too_new", f"schema_version={version}")
-            )
-            continue
-        try:
-            parsed.append((path, RecordSchema.model_validate(obj).to_domain()))
-        except (ValidationError, ValueError) as e:
-            findings.append(DoctorFinding(path, record_id, "invalid_record", str(e)))
-
-    superseded = {r.supersedes for _, r in parsed if r.supersedes is not None}
-    live = [(path, r) for path, r in parsed if r.id not in superseded]
-    live.sort(key=lambda item: (item[1].ts, item[1].actor, item[1].id))
-
-    try:
-        locations = config.load_locations(data_dir, key)
-    except (SumacError, SealError, ValidationError) as e:
-        findings.append(
-            DoctorFinding(paths.config_path(data_dir), None, "config_unreadable", str(e))
-        )
-        locations = {}
-    state: dict[str, dict[str, Quantity]] = {}
-
-    for path, r in live:
-        if isinstance(r.payload, InventorySnapshot):
-            loc_id = r.payload.location_id
-            if loc_id not in locations:
-                findings.append(DoctorFinding(path, r.id, "unknown_location", loc_id))
-            state[loc_id] = {e.product_id: e.quantity for e in r.payload.entries}
-            continue
-
-        change = r.payload
-        for loc_id in (change.from_location, change.to_location):
-            if loc_id is not None and loc_id not in locations:
-                findings.append(DoctorFinding(path, r.id, "unknown_location", loc_id))
-        try:
-            if change.from_location is not None:
-                _apply_delta(state, change.from_location, change.product_id, -change.quantity)
-            if change.to_location is not None:
-                _apply_delta(state, change.to_location, change.product_id, change.quantity)
-        except ValueError as e:
-            findings.append(DoctorFinding(path, r.id, "unit_mismatch", str(e)))
-
-    return DoctorReport(findings=tuple(findings), total_lines=total_lines)
+    return DoctorReport(anomalies=inventory.anomalies, total_lines=total_lines)

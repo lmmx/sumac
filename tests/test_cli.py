@@ -66,11 +66,19 @@ def test_add_change_and_status(data_dir: Path) -> None:
 
 def test_snapshot_and_find(data_dir: Path) -> None:
     _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Fridge", "--id", "fridge")
     result = _run(data_dir, "snapshot", "fridge", "milk=3/l")
     assert result.exit_code == 0, result.output
     result = _run(data_dir, "find", "milk")
     assert result.exit_code == 0
-    assert "fridge" in result.output
+    assert "Fridge" in result.output
+
+
+def test_find_shows_anomaly_banner(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "add", "purchase", "milk", "1", "l", "--to", "hob-right-below-bottom")
+    result = _run(data_dir, "find", "milk")
+    assert "could not be applied" in result.output
 
 
 def test_verify_clean(data_dir: Path) -> None:

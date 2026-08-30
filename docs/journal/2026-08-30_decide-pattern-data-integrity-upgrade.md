@@ -275,12 +275,11 @@ Two things to note.
    @dataclass(frozen=True, slots=True)
    class Correction:
        reason: str
-       actor: str
    ```
 
-   `evolve` treats it as a no-op on holdings. Note `Record.actor` already exists on the envelope for every record — check before implementing whether `Correction.actor` duplicates it or is meant to record something distinct (e.g. who is being overridden vs. who is overriding).
+   `evolve` treats it as a no-op on holdings. `actor` is deliberately not here — `Record.actor` already carries it on every envelope, and duplicating it invites the two drifting apart.
 
-3. **Supersede claims are permanent.** If C supersedes A and A supersedes B, A and B both stay dead — A being superseded does not resurrect B. B was wrong; that's why A killed it. Undoing a correction should not resurrect an error as a side effect. This is monotone (a dead record never comes back), which keeps the fold predictable, and it's what the current one-level filtering in `ledger.load_records` already does — no fold-logic change needed for chains, only the `reason`/`actor` plumbing.
+3. **Supersede claims are permanent.** If C supersedes A and A supersedes B, A and B both stay dead — A being superseded does not resurrect B. B was wrong; that's why A killed it. Undoing a correction should not resurrect an error as a side effect. This is monotone (a dead record never comes back), which keeps the fold predictable, and it's what the current one-level filtering in `ledger.load_records` already does — no fold-logic change needed for chains, only the `reason` plumbing.
 
 What needs adding: the `Correction` payload above, and the explicit rule that a supersede **may target a record in either segment but is always appended to the author's own segment**. Bob can supersede one of Alice's records by appending to `node.jsonl`; Alice's file is never touched, signatures stay intact, single-writer-per-file is preserved. There is no ownership restriction on *correcting*, only on *writing*.
 

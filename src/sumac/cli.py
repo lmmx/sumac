@@ -255,9 +255,12 @@ def status(
     (shelves, doors, grid cells, ...), not just that exact node."""
     key = _key(data_dir)
     inventory = ledger.build_inventory(data_dir, key)
-    locations = config.load_locations(data_dir, key)
+    locations = ledger.load_locations_or_empty(data_dir, key)
     scope = config.descendants(locations, location) if location else None
+    render.print_anomaly_banner(inventory.anomalies)
     render.print_status(inventory, locations, scope)
+    if inventory.anomalies:
+        raise typer.Exit(code=1)
 
 
 @app.command()
@@ -271,7 +274,8 @@ def find(
     """Show every location currently holding PRODUCT_ID (partial match by default)."""
     key = _key(data_dir)
     inventory = ledger.build_inventory(data_dir, key)
-    locations = config.load_locations(data_dir, key)
+    locations = ledger.load_locations_or_empty(data_dir, key)
+    render.print_anomaly_banner(inventory.anomalies)
     render.print_find(inventory, locations, product_id, exact=exact)
 
 
@@ -298,7 +302,7 @@ def doctor(data_dir: DataDirOption = Path("data")) -> None:
     key = _key(data_dir)
     report = ledger.diagnose(data_dir, key)
     render.print_doctor(report)
-    if report.findings:
+    if report.anomalies:
         raise typer.Exit(code=1)
 
 

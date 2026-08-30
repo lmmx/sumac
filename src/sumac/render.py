@@ -44,6 +44,13 @@ def print_locations(locations: dict[str, models.Location]) -> None:
     console.print(tree)
 
 
+def print_anomaly_banner(anomalies: tuple[ledger.Anomaly, ...]) -> None:
+    if anomalies:
+        n = len(anomalies)
+        event = "event" if n == 1 else "events"
+        console.print(f"[yellow]⚠ {n} {event} could not be applied — run 'sumac doctor'[/yellow]")
+
+
 def print_status(
     inventory: ledger.Inventory,
     locations: dict[str, models.Location],
@@ -114,16 +121,15 @@ def print_log(records: list[models.Record]) -> None:
 
 
 def print_doctor(report: ledger.DoctorReport) -> None:
-    if not report.findings:
+    if not report.anomalies:
         console.print(f"[green]✓ {report.total_lines} lines, no anomalies[/green]")
         return
-    table = Table(title=f"{len(report.findings)} anomalies out of {report.total_lines} lines")
+    table = Table(title=f"{len(report.anomalies)} anomalies out of {report.total_lines} lines")
     table.add_column("reason")
     table.add_column("record")
-    table.add_column("path")
     table.add_column("detail")
-    for f in report.findings:
-        table.add_row(f.reason, f.record_id or "-", str(f.path), f.detail)
+    for a in report.anomalies:
+        table.add_row(a.reason, a.record_id or "-", a.detail)
     console.print(table)
 
 
