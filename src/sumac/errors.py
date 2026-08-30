@@ -25,5 +25,9 @@ class UnknownLocationError(SumacError):
     """A command names a location id that has never been defined."""
 
 
+class UnknownProductError(SumacError):
+    """A command names a product id that has never been defined."""
+
+
 class RetireNonemptyError(SumacError):
     """Attempted to retire a location that still holds stock."""

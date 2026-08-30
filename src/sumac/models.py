@@ -44,6 +44,7 @@ class Product:
     unit: str
     category: str | None = None
     metadata: Mapping[str, JsonValue] = field(default_factory=dict)
+    retired: bool = False
 
 
 @dataclass(frozen=True, slots=True)

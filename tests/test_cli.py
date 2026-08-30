@@ -89,6 +89,39 @@ def test_retire_location_with_stock_only_in_sublocation_succeeds(data_dir: Path)
     assert result.exit_code == 0, result.output
 
 
+def test_add_product_and_show(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    result = _run(data_dir, "config", "add-product", "Milk", "l", "--id", "milk")
+    assert result.exit_code == 0, result.output
+    result = _run(data_dir, "config", "show")
+    assert result.exit_code == 0
+    assert "Milk" in result.output
+
+
+def test_retire_product_shows_in_config(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-product", "Milk", "l", "--id", "milk")
+    result = _run(data_dir, "config", "retire-product", "milk")
+    assert result.exit_code == 0, result.output
+    result = _run(data_dir, "config", "show")
+    assert "retired" in result.output
+
+
+def test_retire_product_with_stock_succeeds(data_dir: Path) -> None:
+    """Unlike a location, retiring a product is permitted at any time."""
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-product", "Milk", "l", "--id", "milk")
+    _run(data_dir, "add", "purchase", "milk", "1", "l", "--to", "pantry")
+    result = _run(data_dir, "config", "retire-product", "milk")
+    assert result.exit_code == 0, result.output
+
+
+def test_retire_unknown_product_fails(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    result = _run(data_dir, "config", "retire-product", "nonexistent")
+    assert result.exit_code != 0
+
+
 def test_add_change_and_status(data_dir: Path) -> None:
     _run(data_dir, "init")
     _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")

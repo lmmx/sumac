@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from sumac import config
-from sumac.errors import UnknownLocationError
-from sumac.models import Location
+from sumac import SCHEMA_VERSION, config, store
+from sumac.errors import UnknownLocationError, UnknownProductError
+from sumac.models import Location, Product
 
 
 def test_add_and_load_location(data_dir: Path, osuser: str, key: bytes) -> None:
@@ -142,3 +143,78 @@ def test_build_config_no_cycle_for_normal_tree(data_dir: Path, osuser: str, key:
         config.add_location(data_dir, key, osuser, loc)
     cfg = config.build_config(data_dir, key)
     assert cfg.anomalies == ()
+
+
+def test_add_and_load_product(data_dir: Path, osuser: str, key: bytes) -> None:
+    config.add_product(data_dir, key, osuser, Product(id="milk", name="Milk", unit="l"))
+    products = config.load_products(data_dir, key)
+    assert products["milk"].name == "Milk"
+    assert products["milk"].unit == "l"
+
+
+def test_product_latest_revision_wins(data_dir: Path, osuser: str, key: bytes) -> None:
+    config.add_product(data_dir, key, osuser, Product(id="milk", name="Milk", unit="l"))
+    config.add_product(data_dir, key, osuser, Product(id="milk", name="Whole Milk", unit="l"))
+    products = config.load_products(data_dir, key)
+    assert len(products) == 1
+    assert products["milk"].name == "Whole Milk"
+
+
+def test_retire_product_marks_retired_without_deleting(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    config.add_product(data_dir, key, osuser, Product(id="milk", name="Milk", unit="l"))
+    config.retire_product(data_dir, key, osuser, "milk")
+    products = config.load_products(data_dir, key)
+    assert products["milk"].retired is True
+    assert products["milk"].name == "Milk"
+
+
+def test_retire_unknown_product_raises(data_dir: Path, osuser: str, key: bytes) -> None:
+    with pytest.raises(UnknownProductError):
+        config.retire_product(data_dir, key, osuser, "nonexistent")
+
+
+def test_build_config_splits_active_from_known_products(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    config.add_product(data_dir, key, osuser, Product(id="milk", name="Milk", unit="l"))
+    config.add_product(data_dir, key, osuser, Product(id="eggs", name="Eggs", unit="ct"))
+    config.retire_product(data_dir, key, osuser, "eggs")
+
+    cfg = config.build_config(data_dir, key)
+    assert set(cfg.known_products) == {"milk", "eggs"}
+    assert set(cfg.active_products) == {"milk"}
+
+
+def test_locations_and_products_coexist_in_shared_stream(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    """Locations and products both live in `store.CONFIG_STREAM_ID`; each loader
+    must only see its own kind."""
+    config.add_location(data_dir, key, osuser, Location(id="fridge", name="Fridge"))
+    config.add_product(data_dir, key, osuser, Product(id="milk", name="Milk", unit="l"))
+    config.add_location(data_dir, key, osuser, Location(id="pantry", name="Pantry"))
+    config.add_product(data_dir, key, osuser, Product(id="eggs", name="Eggs", unit="ct"))
+
+    assert set(config.load_locations(data_dir, key)) == {"fridge", "pantry"}
+    assert set(config.load_products(data_dir, key)) == {"milk", "eggs"}
+
+
+def test_old_shape_location_record_without_product_key_still_loads(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    """A config line written before products (or `retired`) existed has only
+    `location`, no `product` key, and no `retired` key inside `location` — must
+    keep validating unchanged."""
+    obj = {
+        "schema_version": SCHEMA_VERSION,
+        "ts": datetime.now(UTC).isoformat(),
+        "actor": osuser,
+        "location": {"id": "fridge", "name": "Fridge", "parent_id": None, "metadata": {}},
+    }
+    store.append(data_dir, key, store.CONFIG_STREAM_ID, obj)
+    locations = config.load_locations(data_dir, key)
+    assert locations["fridge"].name == "Fridge"
+    assert locations["fridge"].retired is False
+    assert config.load_products(data_dir, key) == {}

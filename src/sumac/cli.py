@@ -132,9 +132,10 @@ def init(data_dir: DataDirOption = Path("data")) -> None:
 
 @config_app.command("show")
 def config_show(data_dir: DataDirOption = Path("data")) -> None:
-    """List all locations."""
+    """List all locations and products."""
     key = _key(data_dir)
     render.print_locations(config.load_locations(data_dir, key))
+    render.print_products(config.load_products(data_dir, key))
 
 
 @config_app.command("add-location")
@@ -168,6 +169,34 @@ def config_retire_location(
         raise RetireNonemptyError(f"cannot retire {id!r}: still holds {listing}")
     config.retire_location(data_dir, key, paths.current_user(), id)
     render.print_success(f"Retired location {id!r}")
+
+
+@config_app.command("add-product")
+def config_add_product(
+    name: str,
+    unit: str,
+    id: Annotated[str | None, typer.Option(help="Product id; defaults to a slug of NAME.")] = None,
+    category: Annotated[str | None, typer.Option(help="Product category.")] = None,
+    data_dir: DataDirOption = Path("data"),
+) -> None:
+    """Add (or redefine) a product."""
+    key = _key(data_dir)
+    prod_id = id or _slugify(name)
+    product = models.Product(id=prod_id, name=name, unit=unit, category=category)
+    config.add_product(data_dir, key, paths.current_user(), product)
+    render.print_success(f"Added product {prod_id!r}")
+
+
+@config_app.command("retire-product")
+def config_retire_product(
+    id: str,
+    data_dir: DataDirOption = Path("data"),
+) -> None:
+    """Retire a product. Never deletes — historical records naming it still
+    resolve. Unlike a location, permitted at any time regardless of stock."""
+    key = _key(data_dir)
+    config.retire_product(data_dir, key, paths.current_user(), id)
+    render.print_success(f"Retired product {id!r}")
 
 
 def _location_id_prefix(parent: str | None, name: str, id_prefix: str | None) -> str:

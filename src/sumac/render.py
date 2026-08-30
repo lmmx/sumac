@@ -45,6 +45,25 @@ def print_locations(locations: dict[str, models.Location]) -> None:
     console.print(tree)
 
 
+def print_products(products: dict[str, models.Product]) -> None:
+    if not products:
+        console.print("[yellow]no products configured yet[/yellow]")
+        return
+    table = Table(title="Products")
+    table.add_column("product")
+    table.add_column("unit")
+    table.add_column("category")
+    table.add_column("status")
+    for p in sorted(products.values(), key=lambda product: product.id):
+        table.add_row(
+            f"{p.name} [dim]({p.id})[/dim]",
+            p.unit,
+            p.category or "-",
+            "[dim]retired[/dim]" if p.retired else "",
+        )
+    console.print(table)
+
+
 def print_anomaly_banner(anomalies: tuple[ledger.Anomaly, ...]) -> None:
     if anomalies:
         n = len(anomalies)

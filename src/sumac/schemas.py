@@ -45,6 +45,7 @@ class ProductSchema(BaseModel):
     unit: str = Field(min_length=1)
     category: str | None = None
     metadata: MetadataDict
+    retired: bool = False
 
     def to_domain(self) -> models.Product:
         return models.Product(
@@ -53,6 +54,7 @@ class ProductSchema(BaseModel):
             unit=self.unit,
             category=self.category,
             metadata=self.metadata,
+            retired=self.retired,
         )
 
 
@@ -124,12 +126,24 @@ class InventorySnapshotSchema(BaseModel):
 
 
 class ConfigRecordSchema(BaseModel):
+    """A config line is a location record or a product record, never both. Both
+    fields are optional (rather than a `type` + payload union, as `RecordSchema`
+    uses) so that lines written before products existed — which have only
+    `location` and no `product` key at all — keep validating unchanged."""
+
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int
     ts: datetime
     actor: str = Field(min_length=1)
-    location: LocationSchema
+    location: LocationSchema | None = None
+    product: ProductSchema | None = None
+
+    @model_validator(mode="after")
+    def _check_exactly_one(self) -> ConfigRecordSchema:
+        if (self.location is None) == (self.product is None):
+            raise ValueError("config record must set exactly one of location or product")
+        return self
 
 
 class RecordSchema(BaseModel):
