@@ -574,43 +574,21 @@ Also fixed a **latent gap from Phase 3**, found while rewriting event constructi
 *Acceptance, as shipped:* unit + CLI coverage for the three catalogue rejections plus the cancel-not-replace/permanence semantics (superseding an already-superseded target rejects rather than resurrecting anything). Then used for real: `sumac doctor`'s suggestions on the real log named 8 anomalies from 3 root mistakes (2 display-path pastes, 1 typo — matching the original real-data audit), not 3 records as first assumed. Investigating before writing anything turned up a second layer: for two of the three mistakes, a *third*, correctly-addressed `correction` record already existed in the log and had already applied cleanly (never showing up as an anomaly at all) — the account owner had already fixed the accounting by hand, just not the anomaly. Re-adding a fresh corrected event for those, as first planned, would have subtracted the same stock a second time. Traced fold state directly (not by inspection) before writing anything: only the Tabasco movement needed a real re-add; the other two mistakes needed cancellation only. All 8 corrected via `sumac correct`, one movement re-added at its original timestamp (checked first: no snapshot of any target location post-dates the original mistake, so backdating doesn't interact with any baseline reset). Doctor went 24 → 16 anomalies (the remaining 16 are the unrelated, already-known unregistered-location backlog from Phase 1); `sumac verify` still reports every line intact afterward.
 *Acceptance:* the `hob-right-below-bottom` event is neutralised, `sumac status` reports zero anomalies, and `verify_all()` still passes on unmodified bytes.
 
-**Phase 6 — Property tests.** Hypothesis, four properties (gate soundness moved to Phase 3):
+**Phase 6 — shipped.** Totality and gate soundness were already covered (Phase 1, Phase 3), so this shipped the three properties actually left: model agreement, fold determinism, upcaster round-trip — `tests/test_model_properties.py`, all in-memory, no files/crypto.
 
-1. **Totality** — `evolve` raises for no generated event sequence.
-2. **Model agreement** — the fold matches an independent naive dict pantry that applies commands directly with no events. This catches shared arithmetic errors that gate soundness cannot, because `decide` and `evolve` can be consistently wrong together.
-3. **Fold determinism** — same events, same order, same state, twice.
-4. **Upcaster round-trip** — v1 corpus folds to the same state as its v2 translation.
+`ledger.build_inventory`'s folding core was split into a pure `ledger._fold(records, locations) -> (state, anomalies)`, taking already-upcast events and a locations dict directly — no I/O, so the property tests can drive it with hand-built events instead of writing through encrypted files. `build_inventory` itself is now just load-records-then-call-`_fold`; behavior is unchanged (confirmed by the full suite passing unmodified before any new tests were added).
 
-```python
-class PantryMachine(RuleBasedStateMachine):
-    def __init__(self):
-        super().__init__()
-        self.log: list[Event] = []
-        self.model: dict[tuple[str, str], Decimal] = {}  # independent ground truth
-        self.cfg = test_config()
+**Model agreement** drives `decide.decide_change` through a `RuleBasedStateMachine` against a naive `dict[(location, product), Decimal]` model, independently coded straight from §3.1/§3.5 rather than by calling `_fold` or any of its helpers. Every accepted write is parsed back through the real `RecordSchema` ingest path (not the in-memory event `decide` already built) before being folded and applied to the naive model, so the property also exercises serialize→ingest round-tripping, not just arithmetic. It found a real bug on first run: a `Snapshot` entry asserting an amount of exactly 0 left a phantom `Quantity(amount=0)` key in `_fold`'s baseline-reset state, instead of dropping out the way `_commit` already does for a delta that lands on zero — the fold was internally inconsistent about what "zero" means depending on which code path produced it. Fixed by filtering zero-amount entries out of the snapshot baseline the same way.
 
-    @rule(p=products(), a=locations(), b=locations(), q=amounts())
-    def move(self, p, a, b, q):
-        try:
-            events = decide(MoveCmd(p, a, b, q, "g"), self.fold(), self.cfg)
-        except Rejected:
-            return  # rejection is a legal outcome
-        self.log += events
-        for e in events:
-            apply_to_model(self.model, e)
+**Fold determinism** hands `_fold` a Hypothesis-generated list of events (all six v2 types, small fixed location/product pool) twice — once as generated, once permuted — and asserts identical `(state, anomalies)` both times; `_fold`'s own internal `(ts, actor, id)` sort is what's actually being checked here; the property would fail immediately if that sort were ever dropped or made unstable.
 
-    @invariant()
-    def fold_matches_model(self):
-        assert self.fold().holdings == self.model
+**Upcaster round-trip** compares `upcast.upcast()`'s output against a second, independently hand-written copy of §3.3a's v1→v2 mapping table (not calling `upcast.py`'s own code), for every valid v1 shape (all six `ChangeKind`s plus both valid `correction` shapes) and for `Snapshot`, both going through the real `RecordSchema` ingest path on both sides.
 
-    @invariant()
-    def no_anomalies_from_accepted_commands(self):
-        assert self.fold().anomalies == ()
-```
+*Acceptance, as shipped:* all three properties green (`max_examples` 100–200 per property, `stateful_step_count=30` for model agreement); stable across five different `--hypothesis-seed=random` runs.
 
-*Acceptance:* all five green at `max_examples=300`, `stateful_step_count=50`.
+**Golden log — synthetic only.** `tests/fixtures/golden_log/` (checked in) is generated by `tests/fixtures/generate_golden_log.py`, which is itself the real writer wherever one exists (`decide.decide_change`, `decide.serialize_event`, `decide.decide_correct`, `config.add_location`/`add_product`) and hand-built wire dicts only for v1 shapes the current writer no longer emits. Covers every v1 `ChangeKind` (both `correction` shapes), both snapshot shapes (including empty-entries), and every v2 event type including a `Correction` that supersedes a v1 record (cross-schema-version supersede — no special-casing needed, v1 and v2 share the id namespace). Encrypted under a fixed, non-secret, in-repo test key (`bytes(range(32))`) — no vault, no passphrase, no production data. `test_golden_log_folds_to_expected_state` (`test_model_properties.py`) pins the exact resulting holdings; re-running the generator changes the corpus's ciphertext (fresh AEAD nonces) but must never change that result.
 
-**Golden log — synthetic only.** The checked-in corpus is generated by the current writer under a fixed test key and fixed test config, covering every event type and every schema version. No production data, no real key in the repo. Separately, a local-only test folds the actual log and asserts the resulting inventory matches a checked-in *hash* — gated on the passphrase being present, skipped in CI. Real-data regression detection without committing real data.
+Separately, `tests/test_real_log_regression.py` folds the actual real vault and asserts against a checked-in sha256 (`tests/real_log_inventory.sha256`) of a canonical JSON summary (sorted holdings + sorted anomaly rows) — gated on `SUMAC_DATA_DIR`/`SUMAC_PASSPHRASE` both being set, `pytest.mark.skipif` otherwise, so it never runs in CI and never ran during this session's normal `pytest` invocations either (those never export the real passphrase). Generated and checked in against the real vault's post-Phase-5 state; a maintenance helper (`generate_expected_hash()` in the same file) reproduces it after any deliberate future change to the real data.
 
 **Phase 7 — Optional.** Two independent envelope additions, add whenever convenient — the value in both is having them in the historical record before you need them:
 - **`seq`** (§3.7): explicit monotone integer per segment, written at append time. Enables `sumac doctor` to detect `seq_gap` (truncation) and `seq_duplicate` (bad merge) per segment.

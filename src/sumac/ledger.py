@@ -247,21 +247,22 @@ def _apply_sides(
         _commit(state, loc_id, pid, q)
 
 
-def build_inventory(data_dir: Path, key: bytes, as_of: datetime | None = None) -> Inventory:
-    load_result = _load_v2(data_dir, key)
-    anomalies = list(load_result.anomalies)
-    records = load_result.records
-    if as_of is not None:
-        records = [r for r in records if r.ts <= as_of]
-
-    try:
-        cfg = config.build_config(data_dir, key)
-        locations = cfg.known_locations
-        anomalies.extend(cfg.anomalies)
-    except _READ_TIME_ERRORS as e:
-        anomalies.append(Anomaly(None, "config_unreadable", str(e)))
-        locations = {}
-
+def _fold(
+    records: list[_EventRecord], locations: dict[str, Location]
+) -> tuple[dict[str, dict[str, Quantity]], list[Anomaly]]:
+    """The pure event-folding core of `build_inventory`, split out so Phase 6's
+    in-memory property tests (model agreement, fold determinism, upcaster
+    round-trip) can drive it directly with hand-built events and a locations
+    dict — no files, no crypto. Behaves identically to what `build_inventory`
+    always did; this only moves where the I/O boundary sits. Sorts its own
+    input by `(ts, actor, id)` rather than trusting the caller to have done
+    it — `_load` already sorts for its own purposes (`sumac log`'s display
+    order), but a property test handing this function events straight out of
+    a Hypothesis strategy shouldn't have to replicate that sort to get a
+    meaningful result; sorting an already-sorted list is a no-op, so this
+    changes nothing for `build_inventory`'s existing callers."""
+    records = sorted(records, key=lambda r: (r.ts, r.actor, r.id))
+    anomalies: list[Anomaly] = []
     state: dict[str, dict[str, Quantity]] = {}
     baseline_ts: dict[str, datetime] = {}
 
@@ -274,7 +275,15 @@ def build_inventory(data_dir: Path, key: bytes, as_of: datetime | None = None) -
             continue
         if loc_id not in baseline_ts or r.ts >= baseline_ts[loc_id]:
             baseline_ts[loc_id] = r.ts
-            state[loc_id] = {e.product_id: Quantity(e.amount, e.unit) for e in r.event.entries}
+            # Found by Phase 6's model-agreement property test: a zero-amount
+            # entry ("0 of X here") must drop out entirely, same as `_commit`
+            # already does for a delta that lands exactly on zero — a snapshot
+            # baseline built without this filter left a phantom
+            # Quantity(amount=0) key, inconsistent with "zero means absent"
+            # everywhere else in the fold.
+            state[loc_id] = {
+                e.product_id: Quantity(e.amount, e.unit) for e in r.event.entries if e.amount != 0
+            }
 
     for r in records:
         match r.event:
@@ -325,6 +334,26 @@ def build_inventory(data_dir: Path, key: bytes, as_of: datetime | None = None) -
                 q = Quantity(amount, unit)
                 _apply_sides(state, locations, baseline_ts, anomalies, r, p, [(frm, -q), (to, q)])
 
+    return state, anomalies
+
+
+def build_inventory(data_dir: Path, key: bytes, as_of: datetime | None = None) -> Inventory:
+    load_result = _load_v2(data_dir, key)
+    anomalies = list(load_result.anomalies)
+    records = load_result.records
+    if as_of is not None:
+        records = [r for r in records if r.ts <= as_of]
+
+    try:
+        cfg = config.build_config(data_dir, key)
+        locations = cfg.known_locations
+        anomalies.extend(cfg.anomalies)
+    except _READ_TIME_ERRORS as e:
+        anomalies.append(Anomaly(None, "config_unreadable", str(e)))
+        locations = {}
+
+    state, fold_anomalies = _fold(records, locations)
+    anomalies.extend(fold_anomalies)
     return Inventory(by_location=state, anomalies=tuple(anomalies))
 
 
