@@ -1,17 +1,66 @@
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from sealedlog import Vault
 from sealedlog.errors import WrongPassphraseError
 from typer.testing import CliRunner
 
-from sumac import paths
+from sumac import ledger, paths, store
+from sumac import vault as sumac_vault
 from sumac.cli import app
-from sumac.errors import VaultExistsError
+from sumac.errors import RetireNonemptyError, VaultExistsError
 
 runner = CliRunner()
 PASSPHRASE_ENV = {"SUMAC_PASSPHRASE": "test-pass"}
+
+
+def _real_key(data_dir: Path) -> bytes:
+    """The actual key behind a data dir `_run(data_dir, "init")` created —
+    derived directly rather than via `sumac.passphrase`, whose env-var
+    resolution only applies inside a `CliRunner.invoke` call, not after."""
+    vault = Vault.from_dict(json.loads(paths.vault_path(data_dir).read_text(encoding="utf-8")))
+    return sumac_vault.unlock(vault, PASSPHRASE_ENV["SUMAC_PASSPHRASE"])
+
+
+def _append_raw_change(
+    data_dir: Path,
+    actor: str,
+    product_id: str,
+    amount: str,
+    unit: str,
+    *,
+    to_location: str,
+) -> None:
+    """Appends a change bypassing `decide` entirely — for tests that need a
+    record `sumac add` would now reject (e.g. an unregistered location), to
+    exercise the read-side tolerance (`status`/`find`/`doctor`) rather than
+    the write-side gate."""
+    key = _real_key(data_dir)
+    store.append(
+        data_dir,
+        key,
+        f"log:{actor}",
+        {
+            "schema_version": 1,  # v1 shape (kind/quantity/*_location), not SCHEMA_VERSION
+            "type": "change",
+            "id": "raw-1",
+            "ts": datetime.now(UTC).isoformat(),
+            "actor": actor,
+            "supersedes": None,
+            "payload": {
+                "kind": "purchase",
+                "product_id": product_id,
+                "quantity": {"amount": amount, "unit": unit},
+                "from_location": None,
+                "to_location": to_location,
+                "metadata": {},
+            },
+        },
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -53,6 +102,159 @@ def test_add_location_and_show(data_dir: Path) -> None:
     assert "Fridge" in result.output
 
 
+def test_retire_location_shows_in_config(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Fridge", "--id", "fridge")
+    result = _run(data_dir, "config", "retire-location", "fridge")
+    assert result.exit_code == 0, result.output
+    result = _run(data_dir, "config", "show")
+    assert "retired" in result.output
+
+
+def test_retire_unknown_location_fails(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    result = _run(data_dir, "config", "retire-location", "nonexistent")
+    assert result.exit_code != 0
+
+
+def test_retire_nonempty_location_fails(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "add", "purchase", "milk", "1", "l", "--to", "pantry")
+    result = _run(data_dir, "config", "retire-location", "pantry")
+    assert result.exit_code != 0
+    assert isinstance(result.exception, RetireNonemptyError)
+    assert "milk" in str(result.exception)
+
+
+def test_retire_location_with_stock_only_in_sublocation_succeeds(data_dir: Path) -> None:
+    """`retire-location` checks the named location's own holdings, not its
+    sub-locations' — each sub-location is retired (and checked) on its own."""
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Fridge", "--id", "fridge")
+    _run(data_dir, "config", "add-location", "Door", "--id", "fridge-door", "--parent", "fridge")
+    _run(data_dir, "add", "purchase", "milk", "1", "l", "--to", "fridge-door")
+    result = _run(data_dir, "config", "retire-location", "fridge")
+    assert result.exit_code == 0, result.output
+
+
+def test_add_product_and_show(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    result = _run(data_dir, "config", "add-product", "Milk", "l", "--id", "milk")
+    assert result.exit_code == 0, result.output
+    result = _run(data_dir, "config", "show")
+    assert result.exit_code == 0
+    assert "Milk" in result.output
+
+
+def test_retire_product_shows_in_config(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-product", "Milk", "l", "--id", "milk")
+    result = _run(data_dir, "config", "retire-product", "milk")
+    assert result.exit_code == 0, result.output
+    result = _run(data_dir, "config", "show")
+    assert "retired" in result.output
+
+
+def test_retire_product_with_stock_succeeds(data_dir: Path) -> None:
+    """Unlike a location, retiring a product is permitted at any time."""
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "config", "add-product", "Milk", "l", "--id", "milk")
+    _run(data_dir, "add", "purchase", "milk", "1", "l", "--to", "pantry")
+    status = _run(data_dir, "status")
+    assert "milk" in status.output, "setup didn't actually produce stock"
+
+    result = _run(data_dir, "config", "retire-product", "milk")
+    assert result.exit_code == 0, result.output
+
+
+def test_retire_unknown_product_fails(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    result = _run(data_dir, "config", "retire-product", "nonexistent")
+    assert result.exit_code != 0
+
+
+def test_check_units_clean_when_nothing_observed(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    result = _run(data_dir, "config", "check-units")
+    assert result.exit_code == 0
+    assert "every observed" in result.output
+
+
+def test_check_units_suggests_command_for_unregistered_product(data_dir: Path) -> None:
+    """`sumac add` now auto-registers on first use (Phase 3), so an
+    unregistered product can no longer arise through it — check-units is a
+    legacy-data tool now. Simulate a pre-decide record directly."""
+    _run(data_dir, "init")
+    _append_raw_change(data_dir, "alice", "milk", "1", "l", to_location="pantry")
+    result = _run(data_dir, "config", "check-units")
+    assert result.exit_code == 1
+    assert "milk" in result.output
+    assert "add-product" in result.output
+
+
+def test_check_units_flags_unconvertible_unit_for_registered_product(data_dir: Path) -> None:
+    """Same reasoning: decide now rejects unit_unconvertible at write time,
+    so this shape is legacy-data-only too."""
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-product", "Flour", "kg", "--id", "flour")
+    _append_raw_change(data_dir, "alice", "flour", "1", "lb", to_location="pantry")
+    result = _run(data_dir, "config", "check-units")
+    assert result.exit_code == 1
+    assert "lb" in result.output
+    assert "unregistered" not in result.output.lower()
+
+
+def test_check_units_clean_when_registered_and_convertible(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "config", "add-product", "Flour", "kg", "--id", "flour")
+    add_result = _run(data_dir, "add", "purchase", "flour", "1", "kg", "--to", "pantry")
+    assert add_result.exit_code == 0, add_result.output
+
+    result = _run(data_dir, "config", "check-units")
+    assert result.exit_code == 0
+    assert "every observed" in result.output
+
+
+def test_check_units_reports_unconfirmed_auto_registration(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    add_result = _run(data_dir, "add", "purchase", "kimchi", "1", "jar", "--to", "pantry")
+    assert add_result.exit_code == 0, add_result.output
+
+    result = _run(data_dir, "config", "check-units")
+    assert result.exit_code == 1
+    assert "never confirmed" in result.output
+    assert "kimchi" in result.output
+
+
+def test_check_units_does_not_flag_deliberately_registered_product(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "config", "add-product", "Kimchi", "jar", "--id", "kimchi")
+    add_result = _run(data_dir, "add", "purchase", "kimchi", "1", "jar", "--to", "pantry")
+    assert add_result.exit_code == 0, add_result.output
+
+    result = _run(data_dir, "config", "check-units")
+    assert result.exit_code == 0
+    assert "never confirmed" not in result.output
+
+
+def test_check_units_confirming_an_auto_registration_clears_the_flag(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "add", "purchase", "kimchi", "1", "jar", "--to", "pantry")
+
+    # confirm it — redefining clears the auto marker, per §3.5a
+    _run(data_dir, "config", "add-product", "Kimchi", "jar", "--id", "kimchi")
+
+    result = _run(data_dir, "config", "check-units")
+    assert result.exit_code == 0
+    assert "never confirmed" not in result.output
+
+
 def test_add_change_and_status(data_dir: Path) -> None:
     _run(data_dir, "init")
     _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
@@ -66,11 +268,19 @@ def test_add_change_and_status(data_dir: Path) -> None:
 
 def test_snapshot_and_find(data_dir: Path) -> None:
     _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Fridge", "--id", "fridge")
     result = _run(data_dir, "snapshot", "fridge", "milk=3/l")
     assert result.exit_code == 0, result.output
     result = _run(data_dir, "find", "milk")
     assert result.exit_code == 0
-    assert "fridge" in result.output
+    assert "Fridge" in result.output
+
+
+def test_find_shows_anomaly_banner(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    _append_raw_change(data_dir, "alice", "milk", "1", "l", to_location="hob-right-below-bottom")
+    result = _run(data_dir, "find", "milk")
+    assert "could not be applied" in result.output
 
 
 def test_verify_clean(data_dir: Path) -> None:
@@ -90,12 +300,95 @@ def test_verify_detects_tampering(data_dir: Path) -> None:
     assert result.exit_code != 0
 
 
-def test_log_shows_recorded_events(data_dir: Path) -> None:
+def test_doctor_clean_log(data_dir: Path) -> None:
     _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "add", "purchase", "milk", "1", "l", "--to", "pantry")
+    result = _run(data_dir, "doctor")
+    assert result.exit_code == 0, result.output
+    assert "no anomalies" in result.output
+
+
+def test_doctor_flags_unknown_location(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    _append_raw_change(data_dir, "alice", "milk", "1", "l", to_location="hob-right-below-bottom")
+    result = _run(data_dir, "doctor")
+    assert result.exit_code == 1
+    assert "unknown_location" in result.output
+
+
+def test_doctor_suggests_a_ready_to_paste_correction(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    _append_raw_change(data_dir, "alice", "milk", "1", "l", to_location="hob-right-below-bottom")
+    result = _run(data_dir, "doctor")
+    assert "sumac correct raw-1 --reason" in result.output
+
+
+def test_doctor_suggests_only_one_correction_for_a_record_with_two_anomalies(
+    data_dir: Path,
+) -> None:
+    """A duplicated line trips both seq_duplicate and duplicate_record on the
+    same record id — doctor must offer `sumac correct` for it once, not
+    once per anomaly (a second `correct` of the same target would just fail
+    on supersede_already_applied)."""
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "add", "purchase", "milk", "1", "l", "--to", "pantry")
+    log_path = paths.log_path(data_dir, "alice")
+    line = log_path.read_text()
+    log_path.write_text(line + line)
+
+    result = _run(data_dir, "doctor")
+    assert result.output.count("sumac correct") == 1
+
+
+def test_correct_cancels_record_and_removes_it_from_status(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "add", "purchase", "milk", "2", "l", "--to", "pantry")
+
+    key = _real_key(data_dir)
+    record_id = ledger.load_records(data_dir, key)[0].id
+
+    result = _run(data_dir, "correct", record_id, "--reason", "typo, wrong product")
+    assert result.exit_code == 0, result.output
+
+    result = _run(data_dir, "status")
+    assert "milk" not in result.output
+
+    result = _run(data_dir, "log")
+    assert "correction" in result.output
+    assert "supersedes" in result.output
+
+
+def test_correct_unknown_record_id_fails(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    result = _run(data_dir, "correct", "nope", "--reason", "typo")
+    assert result.exit_code != 0
+
+
+def test_correct_already_corrected_record_fails(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "add", "purchase", "milk", "2", "l", "--to", "pantry")
+
+    key = _real_key(data_dir)
+    record_id = ledger.load_records(data_dir, key)[0].id
+    _run(data_dir, "correct", record_id, "--reason", "typo")
+
+    result = _run(data_dir, "correct", record_id, "--reason", "again")
+    assert result.exit_code != 0
+
+
+def test_log_shows_recorded_events(data_dir: Path) -> None:
+    """A "purchase" kind is now stored (and shown) as an Acquired v2 event —
+    "purchase" survives only as the CLI-facing ChangeKind vocabulary."""
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
     _run(data_dir, "add", "purchase", "milk", "1", "l", "--to", "pantry")
     result = _run(data_dir, "log")
     assert result.exit_code == 0
-    assert "purchase" in result.output
+    assert "acquired" in result.output
 
 
 def test_add_array_creates_numbered_sublocations(data_dir: Path) -> None:
@@ -152,6 +445,7 @@ def test_another_user_cannot_write_into_alices_log(
     data_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
     _run(data_dir, "add", "purchase", "milk", "1", "l", "--to", "pantry")
 
     monkeypatch.setattr("getpass.getuser", lambda: "bob")

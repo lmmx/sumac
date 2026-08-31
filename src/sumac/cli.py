@@ -16,8 +16,9 @@ from sealedlog.errors import SealError
 
 from sumac import (
     FORMAT_VERSION,
-    SCHEMA_VERSION,
     config,
+    decide,
+    events,
     ledger,
     models,
     paths,
@@ -25,8 +26,8 @@ from sumac import (
     store,
 )
 from sumac import vault as sumac_vault
-from sumac.errors import SumacError, VaultExistsError, VaultNotFoundError
-from sumac.models import ChangeKind, InventoryChange, InventorySnapshot, Quantity, SnapshotEntry
+from sumac.errors import RetireNonemptyError, SumacError, VaultExistsError, VaultNotFoundError
+from sumac.models import ChangeKind
 from sumac.passphrase import get_key, resolve_passphrase
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
@@ -61,58 +62,13 @@ def _parse_decimal(raw: str) -> Decimal:
         raise typer.BadParameter(f"expected a decimal amount, got {raw!r}") from e
 
 
-def _parse_snapshot_entry(spec: str) -> SnapshotEntry:
+def _parse_snapshot_entry(spec: str) -> events.SnapshotEntry:
     try:
         product_id, rest = spec.split("=", 1)
         amount_str, unit = rest.split("/", 1)
-        return SnapshotEntry(product_id=product_id, quantity=Quantity(Decimal(amount_str), unit))
+        return events.SnapshotEntry(product_id=product_id, amount=Decimal(amount_str), unit=unit)
     except (ValueError, InvalidOperation) as e:
         raise typer.BadParameter(f"expected PRODUCT=AMOUNT/UNIT, got {spec!r}") from e
-
-
-def _quantity_obj(q: Quantity) -> dict:
-    return {"amount": str(q.amount), "unit": q.unit}
-
-
-def _change_to_obj(record_id: str, ts: datetime, actor: str, change: InventoryChange) -> dict:
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "type": "change",
-        "id": record_id,
-        "ts": ts.isoformat(),
-        "actor": actor,
-        "supersedes": None,
-        "payload": {
-            "kind": change.kind.value,
-            "product_id": change.product_id,
-            "quantity": _quantity_obj(change.quantity),
-            "from_location": change.from_location,
-            "to_location": change.to_location,
-            "metadata": dict(change.metadata),
-        },
-    }
-
-
-def _snapshot_to_obj(record_id: str, ts: datetime, actor: str, snap: InventorySnapshot) -> dict:
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "type": "snapshot",
-        "id": record_id,
-        "ts": ts.isoformat(),
-        "actor": actor,
-        "supersedes": None,
-        "payload": {
-            "location_id": snap.location_id,
-            "entries": [
-                {
-                    "product_id": e.product_id,
-                    "quantity": _quantity_obj(e.quantity),
-                    "metadata": dict(e.metadata),
-                }
-                for e in snap.entries
-            ],
-        },
-    }
 
 
 @app.command()
@@ -132,9 +88,10 @@ def init(data_dir: DataDirOption = Path("data")) -> None:
 
 @config_app.command("show")
 def config_show(data_dir: DataDirOption = Path("data")) -> None:
-    """List all locations."""
+    """List all locations and products."""
     key = _key(data_dir)
     render.print_locations(config.load_locations(data_dir, key))
+    render.print_products(config.load_products(data_dir, key))
 
 
 @config_app.command("add-location")
@@ -150,6 +107,66 @@ def config_add_location(
     location = models.Location(id=loc_id, name=name, parent_id=parent)
     config.add_location(data_dir, key, paths.current_user(), location)
     render.print_success(f"Added location {loc_id!r}")
+
+
+@config_app.command("retire-location")
+def config_retire_location(
+    id: str,
+    data_dir: DataDirOption = Path("data"),
+) -> None:
+    """Retire a location. Never deletes — historical records naming it still
+    resolve; new writes to it are for a later phase to reject. Rejected if the
+    location itself currently holds stock (its sub-locations aren't checked —
+    each is retired, and checked, on its own)."""
+    key = _key(data_dir)
+    holdings = ledger.build_inventory(data_dir, key).at(id)
+    if holdings:
+        listing = ", ".join(f"{q.amount} {q.unit} {p}" for p, q in sorted(holdings.items()))
+        raise RetireNonemptyError(f"cannot retire {id!r}: still holds {listing}")
+    config.retire_location(data_dir, key, paths.current_user(), id)
+    render.print_success(f"Retired location {id!r}")
+
+
+@config_app.command("add-product")
+def config_add_product(
+    name: str,
+    unit: str,
+    id: Annotated[str | None, typer.Option(help="Product id; defaults to a slug of NAME.")] = None,
+    category: Annotated[str | None, typer.Option(help="Product category.")] = None,
+    data_dir: DataDirOption = Path("data"),
+) -> None:
+    """Add (or redefine) a product."""
+    key = _key(data_dir)
+    prod_id = id or _slugify(name)
+    product = models.Product(id=prod_id, name=name, unit=unit, category=category)
+    config.add_product(data_dir, key, paths.current_user(), product)
+    render.print_success(f"Added product {prod_id!r}")
+
+
+@config_app.command("retire-product")
+def config_retire_product(
+    id: str,
+    data_dir: DataDirOption = Path("data"),
+) -> None:
+    """Retire a product. Never deletes — historical records naming it still
+    resolve. Unlike a location, permitted at any time regardless of stock."""
+    key = _key(data_dir)
+    config.retire_product(data_dir, key, paths.current_user(), id)
+    render.print_success(f"Retired product {id!r}")
+
+
+@config_app.command("check-units")
+def config_check_units(data_dir: DataDirOption = Path("data")) -> None:
+    """Report unregistered products and unconvertible units observed in the
+    log (legacy data — `sumac add` auto-registers now, so these can only
+    come from before decide existed), and every auto-registered product
+    that hasn't since been confirmed by a deliberate `add-product`."""
+    key = _key(data_dir)
+    observed = ledger.observed_product_units(data_dir, key)
+    cfg = config.build_config(data_dir, key)
+    ok = render.print_unit_check(observed, cfg)
+    if not ok:
+        raise typer.Exit(code=1)
 
 
 def _location_id_prefix(parent: str | None, name: str, id_prefix: str | None) -> str:
@@ -216,15 +233,24 @@ def add(
     correction, or movement between locations."""
     key = _key(data_dir)
     actor = paths.current_user()
-    change = InventoryChange(
+    cfg = config.build_config(data_dir, key)
+    inventory = ledger.build_inventory(data_dir, key)
+    writes, messages = decide.decide_change(
         kind=kind,
         product_id=product_id,
-        quantity=Quantity(amount=_parse_decimal(amount), unit=unit),
+        amount=_parse_decimal(amount),
+        unit=unit,
         from_location=from_location,
         to_location=to_location,
+        actor=actor,
+        occurred_at=datetime.now(UTC),
+        inventory=inventory,
+        cfg=cfg,
     )
-    obj = _change_to_obj(str(uuid4()), datetime.now(UTC), actor, change)
-    store.append(data_dir, key, f"log:{actor}", obj)
+    for message in messages:
+        render.print_warning(message)
+    for w in writes:
+        store.append(data_dir, key, w.stream, w.obj)
     render.print_success(f"Recorded {kind.value} of {amount} {unit} {product_id}")
 
 
@@ -240,10 +266,36 @@ def snapshot(
     key = _key(data_dir)
     actor = paths.current_user()
     parsed = tuple(_parse_snapshot_entry(e) for e in (entries or []))
-    snap = InventorySnapshot(location_id=location_id, entries=parsed)
-    obj = _snapshot_to_obj(str(uuid4()), datetime.now(UTC), actor, snap)
+    event = events.Snapshot(location_id=location_id, entries=parsed)
+    obj = decide.serialize_event(
+        event, actor=actor, occurred_at=datetime.now(UTC), cmd_id=str(uuid4())
+    )
     store.append(data_dir, key, f"log:{actor}", obj)
     render.print_success(f"Recorded snapshot of {location_id!r} ({len(parsed)} entries)")
+
+
+@app.command()
+def correct(
+    record_id: str,
+    reason: Annotated[str, typer.Option("--reason", help="Why this record is being corrected.")],
+    data_dir: DataDirOption = Path("data"),
+) -> None:
+    """Cancel RECORD_ID: appends a correction that supersedes it. Nothing is
+    rewritten or deleted — the targeted record stays in the log, permanently
+    excluded from the fold (§3.6). To replace rather than just cancel, run
+    this and then `sumac add`/`sumac snapshot` with the corrected values."""
+    key = _key(data_dir)
+    actor = paths.current_user()
+    records = ledger.load_all_records(data_dir, key)
+    write = decide.decide_correct(
+        target_id=record_id,
+        reason=reason,
+        actor=actor,
+        occurred_at=datetime.now(UTC),
+        records=records,
+    )
+    store.append(data_dir, key, write.stream, write.obj)
+    render.print_success(f"Corrected {record_id!r}: {reason}")
 
 
 @app.command()
@@ -255,9 +307,12 @@ def status(
     (shelves, doors, grid cells, ...), not just that exact node."""
     key = _key(data_dir)
     inventory = ledger.build_inventory(data_dir, key)
-    locations = config.load_locations(data_dir, key)
+    locations = ledger.load_locations_or_empty(data_dir, key)
     scope = config.descendants(locations, location) if location else None
+    render.print_anomaly_banner(inventory.anomalies)
     render.print_status(inventory, locations, scope)
+    if inventory.anomalies:
+        raise typer.Exit(code=1)
 
 
 @app.command()
@@ -271,7 +326,8 @@ def find(
     """Show every location currently holding PRODUCT_ID (partial match by default)."""
     key = _key(data_dir)
     inventory = ledger.build_inventory(data_dir, key)
-    locations = config.load_locations(data_dir, key)
+    locations = ledger.load_locations_or_empty(data_dir, key)
+    render.print_anomaly_banner(inventory.anomalies)
     render.print_find(inventory, locations, product_id, exact=exact)
 
 
@@ -289,6 +345,16 @@ def verify(data_dir: DataDirOption = Path("data")) -> None:
     result = ledger.verify_all(data_dir, key)
     render.print_verify(result)
     if not result.ok:
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def doctor(data_dir: DataDirOption = Path("data")) -> None:
+    """Tolerant fold: report every record that cannot be applied, without crashing."""
+    key = _key(data_dir)
+    report = ledger.diagnose(data_dir, key)
+    render.print_doctor(report)
+    if report.anomalies:
         raise typer.Exit(code=1)
 
 

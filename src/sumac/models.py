@@ -4,8 +4,11 @@ Edit this module to change what sumac stores; nothing else in the package
 should need to change in step with it.
 
 `Record` is the envelope written to JSONL (id/ts/actor/supersedes live there,
-once); `InventoryChange` and `InventorySnapshot` are its two payload shapes
-and carry only what's specific to each.
+once). Its payload is either a v1 shape (`InventoryChange`/`InventorySnapshot`
+— schema_version 1, the only thing ever written before Phase 4b) or a v2
+event (`sumac.events.Event` — schema_version 2, what the writer emits now).
+Both live in the same log forever; nothing gets rewritten. See
+docs/journal/2026-08-30 §3.3a/§3.3 for the full v1/v2 design.
 """
 
 from __future__ import annotations
@@ -15,6 +18,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
+
+from sumac import events
 
 JsonValue = None | bool | int | float | str | list["JsonValue"] | Mapping[str, "JsonValue"]
 
@@ -34,15 +39,21 @@ class Location:
     name: str
     parent_id: str | None = None
     metadata: Mapping[str, JsonValue] = field(default_factory=dict)
+    retired: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class Product:
     id: str
     name: str
-    unit: str
+    unit: str  # canonical unit; nominal, not authoritative — see Config.convert
     category: str | None = None
     metadata: Mapping[str, JsonValue] = field(default_factory=dict)
+    retired: bool = False
+    # alt unit -> how many canonical units one of it equals, e.g. {"jar": 340}
+    # for a canonical unit of "g" meaning 1 jar = 340 g. Nominal, not exact —
+    # see Config.convert and §3.4(c) of the design journal.
+    conversions: Mapping[str, Decimal] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,12 +110,36 @@ class InventorySnapshot:
 
 @dataclass(frozen=True, slots=True)
 class Record:
-    """Envelope for every JSONL line: a snapshot or a change."""
+    """Envelope for every JSONL line: a v1 change/snapshot, or a v2 event."""
 
     schema_version: int
-    type: str  # "snapshot" | "change"
+    # v1: "snapshot" | "change"
+    # v2: "snapshot" | "acquired" | "consumed" | "discarded" | "moved" | "counted"
+    # | "correction"
+    type: str
     id: str
     ts: datetime
     actor: str
     supersedes: str | None
-    payload: InventorySnapshot | InventoryChange
+    payload: InventorySnapshot | InventoryChange | events.Event
+    # Phase 7 (docs/journal/2026-08-30 §3.7): both `None` on every record
+    # written before this phase and on config-stream records forever (config
+    # isn't a gap-detectable segment — it's latest-revision-wins, not
+    # append-sequential). `seq` is assigned by `store.append`, not `decide`,
+    # since it depends on what's already on disk. `cmd_id` is assigned by
+    # `decide`/`cli` — one shared value per logical command, even when a
+    # command produces more than one record (e.g. Sec3.5's Counted+the event
+    # it precedes).
+    seq: int | None = None
+    cmd_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Anomaly:
+    """A record, line, or config entry the fold could not apply or resolve.
+    Never raised — only recorded. Shared between `ledger` (data-level anomalies)
+    and `config` (e.g. `circular_parent`) so both surface through one channel."""
+
+    record_id: str | None
+    reason: str  # "line_failure" | "invalid_record" | "unknown_location" | "unit_mismatch" | ...
+    detail: str
