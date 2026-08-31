@@ -102,6 +102,32 @@ def test_add_location_and_show(data_dir: Path) -> None:
     assert "Fridge" in result.output
 
 
+def test_config_show_locations_only_omits_products(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Fridge", "--id", "fridge")
+    _run(data_dir, "config", "add-product", "Milk", "l", "--id", "milk")
+    result = _run(data_dir, "config", "show", "--locations-only")
+    assert result.exit_code == 0, result.output
+    assert "Fridge" in result.output
+    assert "Milk" not in result.output
+
+
+def test_config_show_products_only_omits_locations(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Fridge", "--id", "fridge")
+    _run(data_dir, "config", "add-product", "Milk", "l", "--id", "milk")
+    result = _run(data_dir, "config", "show", "--products-only")
+    assert result.exit_code == 0, result.output
+    assert "Milk" in result.output
+    assert "Fridge" not in result.output
+
+
+def test_config_show_both_flags_rejected(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    result = _run(data_dir, "config", "show", "--locations-only", "--products-only")
+    assert result.exit_code != 0
+
+
 def test_retire_location_shows_in_config(data_dir: Path) -> None:
     _run(data_dir, "init")
     _run(data_dir, "config", "add-location", "Fridge", "--id", "fridge")

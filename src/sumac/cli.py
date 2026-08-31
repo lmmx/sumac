@@ -87,11 +87,23 @@ def init(data_dir: DataDirOption = Path("data")) -> None:
 
 
 @config_app.command("show")
-def config_show(data_dir: DataDirOption = Path("data")) -> None:
+def config_show(
+    data_dir: DataDirOption = Path("data"),
+    locations_only: Annotated[
+        bool, typer.Option("--locations-only", help="Only show locations.")
+    ] = False,
+    products_only: Annotated[
+        bool, typer.Option("--products-only", help="Only show products.")
+    ] = False,
+) -> None:
     """List all locations and products."""
+    if locations_only and products_only:
+        raise typer.BadParameter("--locations-only and --products-only are mutually exclusive")
     key = _key(data_dir)
-    render.print_locations(config.load_locations(data_dir, key))
-    render.print_products(config.load_products(data_dir, key))
+    if not products_only:
+        render.print_locations(config.load_locations(data_dir, key))
+    if not locations_only:
+        render.print_products(config.load_products(data_dir, key))
 
 
 @config_app.command("add-location")
