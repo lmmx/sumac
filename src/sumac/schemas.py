@@ -295,6 +295,15 @@ class SnapshotSchemaV2(BaseModel):
         )
 
 
+class CorrectionSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(min_length=1)
+
+    def to_domain(self) -> events.Correction:
+        return events.Correction(reason=self.reason)
+
+
 class ConfigRecordSchema(BaseModel):
     """A config line is a location record or a product record, never both. Both
     fields are optional (rather than a `type` + payload union, as `RecordSchema`
@@ -327,6 +336,7 @@ _V2_PAYLOAD_BY_TYPE: dict[str, type[BaseModel]] = {
     "moved": MovedSchema,
     "counted": CountedSchema,
     "snapshot": SnapshotSchemaV2,
+    "correction": CorrectionSchema,
 }
 
 
@@ -334,7 +344,9 @@ class RecordSchema(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int
-    type: Literal["change", "snapshot", "acquired", "consumed", "discarded", "moved", "counted"]
+    type: Literal[
+        "change", "snapshot", "acquired", "consumed", "discarded", "moved", "counted", "correction"
+    ]
     id: str = Field(min_length=1)
     ts: datetime
     actor: str = Field(min_length=1)
@@ -348,6 +360,7 @@ class RecordSchema(BaseModel):
         | MovedSchema
         | CountedSchema
         | SnapshotSchemaV2
+        | CorrectionSchema
     )
 
     @model_validator(mode="before")

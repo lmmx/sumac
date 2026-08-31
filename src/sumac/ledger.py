@@ -36,6 +36,7 @@ _READ_TIME_ERRORS = (SumacError, SealError, ValidationError)
 @dataclass(frozen=True, slots=True)
 class _LoadResult:
     records: list[Record]
+    all_records: list[Record]
     anomalies: list[Anomaly]
 
 
@@ -67,14 +68,23 @@ def _load(data_dir: Path, key: bytes) -> _LoadResult:
     superseded = {r.supersedes for r in parsed if r.supersedes is not None}
     live = [r for r in parsed if r.id not in superseded]
     live.sort(key=lambda r: (r.ts, r.actor, r.id))
-    return _LoadResult(records=live, anomalies=anomalies)
+    return _LoadResult(records=live, all_records=parsed, anomalies=anomalies)
 
 
 def load_records(data_dir: Path, key: bytes) -> list[Record]:
-    """All live v1 records (superseded ones dropped, unfoldable ones dropped
+    """All live records (superseded ones dropped, unfoldable ones dropped
     as anomalies), ordered for deterministic folding. Used by `sumac log`,
-    which displays the stored (v1) shape — not upcast, unlike `build_inventory`."""
+    which displays the stored shape — not upcast, unlike `build_inventory`."""
     return _load(data_dir, key).records
+
+
+def load_all_records(data_dir: Path, key: bytes) -> list[Record]:
+    """Every parsed record, live *and* superseded alike — unlike `load_records`,
+    which drops superseded records entirely. `decide.decide_correct` needs
+    this to tell "never existed" (`supersede_target_missing`) apart from
+    "already superseded" (`supersede_already_applied`), a distinction
+    `load_records`'s filtered view has already erased."""
+    return _load(data_dir, key).all_records
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,6 +279,12 @@ def build_inventory(data_dir: Path, key: bytes, as_of: datetime | None = None) -
     for r in records:
         match r.event:
             case events.Snapshot():
+                continue
+
+            case events.Correction():
+                # Cancel-only (§3.6): the record it targets is already
+                # excluded from `records` by `_load`'s supersedes filtering.
+                # This one carries no change of its own.
                 continue
 
             case events.Counted(product_id=p, at=loc_id, amount=amount, unit=unit):

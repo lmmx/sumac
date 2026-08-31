@@ -193,6 +193,8 @@ def print_find(
 def _describe_payload(
     payload: models.InventoryChange | models.InventorySnapshot | events.Event,
 ) -> str:
+    if isinstance(payload, events.Correction):
+        return f"correction: {payload.reason}"
     if isinstance(payload, models.InventoryChange):
         if payload.from_location and payload.to_location:
             arrow = f" {payload.from_location} -> {payload.to_location}"
@@ -239,7 +241,10 @@ def print_log(records: list[models.Record]) -> None:
     table.add_column("type")
     table.add_column("detail")
     for r in records:
-        table.add_row(r.ts.isoformat(), r.actor, r.type, _describe_payload(r.payload))
+        detail = _describe_payload(r.payload)
+        if r.supersedes is not None:
+            detail += f" [dim](supersedes {r.supersedes})[/dim]"
+        table.add_row(r.ts.isoformat(), r.actor, r.type, detail)
     console.print(table)
 
 
@@ -254,6 +259,16 @@ def print_doctor(report: ledger.DoctorReport) -> None:
     for a in report.anomalies:
         table.add_row(a.reason, a.record_id or "-", a.detail)
     console.print(table)
+
+    suggestions = [a for a in report.anomalies if a.record_id is not None]
+    if suggestions:
+        console.print(
+            "\n[dim]Ready-to-paste corrections (cancels the record, doesn't replace it — "
+            "re-add a fixed version separately if needed):[/dim]"
+        )
+        for a in suggestions:
+            reason = f"{a.reason}: {a.detail}".replace('"', "'")
+            console.print(f'  sumac correct {a.record_id} --reason "{reason}"')
 
 
 def print_verify(result: ledger.VerifyResult) -> None:

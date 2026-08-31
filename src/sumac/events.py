@@ -95,4 +95,16 @@ class Snapshot:
     entries: tuple[SnapshotEntry, ...]
 
 
-Event = Acquired | Consumed | Discarded | Moved | Counted | Snapshot
+@dataclass(frozen=True, slots=True)
+class Correction:
+    """Cancel-only payload for `Record.supersedes` (§3.6): the targeted record
+    is excluded from the fold and this carries no change of its own — `reason`
+    is why, `actor` is deliberately not here since `Record.actor` already has
+    it. A record that both cancels and asserts a real replacement event
+    ("replace" in §3.6's terms) uses one of the event types above with
+    `reason="correction"` and `supersedes` set, not this."""
+
+    reason: str
+
+
+Event = Acquired | Consumed | Discarded | Moved | Counted | Snapshot | Correction

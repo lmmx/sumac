@@ -3,12 +3,13 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import cast
+from unittest.mock import patch
 
 import pytest
 
-from sumac import config, decide, ledger
+from sumac import config, decide, events, ledger
 from sumac.errors import Rejected
-from sumac.models import ChangeKind, Location, Product, Quantity
+from sumac.models import ChangeKind, Location, Product, Quantity, Record
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -402,3 +403,78 @@ def test_acquired_events_never_get_a_counted_correction() -> None:
     assert len(writes) == 1
     assert writes[0].obj["type"] == "acquired"
     assert messages == []
+
+
+def _record(record_id: str, *, supersedes: str | None = None) -> Record:
+    return Record(
+        schema_version=2,
+        type="acquired",
+        id=record_id,
+        ts=T0,
+        actor="alice",
+        supersedes=supersedes,
+        payload=events.Acquired(product_id="milk", to="pantry", amount=Decimal("1"), unit="l"),
+    )
+
+
+def test_correct_produces_a_correction_write_superseding_the_target() -> None:
+    write = decide.decide_correct(
+        target_id="bad-1",
+        reason="typo, location does not exist",
+        actor="alice",
+        occurred_at=T0,
+        records=[_record("bad-1")],
+    )
+    assert write.stream == "log:alice"
+    assert write.obj["schema_version"] == 2
+    assert write.obj["type"] == "correction"
+    assert write.obj["supersedes"] == "bad-1"
+    assert write.obj["payload"] == {"reason": "typo, location does not exist"}
+
+
+def test_correct_missing_target_is_rejected() -> None:
+    with pytest.raises(Rejected) as exc_info:
+        decide.decide_correct(
+            target_id="nope", reason="typo", actor="alice", occurred_at=T0, records=[_record("r1")]
+        )
+    assert exc_info.value.reason == "supersede_target_missing"
+
+
+def test_correct_already_superseded_target_is_rejected() -> None:
+    """`records` must be the unfiltered view: a target that's already been
+    superseded once is still `in the log` — it must be told apart from one
+    that never existed, not conflated with `supersede_target_missing`."""
+    records = [_record("bad-1"), _record("fix-1", supersedes="bad-1")]
+    with pytest.raises(Rejected) as exc_info:
+        decide.decide_correct(
+            target_id="bad-1", reason="again", actor="alice", occurred_at=T0, records=records
+        )
+    assert exc_info.value.reason == "supersede_already_applied"
+
+
+def test_correct_blank_reason_is_rejected() -> None:
+    with pytest.raises(Rejected) as exc_info:
+        decide.decide_correct(
+            target_id="bad-1",
+            reason="   ",
+            actor="alice",
+            occurred_at=T0,
+            records=[_record("bad-1")],
+        )
+    assert exc_info.value.reason == "missing_reason"
+
+
+def test_correct_self_supersede_is_rejected() -> None:
+    """Unreachable via the CLI in practice (the new record's id is a fresh
+    uuid4, never the target's), but `decide_correct` guards it anyway per
+    §4's catalogue — verified here by forcing the generated id to collide."""
+    with patch("sumac.decide.uuid4", return_value="bad-1"):
+        with pytest.raises(Rejected) as exc_info:
+            decide.decide_correct(
+                target_id="bad-1",
+                reason="typo",
+                actor="alice",
+                occurred_at=T0,
+                records=[_record("bad-1")],
+            )
+    assert exc_info.value.reason == "supersede_self"

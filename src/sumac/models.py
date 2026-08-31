@@ -115,6 +115,7 @@ class Record:
     schema_version: int
     # v1: "snapshot" | "change"
     # v2: "snapshot" | "acquired" | "consumed" | "discarded" | "moved" | "counted"
+    # | "correction"
     type: str
     id: str
     ts: datetime

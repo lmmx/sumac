@@ -35,7 +35,7 @@ from uuid import uuid4
 from sumac import SCHEMA_VERSION, config, events
 from sumac.errors import Rejected
 from sumac.ledger import Inventory
-from sumac.models import ChangeKind, Quantity
+from sumac.models import ChangeKind, Quantity, Record
 
 # (needs_from, needs_to) per kind — CORRECTION is handled separately since it
 # needs exactly one of the two, either shape valid, rather than a fixed one.
@@ -403,3 +403,46 @@ def decide_change(
         Write(f"log:{actor}", serialize_event(event, actor=actor, occurred_at=occurred_at))
     )
     return writes, messages
+
+
+def decide_correct(
+    *,
+    target_id: str,
+    reason: str,
+    actor: str,
+    occurred_at: datetime,
+    records: Iterable[Record],
+) -> Write:
+    """Validates and resolves `sumac correct` into the single write it should
+    produce, or raises `Rejected`. §3.6: cancel not replace — this appends a
+    `Correction(reason)` record with `supersedes=target_id`; it never rewrites
+    or removes anything. `records` must be `ledger.load_all_records`'s
+    unfiltered view (live and already-superseded alike) — `load_records`
+    already drops superseded records, which would make a record that was
+    validly superseded once indistinguishable from one that never existed."""
+    if not reason.strip():
+        raise Rejected("missing_reason", value=reason)
+
+    ids = {r.id for r in records}
+    already_superseded = {r.supersedes for r in records if r.supersedes is not None}
+    if target_id not in ids:
+        raise Rejected("supersede_target_missing", value=target_id)
+    if target_id in already_superseded:
+        raise Rejected("supersede_already_applied", value=target_id)
+
+    record_id = str(uuid4())
+    if record_id == target_id:  # pragma: no cover - uuid4 collision, not reachable in practice
+        raise Rejected("supersede_self", value=target_id)
+
+    return Write(
+        f"log:{actor}",
+        {
+            "schema_version": SCHEMA_VERSION,
+            "type": "correction",
+            "id": record_id,
+            "ts": occurred_at.isoformat(),
+            "actor": actor,
+            "supersedes": target_id,
+            "payload": {"reason": reason},
+        },
+    )

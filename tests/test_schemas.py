@@ -186,3 +186,18 @@ def test_v2_shaped_payload_rejected_under_schema_version_1() -> None:
     obj["schema_version"] = 1
     with pytest.raises(ValidationError):
         RecordSchema.model_validate(obj)
+
+
+def test_v2_correction_round_trip() -> None:
+    obj = _v2_obj("correction", {"reason": "typo, location does not exist"})
+    obj["supersedes"] = "bad-record-1"
+    record = RecordSchema.model_validate(obj).to_domain()
+    assert isinstance(record.payload, events.Correction)
+    assert record.payload.reason == "typo, location does not exist"
+    assert record.supersedes == "bad-record-1"
+
+
+def test_v2_correction_empty_reason_rejected() -> None:
+    obj = _v2_obj("correction", {"reason": ""})
+    with pytest.raises(ValidationError):
+        RecordSchema.model_validate(obj)

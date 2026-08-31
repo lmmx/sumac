@@ -9,7 +9,7 @@ from sealedlog import Vault
 from sealedlog.errors import WrongPassphraseError
 from typer.testing import CliRunner
 
-from sumac import paths, store
+from sumac import ledger, paths, store
 from sumac import vault as sumac_vault
 from sumac.cli import app
 from sumac.errors import RetireNonemptyError, VaultExistsError
@@ -315,6 +315,51 @@ def test_doctor_flags_unknown_location(data_dir: Path) -> None:
     result = _run(data_dir, "doctor")
     assert result.exit_code == 1
     assert "unknown_location" in result.output
+
+
+def test_doctor_suggests_a_ready_to_paste_correction(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    _append_raw_change(data_dir, "alice", "milk", "1", "l", to_location="hob-right-below-bottom")
+    result = _run(data_dir, "doctor")
+    assert "sumac correct raw-1 --reason" in result.output
+
+
+def test_correct_cancels_record_and_removes_it_from_status(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "add", "purchase", "milk", "2", "l", "--to", "pantry")
+
+    key = _real_key(data_dir)
+    record_id = ledger.load_records(data_dir, key)[0].id
+
+    result = _run(data_dir, "correct", record_id, "--reason", "typo, wrong product")
+    assert result.exit_code == 0, result.output
+
+    result = _run(data_dir, "status")
+    assert "milk" not in result.output
+
+    result = _run(data_dir, "log")
+    assert "correction" in result.output
+    assert "supersedes" in result.output
+
+
+def test_correct_unknown_record_id_fails(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    result = _run(data_dir, "correct", "nope", "--reason", "typo")
+    assert result.exit_code != 0
+
+
+def test_correct_already_corrected_record_fails(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "add", "purchase", "milk", "2", "l", "--to", "pantry")
+
+    key = _real_key(data_dir)
+    record_id = ledger.load_records(data_dir, key)[0].id
+    _run(data_dir, "correct", record_id, "--reason", "typo")
+
+    result = _run(data_dir, "correct", record_id, "--reason", "again")
+    assert result.exit_code != 0
 
 
 def test_log_shows_recorded_events(data_dir: Path) -> None:

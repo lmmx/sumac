@@ -272,6 +272,30 @@ def snapshot(
 
 
 @app.command()
+def correct(
+    record_id: str,
+    reason: Annotated[str, typer.Option("--reason", help="Why this record is being corrected.")],
+    data_dir: DataDirOption = Path("data"),
+) -> None:
+    """Cancel RECORD_ID: appends a correction that supersedes it. Nothing is
+    rewritten or deleted — the targeted record stays in the log, permanently
+    excluded from the fold (§3.6). To replace rather than just cancel, run
+    this and then `sumac add`/`sumac snapshot` with the corrected values."""
+    key = _key(data_dir)
+    actor = paths.current_user()
+    records = ledger.load_all_records(data_dir, key)
+    write = decide.decide_correct(
+        target_id=record_id,
+        reason=reason,
+        actor=actor,
+        occurred_at=datetime.now(UTC),
+        records=records,
+    )
+    store.append(data_dir, key, write.stream, write.obj)
+    render.print_success(f"Corrected {record_id!r}: {reason}")
+
+
+@app.command()
 def status(
     location: Annotated[str | None, typer.Argument()] = None,
     data_dir: DataDirOption = Path("data"),

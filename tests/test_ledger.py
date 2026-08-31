@@ -4,7 +4,10 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from sumac import SCHEMA_VERSION, config, decide, events, ledger, models, paths, store
+from sumac.errors import Rejected
 
 T0 = datetime(2026, 1, 1, tzinfo=None).astimezone()
 
@@ -794,3 +797,90 @@ def test_insufficient_stock_counted_actually_precedes_the_movement_after_reload(
     inventory = ledger.build_inventory(data_dir, key)
     assert inventory.at("pantry") == {}
     assert inventory.at("fridge")["milk"].amount == Decimal("3")
+
+
+def test_correction_cancels_target_record_from_fold(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    """§3.6: supersedes means cancel, not replace — the targeted purchase
+    must vanish from the fold entirely once corrected, and the Correction
+    record itself contributes nothing on its own merits."""
+    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _change_obj("bad-1", T0, osuser, "purchase", "milk", "2", "l", to_location="pantry"),
+    )
+    records = ledger.load_all_records(data_dir, key)
+    write = decide.decide_correct(
+        target_id="bad-1",
+        reason="typo, wrong product",
+        actor=osuser,
+        occurred_at=T0 + timedelta(minutes=1),
+        records=records,
+    )
+    store.append(data_dir, key, write.stream, write.obj)
+
+    inventory = ledger.build_inventory(data_dir, key)
+    assert inventory.at("pantry") == {}
+    assert inventory.anomalies == ()
+
+
+def test_load_all_records_keeps_superseded_load_records_drops_them(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _change_obj("bad-1", T0, osuser, "purchase", "milk", "2", "l", to_location="pantry"),
+    )
+    records = ledger.load_all_records(data_dir, key)
+    write = decide.decide_correct(
+        target_id="bad-1",
+        reason="typo",
+        actor=osuser,
+        occurred_at=T0 + timedelta(minutes=1),
+        records=records,
+    )
+    store.append(data_dir, key, write.stream, write.obj)
+
+    assert "bad-1" not in {r.id for r in ledger.load_records(data_dir, key)}
+    assert "bad-1" in {r.id for r in ledger.load_all_records(data_dir, key)}
+
+
+def test_correcting_an_already_superseded_record_is_rejected(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    """`decide_correct` needs the unfiltered view (`load_all_records`) to
+    tell this apart from `supersede_target_missing` — a filtered view would
+    make an already-corrected record look like it never existed."""
+    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _change_obj("bad-1", T0, osuser, "purchase", "milk", "2", "l", to_location="pantry"),
+    )
+    records = ledger.load_all_records(data_dir, key)
+    write = decide.decide_correct(
+        target_id="bad-1",
+        reason="typo",
+        actor=osuser,
+        occurred_at=T0 + timedelta(minutes=1),
+        records=records,
+    )
+    store.append(data_dir, key, write.stream, write.obj)
+
+    records = ledger.load_all_records(data_dir, key)
+    with pytest.raises(Rejected) as exc_info:
+        decide.decide_correct(
+            target_id="bad-1",
+            reason="again",
+            actor=osuser,
+            occurred_at=T0 + timedelta(minutes=2),
+            records=records,
+        )
+    assert exc_info.value.reason == "supersede_already_applied"
