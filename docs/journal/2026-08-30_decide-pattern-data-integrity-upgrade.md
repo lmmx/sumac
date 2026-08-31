@@ -223,6 +223,7 @@ class Consumed:
     amount: Decimal
     unit: str
     reason: str | None = None  # "correction" | None (ordinary consumption)
+    nominal_basis: dict[str, str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,6 +232,7 @@ class Discarded:
     frm: str
     amount: Decimal
     unit: str
+    nominal_basis: dict[str, str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,6 +252,7 @@ class Counted:
     amount: Decimal
     unit: str
     reason: str | None = None  # e.g. "implied_by_movement" (§3.5)
+    nominal_basis: dict[str, str] | None = None
     # New in v2, not produced by the v1 upcaster — v1 never recorded a
     # single-product absolute count. Phase 4b's decide is the only producer.
 
