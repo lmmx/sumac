@@ -339,3 +339,73 @@ def test_can_convert_mirrors_convert(data_dir: Path, osuser: str, key: bytes) ->
     assert cfg.can_convert("rice-pudding", "jar") is True
     assert cfg.can_convert("rice-pudding", "oz") is False
     assert cfg.can_convert("nonexistent", "g") is False
+
+
+# --- §5.3: convert_with_basis ---
+
+
+def test_convert_with_basis_returns_no_basis_when_unit_matches_canonical(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    """Nothing was converted, so there's nothing for a basis record to add
+    beyond what the resulting event's own amount/unit already say — see
+    docs/journal/2026-08-31-decide-simplification-review.md §5.3, Decision 1."""
+    config.add_product(data_dir, key, osuser, Product(id="milk", name="Milk", unit="l"))
+    cfg = config.build_config(data_dir, key)
+    result = cfg.convert_with_basis("milk", Decimal("2"), "l")
+    assert result is not None
+    quantity, basis = result
+    assert quantity == Quantity(Decimal("2"), "l")
+    assert basis is None
+
+
+def test_convert_with_basis_records_raw_input_and_ratio_when_converted(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    config.add_product(
+        data_dir,
+        key,
+        osuser,
+        Product(
+            id="rice-pudding", name="Rice Pudding", unit="g", conversions={"jar": Decimal("340")}
+        ),
+    )
+    cfg = config.build_config(data_dir, key)
+    result = cfg.convert_with_basis("rice-pudding", Decimal("2"), "jar")
+    assert result is not None
+    quantity, basis = result
+    assert quantity == Quantity(Decimal("680"), "g")
+    assert basis == {"raw_amount": "2", "raw_unit": "jar", "ratio": "340"}
+
+
+def test_convert_with_basis_returns_none_for_unknown_product(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    cfg = config.build_config(data_dir, key)
+    assert cfg.convert_with_basis("nonexistent", Decimal("1"), "l") is None
+
+
+def test_convert_with_basis_returns_none_for_unconvertible_unit(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    config.add_product(data_dir, key, osuser, Product(id="milk", name="Milk", unit="l"))
+    cfg = config.build_config(data_dir, key)
+    assert cfg.convert_with_basis("milk", Decimal("1"), "kg") is None
+
+
+def test_convert_delegates_to_convert_with_basis(data_dir: Path, osuser: str, key: bytes) -> None:
+    """`convert` is a thin wrapper — this pins that it returns exactly the
+    first element of `convert_with_basis`'s pair, for both the converted and
+    unconverted cases, so the two can never disagree about the quantity."""
+    config.add_product(
+        data_dir,
+        key,
+        osuser,
+        Product(
+            id="rice-pudding", name="Rice Pudding", unit="g", conversions={"jar": Decimal("340")}
+        ),
+    )
+    cfg = config.build_config(data_dir, key)
+    result = cfg.convert_with_basis("rice-pudding", Decimal("2"), "jar")
+    assert result is not None
+    assert cfg.convert("rice-pudding", Decimal("2"), "jar") == result[0]

@@ -10,6 +10,7 @@ import pytest
 from sumac import config, decide, events, ledger
 from sumac.errors import Rejected
 from sumac.models import ChangeKind, Location, Product, Quantity, Record
+from sumac.schemas import RecordSchema
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -94,6 +95,9 @@ def test_valid_purchase_produces_one_log_write() -> None:
     assert writes[0].obj["payload"]["amount"] == "1"
     assert writes[0].obj["payload"]["unit"] == "l"
     assert writes[0].obj["payload"]["reason"] is None
+    # §5.3: input unit ("l") already equals milk's canonical unit — nothing
+    # was converted, so there is deliberately nothing to record here.
+    assert writes[0].obj["payload"]["nominal_basis"] is None
 
 
 def test_unknown_location_rejected_with_suggestions() -> None:
@@ -195,6 +199,13 @@ def test_registered_product_applies_conversion() -> None:
     assert messages == []
     assert writes[0].obj["payload"]["amount"] == "680"
     assert writes[0].obj["payload"]["unit"] == "g"
+    # §5.3: the one existing test that exercises a real conversion — the
+    # producer must populate nominal_basis here, not leave it null forever.
+    assert writes[0].obj["payload"]["nominal_basis"] == {
+        "raw_amount": "2",
+        "raw_unit": "jar",
+        "ratio": "340",
+    }
 
 
 def test_unknown_product_auto_registers_before_the_change() -> None:
@@ -209,6 +220,9 @@ def test_unknown_product_auto_registers_before_the_change() -> None:
     assert writes[1].obj["payload"]["product_id"] == "kimchi"
     assert writes[1].obj["payload"]["amount"] == "1"
     assert writes[1].obj["payload"]["unit"] == "jar"
+    # §5.3: an auto-registered product's canonical unit *is* the unit just
+    # used, so nothing was converted — nominal_basis stays None.
+    assert writes[1].obj["payload"]["nominal_basis"] is None
     assert messages == []
 
 
@@ -297,6 +311,31 @@ def test_correction_with_both_endpoints_rejected_before_resolution() -> None:
     with pytest.raises(Rejected) as exc_info:
         _decide(kind=ChangeKind.CORRECTION, from_location="pantry", to_location="fridge", cfg=cfg)
     assert exc_info.value.reason == "missing_endpoint"
+
+
+def test_nominal_basis_round_trips_through_record_schema() -> None:
+    """No fixture currently exercises a real conversion (golden_log's
+    decide_change calls all use each product's own canonical unit — checked
+    directly against tests/fixtures/generate_golden_log.py), so this is the
+    only coverage of a populated nominal_basis surviving the real ingest
+    path: `RecordSchema.model_validate(...).to_domain()` must not reject a
+    payload this producer writes (the ingest type is `dict[str, str]` —
+    every value here is already a `str`, not a `Decimal`)."""
+    cfg = _cfg(
+        locations={"pantry": Location(id="pantry", name="Pantry")},
+        products={
+            "rice-pudding": Product(
+                id="rice-pudding",
+                name="Rice Pudding",
+                unit="g",
+                conversions={"jar": Decimal("340")},
+            )
+        },
+    )
+    writes, _messages = _decide(product_id="rice-pudding", amount=Decimal("2"), unit="jar", cfg=cfg)
+    record = RecordSchema.model_validate(writes[0].obj).to_domain()
+    assert isinstance(record.payload, events.Acquired)
+    assert record.payload.nominal_basis == {"raw_amount": "2", "raw_unit": "jar", "ratio": "340"}
 
 
 # --- §3.5 insufficient stock: "the shelf is authoritative, not the log" ---
@@ -405,6 +444,35 @@ def test_acquired_events_never_get_a_counted_correction() -> None:
     assert messages == []
 
 
+# --- §5.2: _reconcile_shortfall, pinned directly (not just via decide_change) ---
+
+
+def test_reconcile_shortfall_acquired_short_circuits_before_the_match() -> None:
+    """An event type with no `frm` side at all (not just an absent one)
+    returns `([], [])` immediately."""
+    event = events.Acquired(product_id="milk", to="pantry", amount=Decimal("1"), unit="l")
+    writes, messages = decide._reconcile_shortfall(
+        event, _EMPTY_INVENTORY, actor="alice", occurred_at=T0, cmd_id="cmd-1"
+    )
+    assert writes == []
+    assert messages == []
+
+
+def test_reconcile_shortfall_emits_counted_reading_amount_off_the_event() -> None:
+    """Amount/unit come from `event`, not a separately-threaded `canon` —
+    this pins that by never passing anything but the event itself."""
+    event = events.Consumed(product_id="milk", frm="pantry", amount=Decimal("3"), unit="l")
+    inventory = ledger.Inventory(by_location={"pantry": {"milk": Quantity(Decimal("1"), "l")}})
+    writes, messages = decide._reconcile_shortfall(
+        event, inventory, actor="alice", occurred_at=T0, cmd_id="cmd-1"
+    )
+    assert len(writes) == 1
+    assert writes[0].obj["type"] == "counted"
+    assert writes[0].obj["payload"]["amount"] == "3"
+    assert writes[0].obj["payload"]["at"] == "pantry"
+    assert any("adjusted" in m for m in messages)
+
+
 def _record(record_id: str, *, supersedes: str | None = None) -> Record:
     return Record(
         schema_version=2,
@@ -478,3 +546,51 @@ def test_correct_self_supersede_is_rejected() -> None:
                 records=[_record("bad-1")],
             )
     assert exc_info.value.reason == "supersede_self"
+
+
+# --- §5.1: decide_correct routed through serialize_event ---
+
+
+def test_correct_write_has_exactly_the_envelope_keys() -> None:
+    """Not byte-identity (RecordSchema doesn't care about key order — see
+    docs/journal/2026-08-31-decide-simplification-review.md §5.1) — the key
+    *set* is what an `extra="forbid"` schema would refuse to read back if
+    it drifted."""
+    write = decide.decide_correct(
+        target_id="bad-1",
+        reason="typo, location does not exist",
+        actor="alice",
+        occurred_at=T0,
+        records=[_record("bad-1")],
+    )
+    assert set(write.obj) == {
+        "schema_version",
+        "type",
+        "id",
+        "ts",
+        "actor",
+        "supersedes",
+        "cmd_id",
+        "payload",
+    }
+    assert write.obj["actor"] == "alice"
+    assert write.obj["supersedes"] == "bad-1"
+    assert write.obj["payload"] == {"reason": "typo, location does not exist"}
+
+
+def test_correct_write_round_trips_through_record_schema() -> None:
+    """The actual regression guard for "still readable" — stronger than
+    eyeballing key order: parses back through the real ingest path used by
+    every reader (`RecordSchema.model_validate(...).to_domain()`)."""
+    write = decide.decide_correct(
+        target_id="bad-1",
+        reason="typo, location does not exist",
+        actor="alice",
+        occurred_at=T0,
+        records=[_record("bad-1")],
+    )
+    record = RecordSchema.model_validate(write.obj).to_domain()
+    assert record.type == "correction"
+    assert record.actor == "alice"
+    assert record.supersedes == "bad-1"
+    assert record.payload == events.Correction(reason="typo, location does not exist")

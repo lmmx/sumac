@@ -123,6 +123,20 @@ def _resolve_location(value: str | None, field: str, cfg: config.Config) -> str 
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _ResolvedProduct:
+    """`writes` is a `tuple`, not a `list` — every other frozen dataclass in
+    this codebase uses an immutable field type for a collection
+    (`events.Snapshot.entries`, `models.Product.conversions`'s `Mapping`); a
+    `list` field on a frozen dataclass is cosmetic immutability only,
+    since `resolved.writes.append(...)` still mutates it in place."""
+
+    canon: Quantity
+    basis: dict[str, str] | None
+    writes: tuple[Write, ...]
+    warning: str | None
+
+
 def _resolve_product(
     product_id: str,
     amount: Decimal,
@@ -130,18 +144,18 @@ def _resolve_product(
     actor: str,
     occurred_at: datetime,
     cfg: config.Config,
-) -> tuple[Quantity, list[Write], str | None]:
-    """Returns (canonical quantity, extra config writes, a warning to print
-    or `None`). Unknown products auto-register rather than reject — §3.5a:
-    the real log is ~469 distinct products, 75% bought only once, so a fixed
-    registry maintained by hand doesn't fit this household's actual usage."""
+) -> _ResolvedProduct:
+    """Unknown products auto-register rather than reject — §3.5a: the real
+    log is ~469 distinct products, 75% bought only once, so a fixed registry
+    maintained by hand doesn't fit this household's actual usage."""
     if product_id in cfg.active_products:
-        canon = cfg.convert(product_id, amount, unit)
-        if canon is None:
+        result = cfg.convert_with_basis(product_id, amount, unit)
+        if result is None:
             raise Rejected(
                 "unit_unconvertible", value=unit, expected=cfg.active_products[product_id].unit
             )
-        return canon, [], None
+        canon, basis = result
+        return _ResolvedProduct(canon, basis, (), None)
 
     known = cfg.known_products.get(product_id)
     if known is not None and known.retired:
@@ -169,6 +183,9 @@ def _resolve_product(
         )
     # Canonical unit = whatever this command used (the first-use unit trap,
     # §3.5a) — not worth solving now, add-product/Counted correct it later.
+    # An auto-registered product's canonical unit *is* the unit just used,
+    # so nothing was converted — `basis` stays `None`, same as the
+    # unit-already-canonical case in `Config.convert_with_basis`.
     registration = Write(
         "config",
         {
@@ -186,49 +203,101 @@ def _resolve_product(
             },
         },
     )
-    return Quantity(amount, unit), [registration], warning
+    return _ResolvedProduct(Quantity(amount, unit), None, (registration,), warning)
 
 
 def _build_event(
-    kind: ChangeKind, product_id: str, canon: Quantity, frm: str | None, to: str | None
+    kind: ChangeKind,
+    product_id: str,
+    canon: Quantity,
+    frm: str | None,
+    to: str | None,
+    nominal_basis: dict[str, str] | None,
 ) -> events.Event:
     """`_check_endpoint_shape` has already run, so `frm`/`to` are exactly
-    what this `kind` needs — the asserts below document that, not guard it."""
+    what this `kind` needs — the asserts below document that, not guard it.
+    `nominal_basis` is `_resolve_product`'s audit trail (§5.3), forwarded
+    unchanged into whichever event type this builds — see
+    `Config.convert_with_basis` for what populates it and when it's `None`."""
     if kind is ChangeKind.MOVEMENT:
         assert frm is not None and to is not None
         return events.Moved(
-            product_id=product_id, frm=frm, to=to, amount=canon.amount, unit=canon.unit
+            product_id=product_id,
+            frm=frm,
+            to=to,
+            amount=canon.amount,
+            unit=canon.unit,
+            nominal_basis=nominal_basis,
         )
     if kind is ChangeKind.PURCHASE:
         assert to is not None
-        return events.Acquired(product_id=product_id, to=to, amount=canon.amount, unit=canon.unit)
+        return events.Acquired(
+            product_id=product_id,
+            to=to,
+            amount=canon.amount,
+            unit=canon.unit,
+            nominal_basis=nominal_basis,
+        )
     if kind is ChangeKind.DISCOVERY:
         assert to is not None
         return events.Acquired(
-            product_id=product_id, to=to, amount=canon.amount, unit=canon.unit, reason="discovery"
+            product_id=product_id,
+            to=to,
+            amount=canon.amount,
+            unit=canon.unit,
+            reason="discovery",
+            nominal_basis=nominal_basis,
         )
     if kind is ChangeKind.CONSUMPTION:
         assert frm is not None
-        return events.Consumed(product_id=product_id, frm=frm, amount=canon.amount, unit=canon.unit)
+        return events.Consumed(
+            product_id=product_id,
+            frm=frm,
+            amount=canon.amount,
+            unit=canon.unit,
+            nominal_basis=nominal_basis,
+        )
     if kind is ChangeKind.WASTE:
         assert frm is not None
         return events.Discarded(
-            product_id=product_id, frm=frm, amount=canon.amount, unit=canon.unit
+            product_id=product_id,
+            frm=frm,
+            amount=canon.amount,
+            unit=canon.unit,
+            nominal_basis=nominal_basis,
         )
 
     assert kind is ChangeKind.CORRECTION
     if to is not None:
         assert frm is None
         return events.Acquired(
-            product_id=product_id, to=to, amount=canon.amount, unit=canon.unit, reason="correction"
+            product_id=product_id,
+            to=to,
+            amount=canon.amount,
+            unit=canon.unit,
+            reason="correction",
+            nominal_basis=nominal_basis,
         )
     assert frm is not None
     return events.Consumed(
-        product_id=product_id, frm=frm, amount=canon.amount, unit=canon.unit, reason="correction"
+        product_id=product_id,
+        frm=frm,
+        amount=canon.amount,
+        unit=canon.unit,
+        reason="correction",
+        nominal_basis=nominal_basis,
     )
 
 
-def serialize_event(event: events.Event, *, actor: str, occurred_at: datetime, cmd_id: str) -> dict:
+def serialize_event(
+    event: events.Event,
+    *,
+    actor: str,
+    occurred_at: datetime,
+    cmd_id: str,
+    supersedes: str | None = None,
+    record_id: str | None = None,
+) -> dict:
     """One v2 event -> its wire dict. Public: `cli.py`'s `snapshot` command
     uses this too, not just `decide_change` — it's a serializer, not part of
     the validation gate. `type` names the event kind directly
@@ -239,7 +308,13 @@ def serialize_event(event: events.Event, *, actor: str, occurred_at: datetime, c
     event it precedes), and both share the same `cmd_id` so a future reader
     can tell they're one causal unit (docs/journal §3.7). Required, not
     generated here, since the caller is what knows whether several calls to
-    this function belong to the same command."""
+    this function belong to the same command.
+
+    `supersedes` and `record_id` default to `None`/generated-here, matching
+    every call site before these params existed (`decide_change`'s two
+    calls, `cli.py`'s `snapshot`). `decide_correct` passes both explicitly —
+    `record_id` because it must know the id before this call, to run its
+    own self-supersede check (see `decide_correct`)."""
     payload: dict[str, object]
     type_name: str
     match event:
@@ -312,19 +387,90 @@ def serialize_event(event: events.Event, *, actor: str, occurred_at: datetime, c
                     for e in entries
                 ],
             }
-        case _:  # pragma: no cover - exhaustive given events.Event
+        case events.Correction(reason=r):
+            type_name = "correction"
+            payload = {"reason": r}
+        case _:  # pragma: no cover - defensive; every events.Event member is handled above
             raise TypeError(f"unrecognized event type: {type(event).__name__}")
 
     return {
         "schema_version": SCHEMA_VERSION,
         "type": type_name,
-        "id": str(uuid4()),
+        "id": record_id or str(uuid4()),
         "ts": occurred_at.isoformat(),
         "actor": actor,
-        "supersedes": None,
+        "supersedes": supersedes,
         "cmd_id": cmd_id,
         "payload": payload,
     }
+
+
+def _reconcile_shortfall(
+    event: events.Event,
+    inventory: Inventory,
+    *,
+    actor: str,
+    occurred_at: datetime,
+    cmd_id: str,
+) -> tuple[list[Write], list[str]]:
+    """§3.5: "insufficient stock is not a rejection" — the shelf is
+    authoritative, not the log. If removing `event`'s amount would take the
+    recorded holding below zero, the log must already be behind reality
+    (you can't remove what was never there), so a `Counted` asserting the
+    holding was at least that amount is emitted first — no flag, no
+    --force. Returns `([], [])` when `event` has no `frm` side (`Acquired`
+    has nothing to fall short of) or the recorded holding already covers
+    it. `amount`/`unit` are read straight off `event` in the match below
+    rather than taking a separate `canon: Quantity` parameter, so there is
+    no second value that could ever drift from what the event itself
+    asserts."""
+    match event:
+        case (
+            events.Consumed(product_id=p, frm=frm_side, amount=amount, unit=unit)
+            | events.Discarded(product_id=p, frm=frm_side, amount=amount, unit=unit)
+            | events.Moved(product_id=p, frm=frm_side, amount=amount, unit=unit)
+        ):
+            pass
+        case _:
+            return [], []
+
+    held = inventory.at(frm_side).get(p)
+    if held is not None and held.unit != unit:
+        # A unit mismatch already sitting at this location is a pre-
+        # existing anomaly this check shouldn't try to resolve on its
+        # own — skip the correction and let the normal fold-time
+        # unit_mismatch handling (unchanged) deal with it as it already does.
+        return [], []
+    if held is not None and held.amount >= amount:
+        return [], []
+
+    held_amount = held.amount if held is not None else Decimal(0)
+    counted = events.Counted(
+        product_id=p,
+        at=frm_side,
+        amount=amount,
+        unit=unit,
+        reason="implied_by_movement",
+    )
+    # "Then the movement" (§3.5) is an ordering guarantee the fold's
+    # (ts, actor, id) sort has to actually deliver, not just a list-
+    # append order that's discarded on the way to disk. Sharing
+    # `occurred_at` with the main event would make the sort's
+    # tie-break fall to `id` — a random uuid4 — so this event
+    # commits before that one only about half the time, silently
+    # corrupting the correction it's supposed to make (found by
+    # smoke-testing this end to end: pantry ended up holding the
+    # Counted amount undisturbed, meaning the movement's subtraction
+    # had already happened and been overwritten). One microsecond
+    # earlier is enough to make the ordering deterministic without
+    # inventing new envelope machinery for it.
+    counted_at = occurred_at - timedelta(microseconds=1)
+    write = Write(
+        f"log:{actor}",
+        serialize_event(counted, actor=actor, occurred_at=counted_at, cmd_id=cmd_id),
+    )
+    message = f"note: {frm_side} held {held_amount} {unit}, recorded {amount} {unit} — adjusted"
+    return [write], [message]
 
 
 def decide_change(
@@ -357,62 +503,21 @@ def decide_change(
     if kind is ChangeKind.MOVEMENT and from_id == to_id:
         raise Rejected("noop_move", value=from_id)
 
-    canon, writes, warning = _resolve_product(product_id, amount, unit, actor, occurred_at, cfg)
-    messages = [warning] if warning else []
+    resolved = _resolve_product(product_id, amount, unit, actor, occurred_at, cfg)
+    writes = list(resolved.writes)
+    messages = [resolved.warning] if resolved.warning else []
 
     # One cmd_id for every log write this call produces — the Counted below
     # and the main event, when both happen, are one causal command (§3.7).
     cmd_id = str(uuid4())
 
-    event = _build_event(kind, product_id, canon, from_id, to_id)
+    event = _build_event(kind, product_id, resolved.canon, from_id, to_id, resolved.basis)
 
-    # §3.5: "insufficient stock is not a rejection" — the shelf is
-    # authoritative, not the log. If removing `canon` would take the
-    # recorded holding below zero, the log must already be behind reality
-    # (you can't remove what was never there), so a Counted asserting the
-    # holding was at least `canon` is emitted first — no flag, no --force.
-    # Only for events with a `frm` side; Acquired has nothing to fall short of.
-    frm_side = getattr(event, "frm", None)
-    if frm_side is not None:
-        held = inventory.at(frm_side).get(product_id)
-        if held is not None and held.unit != canon.unit:
-            # A unit mismatch already sitting at this location is a pre-
-            # existing anomaly this check shouldn't try to resolve on its
-            # own — skip the correction and let the normal fold-time
-            # unit_mismatch handling (unchanged) deal with it as it already does.
-            pass
-        elif held is None or held.amount < canon.amount:
-            held_amount = held.amount if held is not None else Decimal(0)
-            counted = events.Counted(
-                product_id=product_id,
-                at=frm_side,
-                amount=canon.amount,
-                unit=canon.unit,
-                reason="implied_by_movement",
-            )
-            # "Then the movement" (§3.5) is an ordering guarantee the fold's
-            # (ts, actor, id) sort has to actually deliver, not just a list-
-            # append order that's discarded on the way to disk. Sharing
-            # `occurred_at` with the main event would make the sort's
-            # tie-break fall to `id` — a random uuid4 — so this event
-            # commits before that one only about half the time, silently
-            # corrupting the correction it's supposed to make (found by
-            # smoke-testing this end to end: pantry ended up holding the
-            # Counted amount undisturbed, meaning the movement's subtraction
-            # had already happened and been overwritten). One microsecond
-            # earlier is enough to make the ordering deterministic without
-            # inventing new envelope machinery for it.
-            counted_at = occurred_at - timedelta(microseconds=1)
-            writes.append(
-                Write(
-                    f"log:{actor}",
-                    serialize_event(counted, actor=actor, occurred_at=counted_at, cmd_id=cmd_id),
-                )
-            )
-            messages.append(
-                f"note: {frm_side} held {held_amount} {canon.unit}, "
-                f"recorded {canon.amount} {canon.unit} — adjusted"
-            )
+    shortfall_writes, shortfall_messages = _reconcile_shortfall(
+        event, inventory, actor=actor, occurred_at=occurred_at, cmd_id=cmd_id
+    )
+    writes.extend(shortfall_writes)
+    messages.extend(shortfall_messages)
 
     writes.append(
         Write(
@@ -454,14 +559,12 @@ def decide_correct(
 
     return Write(
         f"log:{actor}",
-        {
-            "schema_version": SCHEMA_VERSION,
-            "type": "correction",
-            "id": record_id,
-            "ts": occurred_at.isoformat(),
-            "actor": actor,
-            "supersedes": target_id,
-            "cmd_id": str(uuid4()),
-            "payload": {"reason": reason},
-        },
+        serialize_event(
+            events.Correction(reason=reason),
+            actor=actor,
+            occurred_at=occurred_at,
+            cmd_id=str(uuid4()),
+            supersedes=target_id,
+            record_id=record_id,
+        ),
     )

@@ -169,11 +169,14 @@ class Config:
     active_products: dict[str, models.Product]
     anomalies: tuple[models.Anomaly, ...]
 
-    def convert(self, product_id: str, amount: Decimal, unit: str) -> models.Quantity | None:
-        """`amount` of `unit` expressed in `product_id`'s canonical unit, or `None`
-        if `product_id` isn't known or `unit` has no conversion path to it. Nominal,
-        per §3.4(c): resolved once at decide-time and frozen into the event — never
-        called from `evolve`, which never converts.
+    def convert_with_basis(
+        self, product_id: str, amount: Decimal, unit: str
+    ) -> tuple[models.Quantity, dict[str, str] | None] | None:
+        """`amount` of `unit` expressed in `product_id`'s canonical unit, paired
+        with the audit record of how it got there, or `None` if `product_id`
+        isn't known or `unit` has no conversion path to it. Nominal, per §3.4(c):
+        resolved once at decide-time and frozen into the event — never called
+        from `evolve`, which never converts.
 
         Resolves against `known_products`, not `active_products` — a deliberate
         divergence from §3.4's "decide validates against active_*" rule. Resolution
@@ -183,16 +186,35 @@ class Config:
         arithmetic from resolving — `check-units` needs to interpret a retired
         product's historical units too, and a `decide` call that's already past its
         own `active_products`/`retired_product` check shouldn't have this method
-        re-reject on the same grounds a second time under a different name."""
+        re-reject on the same grounds a second time under a different name.
+
+        The single lookup this and `convert` both need — `convert` delegates
+        here rather than duplicating it, so the two can never resolve a
+        product or a ratio differently. The second element of the returned
+        pair is `None` when `unit` already *is* the canonical unit: nothing
+        was converted, and the event's own `amount`/`unit` fields already
+        reproduce the input exactly, so there is nothing a basis record would
+        add (see docs/journal/2026-08-31-decide-simplification-review.md §5.3,
+        Decision 1)."""
         product = self.known_products.get(product_id)
         if product is None:
             return None
         if unit == product.unit:
-            return models.Quantity(amount, product.unit)
+            return models.Quantity(amount, product.unit), None
         ratio = product.conversions.get(unit)
         if ratio is None:
             return None
-        return models.Quantity(amount * ratio, product.unit)
+        basis = {"raw_amount": str(amount), "raw_unit": unit, "ratio": str(ratio)}
+        return models.Quantity(amount * ratio, product.unit), basis
+
+    def convert(self, product_id: str, amount: Decimal, unit: str) -> models.Quantity | None:
+        """`amount` of `unit` expressed in `product_id`'s canonical unit, or
+        `None` on the same terms as `convert_with_basis` — see there for the
+        resolution rules. A thin wrapper: callers that don't need the audit
+        trail (`can_convert`, and through it `render.py:98`'s
+        `print_unit_check`) keep this narrower contract unchanged."""
+        result = self.convert_with_basis(product_id, amount, unit)
+        return result[0] if result is not None else None
 
     def can_convert(self, product_id: str, unit: str) -> bool:
         return self.convert(product_id, Decimal(0), unit) is not None
