@@ -1,14 +1,18 @@
-"""Fold snapshots + changes into current inventory.
+"""Fold v2 events into current inventory.
 
 Ordering is `(ts, actor, id)` for determinism across machines. A location's
 baseline is its most recent snapshot at or before the query time — snapshots
-reset a location's products rather than merging into them — and only changes
+reset a location's products rather than merging into them — and only events
 strictly after that baseline apply on top of it.
 
+Every stored record is v1 as of Phase 4a (the writer hasn't changed yet) and
+is upcast to a v2 event (`sumac.events`) at read time — see `_load_v2` and
+docs/journal/2026-08-30 §3.3a. The fold itself only ever sees v2 events.
+
 The fold is total: it never raises on a record it can't interpret or apply.
-`decide` (not yet split out — see docs/journal/2026-08-30) is where semantic
-validity should be rejected before append; this module can only quarantine
-what already made it into the log, via `Anomaly`.
+`decide` (`sumac.decide`) is where semantic validity is rejected before
+append; this module can only quarantine what already made it into the log,
+via `Anomaly`.
 """
 
 from __future__ import annotations
@@ -21,9 +25,9 @@ from pathlib import Path
 from pydantic import ValidationError
 from sealedlog.errors import SealError
 
-from sumac import SCHEMA_VERSION, config, paths, store
+from sumac import SCHEMA_VERSION, config, events, paths, store, upcast
 from sumac.errors import SumacError
-from sumac.models import Anomaly, InventoryChange, InventorySnapshot, Location, Quantity, Record
+from sumac.models import Anomaly, Location, Quantity, Record
 from sumac.schemas import RecordSchema
 
 _READ_TIME_ERRORS = (SumacError, SealError, ValidationError)
@@ -67,27 +71,63 @@ def _load(data_dir: Path, key: bytes) -> _LoadResult:
 
 
 def load_records(data_dir: Path, key: bytes) -> list[Record]:
-    """All live records (superseded ones dropped, unfoldable ones dropped as
-    anomalies), ordered for deterministic folding."""
+    """All live v1 records (superseded ones dropped, unfoldable ones dropped
+    as anomalies), ordered for deterministic folding. Used by `sumac log`,
+    which displays the stored (v1) shape — not upcast, unlike `build_inventory`."""
     return _load(data_dir, key).records
 
 
+@dataclass(frozen=True, slots=True)
+class _EventRecord:
+    """One upcast record: the v2 event plus the envelope fields the fold
+    needs (`id` for anomaly attribution, `ts`/`actor` for ordering)."""
+
+    id: str
+    ts: datetime
+    actor: str
+    event: events.Event
+
+
+@dataclass(frozen=True, slots=True)
+class _V2LoadResult:
+    records: list[_EventRecord]
+    anomalies: list[Anomaly]
+
+
+def _load_v2(data_dir: Path, key: bytes) -> _V2LoadResult:
+    """`_load` plus the upcast pass. A record that upcasts to nothing the
+    mapping table covers becomes an `upcast_failed` anomaly rather than a
+    raise — same totality guarantee as everything else in `_load`."""
+    v1 = _load(data_dir, key)
+    anomalies = list(v1.anomalies)
+    records: list[_EventRecord] = []
+    for r in v1.records:
+        try:
+            event = upcast.upcast(r)
+        except upcast.UpcastError as e:
+            anomalies.append(Anomaly(r.id, "upcast_failed", str(e)))
+            continue
+        records.append(_EventRecord(id=r.id, ts=r.ts, actor=r.actor, event=event))
+    return _V2LoadResult(records=records, anomalies=anomalies)
+
+
 def observed_product_units(data_dir: Path, key: bytes) -> dict[str, Counter[str]]:
-    """For every product_id recorded in a change or snapshot entry, how many
-    times each unit was used with it — including records the fold can't yet
-    apply for unrelated reasons (unknown location, etc.), since the point is
-    what units were actually written, not what currently folds.
+    """For every product_id recorded in an event, how many times each unit
+    was used with it — including events the fold can't yet apply for
+    unrelated reasons (unknown location, etc.), since the point is what
+    units were actually written, not what currently folds.
 
     Feeds Phase 2c's canonical-unit backfill: a product's most-observed unit is
     a reasonable canonical-unit default, and `sumac config check-units` uses
     this to find (product, unit) pairs `Config.convert` can't yet resolve."""
     counts: dict[str, Counter[str]] = defaultdict(Counter)
-    for r in _load(data_dir, key).records:
-        if isinstance(r.payload, InventoryChange):
-            counts[r.payload.product_id][r.payload.quantity.unit] += 1
-        elif isinstance(r.payload, InventorySnapshot):
-            for entry in r.payload.entries:
-                counts[entry.product_id][entry.quantity.unit] += 1
+    for r in _load_v2(data_dir, key).records:
+        ev = r.event
+        if isinstance(ev, events.Snapshot):
+            for entry in ev.entries:
+                counts[entry.product_id][entry.unit] += 1
+        else:
+            counts[ev.product_id][ev.unit] += 1
     return dict(counts)
 
 
@@ -115,8 +155,8 @@ def _next_quantity(
 ) -> tuple[Quantity | None, str | None]:
     """The quantity `location_id`/`product_id` would have after `delta`, without
     mutating `state`. Returns `(None, error)` on a unit mismatch instead of
-    raising, so the caller can flag an anomaly and leave both sides of a
-    movement uncommitted rather than apply only one."""
+    raising, so the caller can flag an anomaly and leave every side of a
+    multi-location event uncommitted rather than apply only some of it."""
     current = state.get(location_id, {}).get(product_id)
     if current is None:
         return delta, None
@@ -136,8 +176,46 @@ def _commit(
         loc[product_id] = q
 
 
+def _apply_sides(
+    state: dict[str, dict[str, Quantity]],
+    locations: dict[str, Location],
+    baseline_ts: dict[str, datetime],
+    anomalies: list[Anomaly],
+    r: _EventRecord,
+    product_id: str,
+    sides: list[tuple[str, Quantity]],
+) -> None:
+    """Applies a delta-style event (`Acquired`/`Consumed`/`Discarded`: one
+    side; `Moved`: two) atomically — every location must be known and every
+    side must convert cleanly, or nothing is committed. Mirrors the same
+    all-or-nothing shape the pre-Phase-4a fold used for movement, now shared
+    by every delta event instead of duplicated per two-sided case."""
+    bad_location = False
+    for loc_id, _delta in sides:
+        if loc_id not in locations:
+            anomalies.append(Anomaly(r.id, "unknown_location", loc_id))
+            bad_location = True
+    if bad_location:
+        return
+
+    pending: list[tuple[str, str, Quantity]] = []
+    for loc_id, delta in sides:
+        base = baseline_ts.get(loc_id)
+        if base is not None and r.ts <= base:
+            continue  # a later snapshot already reset this location
+        new_q, err = _next_quantity(state, loc_id, product_id, delta)
+        if err is not None:
+            anomalies.append(Anomaly(r.id, "unit_mismatch", err))
+            return
+        assert new_q is not None
+        pending.append((loc_id, product_id, new_q))
+
+    for loc_id, pid, q in pending:
+        _commit(state, loc_id, pid, q)
+
+
 def build_inventory(data_dir: Path, key: bytes, as_of: datetime | None = None) -> Inventory:
-    load_result = _load(data_dir, key)
+    load_result = _load_v2(data_dir, key)
     anomalies = list(load_result.anomalies)
     records = load_result.records
     if as_of is not None:
@@ -155,62 +233,58 @@ def build_inventory(data_dir: Path, key: bytes, as_of: datetime | None = None) -
     baseline_ts: dict[str, datetime] = {}
 
     for r in records:
-        if not isinstance(r.payload, InventorySnapshot):
+        if not isinstance(r.event, events.Snapshot):
             continue
-        loc_id = r.payload.location_id
+        loc_id = r.event.location_id
         if loc_id not in locations:
             anomalies.append(Anomaly(r.id, "unknown_location", loc_id))
             continue
         if loc_id not in baseline_ts or r.ts >= baseline_ts[loc_id]:
             baseline_ts[loc_id] = r.ts
-            state[loc_id] = {e.product_id: e.quantity for e in r.payload.entries}
+            state[loc_id] = {e.product_id: Quantity(e.amount, e.unit) for e in r.event.entries}
 
     for r in records:
-        if not isinstance(r.payload, InventoryChange):
-            continue
-        change = r.payload
+        match r.event:
+            case events.Snapshot():
+                continue
 
-        bad_location = False
-        for loc_id in (change.from_location, change.to_location):
-            if loc_id is not None and loc_id not in locations:
-                anomalies.append(Anomaly(r.id, "unknown_location", loc_id))
-                bad_location = True
-        if bad_location:
-            continue
+            case events.Counted(product_id=p, at=loc_id, amount=amount, unit=unit):
+                if loc_id not in locations:
+                    anomalies.append(Anomaly(r.id, "unknown_location", loc_id))
+                    continue
+                base = baseline_ts.get(loc_id)
+                if base is not None and r.ts <= base:
+                    continue
+                _commit(state, loc_id, p, Quantity(amount, unit))
 
-        pending: list[tuple[str, str, Quantity]] = []
-        mismatch = False
-
-        if change.from_location is not None:
-            base = baseline_ts.get(change.from_location)
-            if base is None or r.ts > base:
-                new_q, err = _next_quantity(
-                    state, change.from_location, change.product_id, -change.quantity
+            case events.Acquired(product_id=p, to=loc_id, amount=amount, unit=unit):
+                _apply_sides(
+                    state,
+                    locations,
+                    baseline_ts,
+                    anomalies,
+                    r,
+                    p,
+                    [(loc_id, Quantity(amount, unit))],
                 )
-                if err is not None:
-                    anomalies.append(Anomaly(r.id, "unit_mismatch", err))
-                    mismatch = True
-                else:
-                    assert new_q is not None
-                    pending.append((change.from_location, change.product_id, new_q))
 
-        if not mismatch and change.to_location is not None:
-            base = baseline_ts.get(change.to_location)
-            if base is None or r.ts > base:
-                new_q, err = _next_quantity(
-                    state, change.to_location, change.product_id, change.quantity
+            case (
+                events.Consumed(product_id=p, frm=loc_id, amount=amount, unit=unit)
+                | events.Discarded(product_id=p, frm=loc_id, amount=amount, unit=unit)
+            ):
+                _apply_sides(
+                    state,
+                    locations,
+                    baseline_ts,
+                    anomalies,
+                    r,
+                    p,
+                    [(loc_id, -Quantity(amount, unit))],
                 )
-                if err is not None:
-                    anomalies.append(Anomaly(r.id, "unit_mismatch", err))
-                    mismatch = True
-                else:
-                    assert new_q is not None
-                    pending.append((change.to_location, change.product_id, new_q))
 
-        if mismatch:
-            continue
-        for loc_id, product_id, q in pending:
-            _commit(state, loc_id, product_id, q)
+            case events.Moved(product_id=p, frm=frm, to=to, amount=amount, unit=unit):
+                q = Quantity(amount, unit)
+                _apply_sides(state, locations, baseline_ts, anomalies, r, p, [(frm, -q), (to, q)])
 
     return Inventory(by_location=state, anomalies=tuple(anomalies))
 

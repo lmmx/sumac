@@ -529,3 +529,107 @@ def test_observed_product_units_includes_records_that_cannot_fold(
     )
     observed = ledger.observed_product_units(data_dir, key)
     assert observed["milk"] == {"l": 1}
+
+
+def test_empty_snapshot_clears_prior_holdings(data_dir: Path, osuser: str, key: bytes) -> None:
+    """The finding that drove Phase 4a's design (§3.3a): a 0-entry snapshot
+    means "this location is empty" and must reset it, not be a no-op."""
+    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _change_obj("c1", T0, osuser, "purchase", "milk", "5", "l", to_location="pantry"),
+    )
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _snapshot_obj("s1", T0 + timedelta(minutes=1), osuser, "pantry", []),
+    )
+    inventory = ledger.build_inventory(data_dir, key)
+    assert inventory.at("pantry") == {}
+    assert inventory.anomalies == ()
+
+
+def test_correction_to_only_adds_stock(data_dir: Path, osuser: str, key: bytes) -> None:
+    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _change_obj("c1", T0, osuser, "correction", "flour", "2", "kg", to_location="pantry"),
+    )
+    inventory = ledger.build_inventory(data_dir, key)
+    assert inventory.at("pantry")["flour"].amount == Decimal("2")
+    assert inventory.anomalies == ()
+
+
+def test_correction_from_only_removes_stock(data_dir: Path, osuser: str, key: bytes) -> None:
+    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _change_obj("c1", T0, osuser, "purchase", "flour", "5", "kg", to_location="pantry"),
+    )
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _change_obj(
+            "c2",
+            T0 + timedelta(minutes=1),
+            osuser,
+            "correction",
+            "flour",
+            "2",
+            "kg",
+            from_location="pantry",
+        ),
+    )
+    inventory = ledger.build_inventory(data_dir, key)
+    assert inventory.at("pantry")["flour"].amount == Decimal("3")
+
+
+def test_correction_with_both_endpoints_becomes_upcast_failed_anomaly(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    """A structurally-possible-but-unmapped correction shape (both from and
+    to set — InventoryChange.__post_init__ doesn't constrain correction at
+    all) must quarantine, not silently misapply as a two-sided movement."""
+    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+    config.add_location(data_dir, key, osuser, models.Location(id="fridge", name="Fridge"))
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _change_obj(
+            "c1",
+            T0,
+            osuser,
+            "correction",
+            "eggs",
+            "1",
+            "ct",
+            from_location="pantry",
+            to_location="fridge",
+        ),
+    )
+    inventory = ledger.build_inventory(data_dir, key)
+    assert inventory.at("pantry") == {}
+    assert inventory.at("fridge") == {}
+    assert any(a.reason == "upcast_failed" for a in inventory.anomalies)
+
+
+def test_discovery_folds_like_purchase(data_dir: Path, osuser: str, key: bytes) -> None:
+    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _change_obj("c1", T0, osuser, "discovery", "jam", "1", "jar", to_location="pantry"),
+    )
+    inventory = ledger.build_inventory(data_dir, key)
+    assert inventory.at("pantry")["jam"].amount == Decimal("1")
+    assert inventory.anomalies == ()
