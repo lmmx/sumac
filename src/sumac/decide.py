@@ -228,11 +228,18 @@ def _build_event(
     )
 
 
-def serialize_event(event: events.Event, *, actor: str, occurred_at: datetime) -> dict:
+def serialize_event(event: events.Event, *, actor: str, occurred_at: datetime, cmd_id: str) -> dict:
     """One v2 event -> its wire dict. Public: `cli.py`'s `snapshot` command
     uses this too, not just `decide_change` — it's a serializer, not part of
     the validation gate. `type` names the event kind directly
-    (§3.3a) rather than a `kind` field inside a generic "change" payload."""
+    (§3.3a) rather than a `kind` field inside a generic "change" payload.
+
+    `cmd_id` identifies the *command* this event came from, not the record —
+    a single command can produce more than one record (§3.5's Counted+the
+    event it precedes), and both share the same `cmd_id` so a future reader
+    can tell they're one causal unit (docs/journal §3.7). Required, not
+    generated here, since the caller is what knows whether several calls to
+    this function belong to the same command."""
     payload: dict[str, object]
     type_name: str
     match event:
@@ -315,6 +322,7 @@ def serialize_event(event: events.Event, *, actor: str, occurred_at: datetime) -
         "ts": occurred_at.isoformat(),
         "actor": actor,
         "supersedes": None,
+        "cmd_id": cmd_id,
         "payload": payload,
     }
 
@@ -351,6 +359,10 @@ def decide_change(
 
     canon, writes, warning = _resolve_product(product_id, amount, unit, actor, occurred_at, cfg)
     messages = [warning] if warning else []
+
+    # One cmd_id for every log write this call produces — the Counted below
+    # and the main event, when both happen, are one causal command (§3.7).
+    cmd_id = str(uuid4())
 
     event = _build_event(kind, product_id, canon, from_id, to_id)
 
@@ -392,7 +404,10 @@ def decide_change(
             # inventing new envelope machinery for it.
             counted_at = occurred_at - timedelta(microseconds=1)
             writes.append(
-                Write(f"log:{actor}", serialize_event(counted, actor=actor, occurred_at=counted_at))
+                Write(
+                    f"log:{actor}",
+                    serialize_event(counted, actor=actor, occurred_at=counted_at, cmd_id=cmd_id),
+                )
             )
             messages.append(
                 f"note: {frm_side} held {held_amount} {canon.unit}, "
@@ -400,7 +415,10 @@ def decide_change(
             )
 
     writes.append(
-        Write(f"log:{actor}", serialize_event(event, actor=actor, occurred_at=occurred_at))
+        Write(
+            f"log:{actor}",
+            serialize_event(event, actor=actor, occurred_at=occurred_at, cmd_id=cmd_id),
+        )
     )
     return writes, messages
 
@@ -443,6 +461,7 @@ def decide_correct(
             "ts": occurred_at.isoformat(),
             "actor": actor,
             "supersedes": target_id,
+            "cmd_id": str(uuid4()),
             "payload": {"reason": reason},
         },
     )

@@ -712,6 +712,7 @@ def test_mixed_v1_and_v2_records_fold_together(data_dir: Path, osuser: str, key:
         events.Acquired(product_id="milk", to="pantry", amount=Decimal("3"), unit="l"),
         actor=osuser,
         occurred_at=T0 + timedelta(minutes=1),
+        cmd_id="cmd-1",
     )
     store.append(data_dir, key, f"log:{osuser}", v2_obj)
 
@@ -737,6 +738,7 @@ def test_mixed_v1_and_v2_snapshot_reset_interacts_correctly(
         events.Snapshot(location_id="pantry", entries=()),
         actor=osuser,
         occurred_at=T0 + timedelta(minutes=1),
+        cmd_id="cmd-1",
     )
     store.append(data_dir, key, f"log:{osuser}", v2_snapshot)
 
@@ -884,3 +886,61 @@ def test_correcting_an_already_superseded_record_is_rejected(
             records=records,
         )
     assert exc_info.value.reason == "supersede_already_applied"
+
+
+def test_seq_duplicate_and_duplicate_record_detected_from_a_bad_merge(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    """Simulates a bad merge: the same physical line ends up in the segment
+    twice. Doctor must flag both the structural signal (seq_duplicate) and
+    the content-level one (duplicate_record) — and the fold must apply the
+    record's effect exactly once regardless (docs/journal §3.7)."""
+    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _change_obj("c1", T0, osuser, "purchase", "milk", "2", "l", to_location="pantry"),
+    )
+    log_path = paths.log_path(data_dir, osuser)
+    line = log_path.read_text()
+    log_path.write_text(line + line)  # duplicate the one line, verbatim
+
+    report = ledger.diagnose(data_dir, key)
+    reasons = {a.reason for a in report.anomalies}
+    assert "seq_duplicate" in reasons
+    assert "duplicate_record" in reasons
+
+    inventory = ledger.build_inventory(data_dir, key)
+    assert inventory.at("pantry")["milk"].amount == Decimal("2")  # not double-applied
+
+
+def test_seq_gap_detected_after_a_line_is_removed(data_dir: Path, osuser: str, key: bytes) -> None:
+    """Simulates truncation: a line disappears from the middle of a segment.
+    The remaining records' stored `seq` values (0, 2) reveal that 1 is
+    missing — something a naive re-count at read time could never notice."""
+    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+    for i in range(3):
+        store.append(
+            data_dir,
+            key,
+            f"log:{osuser}",
+            _change_obj(
+                f"c{i}",
+                T0 + timedelta(seconds=i),
+                osuser,
+                "purchase",
+                "milk",
+                "1",
+                "l",
+                to_location="pantry",
+            ),
+        )
+    log_path = paths.log_path(data_dir, osuser)
+    lines = log_path.read_text().splitlines()
+    log_path.write_text("\n".join([lines[0], lines[2]]) + "\n")  # drop the middle line (seq=1)
+
+    report = ledger.diagnose(data_dir, key)
+    gap_anomalies = [a for a in report.anomalies if a.reason == "seq_gap"]
+    assert len(gap_anomalies) == 1
+    assert "seq=1" in gap_anomalies[0].detail

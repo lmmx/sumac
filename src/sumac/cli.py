@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Annotated
+from uuid import uuid4
 
 import typer
 from sealedlog import Vault
@@ -266,7 +267,9 @@ def snapshot(
     actor = paths.current_user()
     parsed = tuple(_parse_snapshot_entry(e) for e in (entries or []))
     event = events.Snapshot(location_id=location_id, entries=parsed)
-    obj = decide.serialize_event(event, actor=actor, occurred_at=datetime.now(UTC))
+    obj = decide.serialize_event(
+        event, actor=actor, occurred_at=datetime.now(UTC), cmd_id=str(uuid4())
+    )
     store.append(data_dir, key, f"log:{actor}", obj)
     render.print_success(f"Recorded snapshot of {location_id!r} ({len(parsed)} entries)")
 

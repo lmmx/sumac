@@ -33,6 +33,31 @@ from sumac.schemas import RecordSchema
 _READ_TIME_ERRORS = (SumacError, SealError, ValidationError)
 
 
+def _check_seq(actor: str, objs: list[dict]) -> list[Anomaly]:
+    """Doctor-only structural diagnostics (docs/journal §3.7): a gap in one
+    segment's `seq` sequence means truncation (a line went missing), a
+    repeat means a bad merge. Checked against the range starting at 0 (not
+    the lowest `seq` actually present) specifically so truncation *from the
+    start* of a segment is caught too, not just gaps in the middle.
+    Corrupted lines (already reported as `line_failure`) aren't part of
+    `objs` and so aren't part of this check either — `store.assigned_seqs`
+    only orders what decoded successfully."""
+    anomalies: list[Anomaly] = []
+    seqs = store.assigned_seqs(objs)
+    seen: set[int] = set()
+    for obj, s in zip(objs, seqs, strict=True):
+        record_id = obj.get("id") if isinstance(obj, dict) else None
+        if s in seen:
+            anomalies.append(Anomaly(record_id, "seq_duplicate", f"actor={actor} seq={s}"))
+        seen.add(s)
+    if seqs:
+        missing = sorted(set(range(0, max(seqs) + 1)) - seen)
+        anomalies.extend(
+            Anomaly(None, "seq_gap", f"actor={actor} missing seq={m}") for m in missing
+        )
+    return anomalies
+
+
 @dataclass(frozen=True, slots=True)
 class _LoadResult:
     records: list[Record]
@@ -54,6 +79,7 @@ def _load(data_dir: Path, key: bytes) -> _LoadResult:
         objs, failures = store.verify_stream(log_path, key, stream_id)
         for f in failures:
             anomalies.append(Anomaly(None, "line_failure", f"{f.path}:{f.lineno}: {f.error}"))
+        anomalies.extend(_check_seq(log_path.stem, objs))
         for obj in objs:
             record_id = obj.get("id") if isinstance(obj, dict) else None
             version = obj.get("schema_version") if isinstance(obj, dict) else None
@@ -263,6 +289,29 @@ def _fold(
     changes nothing for `build_inventory`'s existing callers."""
     records = sorted(records, key=lambda r: (r.ts, r.actor, r.id))
     anomalies: list[Anomaly] = []
+
+    # Fold-time dedup by record id (docs/journal §3.7's "protects against a
+    # pull ever replaying an event"): a record id is a fresh uuid4, unique by
+    # construction for anything genuinely distinct, so the same id appearing
+    # twice means the same record made it into `records` twice — a literal
+    # duplicate line from a bad merge or replayed pull, not two different
+    # records that happen to share a `cmd_id` (a multi-record command like
+    # Sec3.5's Counted+the event it precedes always uses two different ids,
+    # so this never touches that case). The first copy in sorted order wins;
+    # later copies are dropped silently, matching cmd_id's job of never
+    # double-applying an already-materialized command.
+    seen_ids: set[str] = set()
+    deduped: list[_EventRecord] = []
+    for r in records:
+        if r.id in seen_ids:
+            # Loud, not silent (§3.2) — a duplicate is worth a human glance
+            # even though the fold recovers from it on its own.
+            anomalies.append(Anomaly(r.id, "duplicate_record", f"actor={r.actor}"))
+            continue
+        seen_ids.add(r.id)
+        deduped.append(r)
+    records = deduped
+
     state: dict[str, dict[str, Quantity]] = {}
     baseline_ts: dict[str, datetime] = {}
 

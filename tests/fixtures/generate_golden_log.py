@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
+from uuid import uuid4
 
 from sumac import config, decide, events, ledger, models, store
 
@@ -175,6 +176,7 @@ def main() -> None:
             events.Snapshot(location_id="pantry", entries=()),
             actor=ACTOR,
             occurred_at=T0.replace(hour=4),
+            cmd_id=str(uuid4()),
         )
         store.append(data_dir, GOLDEN_KEY, f"log:{ACTOR}", snap_obj)
 

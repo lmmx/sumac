@@ -122,6 +122,16 @@ class Record:
     actor: str
     supersedes: str | None
     payload: InventorySnapshot | InventoryChange | events.Event
+    # Phase 7 (docs/journal/2026-08-30 §3.7): both `None` on every record
+    # written before this phase and on config-stream records forever (config
+    # isn't a gap-detectable segment — it's latest-revision-wins, not
+    # append-sequential). `seq` is assigned by `store.append`, not `decide`,
+    # since it depends on what's already on disk. `cmd_id` is assigned by
+    # `decide`/`cli` — one shared value per logical command, even when a
+    # command produces more than one record (e.g. Sec3.5's Counted+the event
+    # it precedes).
+    seq: int | None = None
+    cmd_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

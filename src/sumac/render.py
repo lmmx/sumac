@@ -260,7 +260,17 @@ def print_doctor(report: ledger.DoctorReport) -> None:
         table.add_row(a.reason, a.record_id or "-", a.detail)
     console.print(table)
 
-    suggestions = [a for a in report.anomalies if a.record_id is not None]
+    # One suggestion per record, not per anomaly — a record can trip more
+    # than one anomaly type at once (e.g. a duplicated line is both
+    # seq_duplicate and duplicate_record), and `sumac correct` only accepts
+    # a target once; a second identical command would just fail on
+    # supersede_already_applied.
+    seen_ids: set[str] = set()
+    suggestions = []
+    for a in report.anomalies:
+        if a.record_id is not None and a.record_id not in seen_ids:
+            seen_ids.add(a.record_id)
+            suggestions.append(a)
     if suggestions:
         console.print(
             "\n[dim]Ready-to-paste corrections (cancels the record, doesn't replace it — "

@@ -13,7 +13,37 @@ from sumac.errors import ForeignStreamError
 def test_append_and_iter_round_trip(data_dir: Path, osuser: str, key: bytes) -> None:
     store.append(data_dir, key, f"log:{osuser}", {"n": 1})
     store.append(data_dir, key, f"log:{osuser}", {"n": 2})
-    assert list(store.iter_stream(data_dir, key, f"log:{osuser}")) == [{"n": 1}, {"n": 2}]
+    assert list(store.iter_stream(data_dir, key, f"log:{osuser}")) == [
+        {"n": 1, "seq": 0},
+        {"n": 2, "seq": 1},
+    ]
+
+
+def test_append_assigns_monotone_seq_per_stream(data_dir: Path, osuser: str, key: bytes) -> None:
+    """docs/journal §3.7: seq is append-time envelope data, assigned by
+    `store.append` itself (not the caller), monotone starting at 0, and
+    independent per log stream."""
+    for i in range(3):
+        store.append(data_dir, key, f"log:{osuser}", {"n": i})
+    seqs = [obj["seq"] for obj in store.iter_stream(data_dir, key, f"log:{osuser}")]
+    assert seqs == [0, 1, 2]
+
+
+def test_append_ignores_a_caller_supplied_seq(data_dir: Path, osuser: str, key: bytes) -> None:
+    """seq is append's job, not the caller's — a stray `seq` key on the
+    object passed in must never survive; `store.append` is the sole source
+    of truth for what gets written."""
+    store.append(data_dir, key, f"log:{osuser}", {"n": 1, "seq": 999})
+    [obj] = list(store.iter_stream(data_dir, key, f"log:{osuser}"))
+    assert obj["seq"] == 0
+
+
+def test_config_stream_never_gets_a_seq(data_dir: Path, osuser: str, key: bytes) -> None:
+    """Config is latest-revision-wins, not an append-sequential segment —
+    seq assignment is scoped to `log:`-prefixed streams only."""
+    store.append(data_dir, key, store.CONFIG_STREAM_ID, {"loc": "fridge"})
+    [obj] = list(store.iter_stream(data_dir, key, store.CONFIG_STREAM_ID))
+    assert "seq" not in obj
 
 
 def test_append_rejects_foreign_stream_id(data_dir: Path, osuser: str, key: bytes) -> None:
@@ -86,4 +116,13 @@ def test_iter_all_logs_spans_users(
     store.append(data_dir, key, "log:bob", {"n": 2})
 
     seen = sorted(store.iter_all_logs(data_dir, key))
-    assert seen == [("alice", {"n": 1}), ("bob", {"n": 2})]
+    assert seen == [("alice", {"n": 1, "seq": 0}), ("bob", {"n": 2, "seq": 0})]
+
+
+def test_assigned_seqs_backfills_position_for_records_without_a_stored_seq() -> None:
+    """docs/journal §3.7: a record with no stored `seq` (everything written
+    before Phase 7) is treated as having whatever position it holds among
+    the decoded objects — the same backfill the v1 upcaster already relies
+    on for old data."""
+    objs = [{"n": 1}, {"n": 2, "seq": 5}, {"n": 3}]
+    assert store.assigned_seqs(objs) == [0, 5, 2]

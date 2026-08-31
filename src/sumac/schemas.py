@@ -351,6 +351,11 @@ class RecordSchema(BaseModel):
     ts: datetime
     actor: str = Field(min_length=1)
     supersedes: str | None = None
+    # Phase 7 (docs/journal/2026-08-30 §3.7): absent on every record written
+    # before this phase — both stay optional forever, not just during a
+    # transition, since old lines are never rewritten to add them.
+    seq: int | None = None
+    cmd_id: str | None = None
     payload: (
         InventoryChangeSchema
         | InventorySnapshotSchema
@@ -410,4 +415,6 @@ class RecordSchema(BaseModel):
             actor=self.actor,
             supersedes=self.supersedes,
             payload=self.payload.to_domain(),
+            seq=self.seq,
+            cmd_id=self.cmd_id,
         )

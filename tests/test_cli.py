@@ -324,6 +324,24 @@ def test_doctor_suggests_a_ready_to_paste_correction(data_dir: Path) -> None:
     assert "sumac correct raw-1 --reason" in result.output
 
 
+def test_doctor_suggests_only_one_correction_for_a_record_with_two_anomalies(
+    data_dir: Path,
+) -> None:
+    """A duplicated line trips both seq_duplicate and duplicate_record on the
+    same record id — doctor must offer `sumac correct` for it once, not
+    once per anomaly (a second `correct` of the same target would just fail
+    on supersede_already_applied)."""
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "add", "purchase", "milk", "1", "l", "--to", "pantry")
+    log_path = paths.log_path(data_dir, "alice")
+    line = log_path.read_text()
+    log_path.write_text(line + line)
+
+    result = _run(data_dir, "doctor")
+    assert result.output.count("sumac correct") == 1
+
+
 def test_correct_cancels_record_and_removes_it_from_status(data_dir: Path) -> None:
     _run(data_dir, "init")
     _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")

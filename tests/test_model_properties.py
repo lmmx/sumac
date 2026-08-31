@@ -16,6 +16,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from uuid import uuid4
 
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -296,7 +297,9 @@ class PantryMachine(RuleBasedStateMachine):
                 for pid, amount in entries
             ),
         )
-        obj = decide.serialize_event(event, actor="alice", occurred_at=self.now)
+        obj = decide.serialize_event(
+            event, actor="alice", occurred_at=self.now, cmd_id=str(uuid4())
+        )
         record = RecordSchema.model_validate(obj).to_domain()
         payload = record.payload
         assert isinstance(payload, events.Snapshot)
