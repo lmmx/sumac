@@ -4,21 +4,23 @@
 2026-08-30 §3.1. This module is the other half: `decide` resolves a command
 into the writes it should produce, or raises `Rejected`.
 
+Phase 4b: constructs v2 events (`sumac.events`) directly and serializes them
+to v2-shaped wire dicts — see §3.3a. The v1 upcaster stays; it's what makes
+old records still fold.
+
 Scope note: this covers `sumac add` (all `ChangeKind` variants) against
 docs/journal §4's rejection catalogue, minus `retire_nonempty` (already
 shipped in Phase 2a, in `cli.py`) and minus the config-command rejections
 (`duplicate_id`, `unknown_parent`, `circular_parent`-on-write) for
 `add-location`/`add-product`, which are lower-stakes and left for a
-follow-up. It also does not implement §3.5's "insufficient stock is not a
-rejection" auto-`Counted` behavior — that needs the fine-grained per-product
-`Counted` event, which doesn't exist until Phase 4b's schema change; today's
-`InventorySnapshot` only resets a whole location, not one product in it.
+follow-up.
 
 Pure except for `uuid4()` record ids, which carry no domain meaning any of
-decide's own logic depends on. `actor` and `occurred_at` come from the
-caller rather than reading the clock, so the actual *decision* — reject or
-not, and what gets written — is fully deterministic and testable without
-mocking time.
+decide's own logic depends on. `actor`, `occurred_at`, and `inventory` (for
+§3.5's insufficient-stock check) come from the caller rather than being
+fetched here, so the actual *decision* — reject or not, and what gets
+written — is fully deterministic and testable without mocking time, I/O,
+or the fold.
 """
 
 from __future__ import annotations
@@ -26,13 +28,24 @@ from __future__ import annotations
 import difflib
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
-from sumac import SCHEMA_VERSION, config
+from sumac import SCHEMA_VERSION, config, events
 from sumac.errors import Rejected
-from sumac.models import ChangeKind, InventoryChange, Quantity
+from sumac.ledger import Inventory
+from sumac.models import ChangeKind, Quantity
+
+# (needs_from, needs_to) per kind — CORRECTION is handled separately since it
+# needs exactly one of the two, either shape valid, rather than a fixed one.
+_ENDPOINT_SHAPE: dict[ChangeKind, tuple[bool, bool]] = {
+    ChangeKind.MOVEMENT: (True, True),
+    ChangeKind.PURCHASE: (False, True),
+    ChangeKind.DISCOVERY: (False, True),
+    ChangeKind.CONSUMPTION: (True, False),
+    ChangeKind.WASTE: (True, False),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +59,42 @@ class Write:
 
 def near_matches(value: str, candidates: Iterable[str], n: int = 1) -> list[str]:
     return difflib.get_close_matches(value, list(candidates), n=n, cutoff=0.6)
+
+
+def _check_endpoint_shape(kind: ChangeKind, frm: str | None, to: str | None) -> None:
+    """Rejects a command whose from/to shape doesn't match what `kind` takes —
+    both required-missing *and* unexpected-but-present. `events.py`'s
+    dataclasses (unlike v1's `InventoryChange`) have no `__post_init__` of
+    their own to catch this for free, so it has to be explicit here.
+
+    Also closes a latent gap Phase 3 shipped with: `InventoryChange.__post_init__`
+    only ever checked that a *required* endpoint was present, never that an
+    *unexpected* one was absent — `sumac add purchase milk 1 l --from pantry
+    --to fridge` would have silently stored `from_location="pantry"` on a
+    purchase, which the fold would then have subtracted from, unrelated to
+    the movement having ever been intended. Never reachable through §4's
+    existing test suite because no test happened to pass both; found while
+    rewriting this function for v2 event construction, not by a failing test."""
+    if kind is ChangeKind.CORRECTION:
+        if (frm is None) == (to is None):
+            raise Rejected(
+                "missing_endpoint",
+                kind=kind.value,
+                value="correction requires exactly one of from/to",
+            )
+        return
+
+    needs_from, needs_to = _ENDPOINT_SHAPE[kind]
+    if needs_from and frm is None:
+        raise Rejected("missing_endpoint", kind=kind.value, value=f"{kind.value} requires from")
+    if needs_to and to is None:
+        raise Rejected("missing_endpoint", kind=kind.value, value=f"{kind.value} requires to")
+    if not needs_from and frm is not None:
+        raise Rejected(
+            "missing_endpoint", kind=kind.value, value=f"{kind.value} does not take from"
+        )
+    if not needs_to and to is not None:
+        raise Rejected("missing_endpoint", kind=kind.value, value=f"{kind.value} does not take to")
 
 
 def _resolve_location(value: str | None, field: str, cfg: config.Config) -> str | None:
@@ -140,6 +189,136 @@ def _resolve_product(
     return Quantity(amount, unit), [registration], warning
 
 
+def _build_event(
+    kind: ChangeKind, product_id: str, canon: Quantity, frm: str | None, to: str | None
+) -> events.Event:
+    """`_check_endpoint_shape` has already run, so `frm`/`to` are exactly
+    what this `kind` needs — the asserts below document that, not guard it."""
+    if kind is ChangeKind.MOVEMENT:
+        assert frm is not None and to is not None
+        return events.Moved(
+            product_id=product_id, frm=frm, to=to, amount=canon.amount, unit=canon.unit
+        )
+    if kind is ChangeKind.PURCHASE:
+        assert to is not None
+        return events.Acquired(product_id=product_id, to=to, amount=canon.amount, unit=canon.unit)
+    if kind is ChangeKind.DISCOVERY:
+        assert to is not None
+        return events.Acquired(
+            product_id=product_id, to=to, amount=canon.amount, unit=canon.unit, reason="discovery"
+        )
+    if kind is ChangeKind.CONSUMPTION:
+        assert frm is not None
+        return events.Consumed(product_id=product_id, frm=frm, amount=canon.amount, unit=canon.unit)
+    if kind is ChangeKind.WASTE:
+        assert frm is not None
+        return events.Discarded(
+            product_id=product_id, frm=frm, amount=canon.amount, unit=canon.unit
+        )
+
+    assert kind is ChangeKind.CORRECTION
+    if to is not None:
+        assert frm is None
+        return events.Acquired(
+            product_id=product_id, to=to, amount=canon.amount, unit=canon.unit, reason="correction"
+        )
+    assert frm is not None
+    return events.Consumed(
+        product_id=product_id, frm=frm, amount=canon.amount, unit=canon.unit, reason="correction"
+    )
+
+
+def serialize_event(event: events.Event, *, actor: str, occurred_at: datetime) -> dict:
+    """One v2 event -> its wire dict. Public: `cli.py`'s `snapshot` command
+    uses this too, not just `decide_change` — it's a serializer, not part of
+    the validation gate. `type` names the event kind directly
+    (§3.3a) rather than a `kind` field inside a generic "change" payload."""
+    payload: dict[str, object]
+    type_name: str
+    match event:
+        case events.Acquired(
+            product_id=p, to=to, amount=amount, unit=unit, reason=reason, nominal_basis=nb
+        ):
+            type_name = "acquired"
+            payload = {
+                "product_id": p,
+                "to": to,
+                "amount": str(amount),
+                "unit": unit,
+                "reason": reason,
+                "nominal_basis": nb,
+            }
+        case events.Consumed(
+            product_id=p, frm=frm, amount=amount, unit=unit, reason=reason, nominal_basis=nb
+        ):
+            type_name = "consumed"
+            payload = {
+                "product_id": p,
+                "frm": frm,
+                "amount": str(amount),
+                "unit": unit,
+                "reason": reason,
+                "nominal_basis": nb,
+            }
+        case events.Discarded(product_id=p, frm=frm, amount=amount, unit=unit, nominal_basis=nb):
+            type_name = "discarded"
+            payload = {
+                "product_id": p,
+                "frm": frm,
+                "amount": str(amount),
+                "unit": unit,
+                "nominal_basis": nb,
+            }
+        case events.Moved(product_id=p, frm=frm, to=to, amount=amount, unit=unit, nominal_basis=nb):
+            type_name = "moved"
+            payload = {
+                "product_id": p,
+                "frm": frm,
+                "to": to,
+                "amount": str(amount),
+                "unit": unit,
+                "nominal_basis": nb,
+            }
+        case events.Counted(
+            product_id=p, at=at, amount=amount, unit=unit, reason=reason, nominal_basis=nb
+        ):
+            type_name = "counted"
+            payload = {
+                "product_id": p,
+                "at": at,
+                "amount": str(amount),
+                "unit": unit,
+                "reason": reason,
+                "nominal_basis": nb,
+            }
+        case events.Snapshot(location_id=loc, entries=entries):
+            type_name = "snapshot"
+            payload = {
+                "location_id": loc,
+                "entries": [
+                    {
+                        "product_id": e.product_id,
+                        "amount": str(e.amount),
+                        "unit": e.unit,
+                        "nominal_basis": e.nominal_basis,
+                    }
+                    for e in entries
+                ],
+            }
+        case _:  # pragma: no cover - exhaustive given events.Event
+            raise TypeError(f"unrecognized event type: {type(event).__name__}")
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "type": type_name,
+        "id": str(uuid4()),
+        "ts": occurred_at.isoformat(),
+        "actor": actor,
+        "supersedes": None,
+        "payload": payload,
+    }
+
+
 def decide_change(
     *,
     kind: ChangeKind,
@@ -150,14 +329,20 @@ def decide_change(
     to_location: str | None,
     actor: str,
     occurred_at: datetime,
+    inventory: Inventory,
     cfg: config.Config,
-) -> tuple[list[Write], str | None]:
+) -> tuple[list[Write], list[str]]:
     """Validates and resolves one `sumac add` command into the writes it
     should produce, or raises `Rejected`. Config writes (a product
     auto-registration, if any) are ordered before the log write, so the
-    registration lands before the change that depends on it."""
+    registration lands before the change that depends on it. Returns
+    `(writes, messages)` — `messages` are informational, printed but never
+    blocking: a near-match warning on auto-register, an insufficient-stock
+    adjustment note, both, or neither."""
     if amount <= 0:
         raise Rejected("non_positive_amount", value=amount)
+
+    _check_endpoint_shape(kind, from_location, to_location)
 
     from_id = _resolve_location(from_location, "from", cfg)
     to_id = _resolve_location(to_location, "to", cfg)
@@ -165,39 +350,56 @@ def decide_change(
         raise Rejected("noop_move", value=from_id)
 
     canon, writes, warning = _resolve_product(product_id, amount, unit, actor, occurred_at, cfg)
+    messages = [warning] if warning else []
 
-    # InventoryChange's own __post_init__ enforces the from/to shape for
-    # `kind` — reuse it rather than duplicating that check here. It's a
-    # ValueError, not a Rejected, so it must be converted: found by the gate
-    # soundness property test (a bare ValueError isn't a SumacError, so
-    # cli.main()'s handler wouldn't catch it — a `sumac add purchase` with no
-    # `--to` would have crashed with a raw traceback instead of a clean
-    # rejection).
-    try:
-        change = InventoryChange(
-            kind=kind,
-            product_id=product_id,
-            quantity=canon,
-            from_location=from_id,
-            to_location=to_id,
-        )
-    except ValueError as e:
-        raise Rejected("missing_endpoint", kind=kind.value, value=str(e)) from e
-    obj = {
-        "schema_version": SCHEMA_VERSION,
-        "type": "change",
-        "id": str(uuid4()),
-        "ts": occurred_at.isoformat(),
-        "actor": actor,
-        "supersedes": None,
-        "payload": {
-            "kind": change.kind.value,
-            "product_id": change.product_id,
-            "quantity": {"amount": str(change.quantity.amount), "unit": change.quantity.unit},
-            "from_location": change.from_location,
-            "to_location": change.to_location,
-            "metadata": {},
-        },
-    }
-    writes.append(Write(f"log:{actor}", obj))
-    return writes, warning
+    event = _build_event(kind, product_id, canon, from_id, to_id)
+
+    # §3.5: "insufficient stock is not a rejection" — the shelf is
+    # authoritative, not the log. If removing `canon` would take the
+    # recorded holding below zero, the log must already be behind reality
+    # (you can't remove what was never there), so a Counted asserting the
+    # holding was at least `canon` is emitted first — no flag, no --force.
+    # Only for events with a `frm` side; Acquired has nothing to fall short of.
+    frm_side = getattr(event, "frm", None)
+    if frm_side is not None:
+        held = inventory.at(frm_side).get(product_id)
+        if held is not None and held.unit != canon.unit:
+            # A unit mismatch already sitting at this location is a pre-
+            # existing anomaly this check shouldn't try to resolve on its
+            # own — skip the correction and let the normal fold-time
+            # unit_mismatch handling (unchanged) deal with it as it already does.
+            pass
+        elif held is None or held.amount < canon.amount:
+            held_amount = held.amount if held is not None else Decimal(0)
+            counted = events.Counted(
+                product_id=product_id,
+                at=frm_side,
+                amount=canon.amount,
+                unit=canon.unit,
+                reason="implied_by_movement",
+            )
+            # "Then the movement" (§3.5) is an ordering guarantee the fold's
+            # (ts, actor, id) sort has to actually deliver, not just a list-
+            # append order that's discarded on the way to disk. Sharing
+            # `occurred_at` with the main event would make the sort's
+            # tie-break fall to `id` — a random uuid4 — so this event
+            # commits before that one only about half the time, silently
+            # corrupting the correction it's supposed to make (found by
+            # smoke-testing this end to end: pantry ended up holding the
+            # Counted amount undisturbed, meaning the movement's subtraction
+            # had already happened and been overwritten). One microsecond
+            # earlier is enough to make the ordering deterministic without
+            # inventing new envelope machinery for it.
+            counted_at = occurred_at - timedelta(microseconds=1)
+            writes.append(
+                Write(f"log:{actor}", serialize_event(counted, actor=actor, occurred_at=counted_at))
+            )
+            messages.append(
+                f"note: {frm_side} held {held_amount} {canon.unit}, "
+                f"recorded {canon.amount} {canon.unit} — adjusted"
+            )
+
+    writes.append(
+        Write(f"log:{actor}", serialize_event(event, actor=actor, occurred_at=occurred_at))
+    )
+    return writes, messages

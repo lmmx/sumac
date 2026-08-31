@@ -95,18 +95,25 @@ class _V2LoadResult:
 
 
 def _load_v2(data_dir: Path, key: bytes) -> _V2LoadResult:
-    """`_load` plus the upcast pass. A record that upcasts to nothing the
-    mapping table covers becomes an `upcast_failed` anomaly rather than a
-    raise — same totality guarantee as everything else in `_load`."""
+    """`_load` plus the upcast pass for whatever's still v1. Since Phase 4b,
+    `_load`'s records are a mix: a v2 record's `payload` is already an
+    `events.Event` (schemas.py routes schema_version 2 straight to the v2
+    ingest schemas), so only v1 payloads need upcasting. A v1 record that
+    upcasts to nothing the mapping table covers becomes an `upcast_failed`
+    anomaly rather than a raise — same totality guarantee as everything
+    else in `_load`."""
     v1 = _load(data_dir, key)
     anomalies = list(v1.anomalies)
     records: list[_EventRecord] = []
     for r in v1.records:
-        try:
-            event = upcast.upcast(r)
-        except upcast.UpcastError as e:
-            anomalies.append(Anomaly(r.id, "upcast_failed", str(e)))
-            continue
+        if isinstance(r.payload, (InventoryChange, InventorySnapshot)):
+            try:
+                event = upcast.upcast(r)
+            except upcast.UpcastError as e:
+                anomalies.append(Anomaly(r.id, "upcast_failed", str(e)))
+                continue
+        else:
+            event = r.payload
         records.append(_EventRecord(id=r.id, ts=r.ts, actor=r.actor, event=event))
     return _V2LoadResult(records=records, anomalies=anomalies)
 

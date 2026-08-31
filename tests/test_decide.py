@@ -6,9 +6,9 @@ from typing import cast
 
 import pytest
 
-from sumac import config, decide
+from sumac import config, decide, ledger
 from sumac.errors import Rejected
-from sumac.models import ChangeKind, Location, Product
+from sumac.models import ChangeKind, Location, Product, Quantity
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -28,6 +28,9 @@ def _cfg(
     )
 
 
+_EMPTY_INVENTORY = ledger.Inventory(by_location={})
+
+
 def _decide(
     *,
     kind: ChangeKind = ChangeKind.PURCHASE,
@@ -39,7 +42,8 @@ def _decide(
     actor: str = "alice",
     occurred_at: datetime = T0,
     cfg: config.Config | None = None,
-) -> tuple[list[decide.Write], str | None]:
+    inventory: ledger.Inventory = _EMPTY_INVENTORY,
+) -> tuple[list[decide.Write], list[str]]:
     if cfg is None:
         cfg = _cfg(
             locations={"pantry": Location(id="pantry", name="Pantry")},
@@ -54,6 +58,7 @@ def _decide(
         to_location=to_location,
         actor=actor,
         occurred_at=occurred_at,
+        inventory=inventory,
         cfg=cfg,
     )
 
@@ -77,12 +82,17 @@ def test_purchase_missing_to_location_is_rejected_not_a_bare_valueerror() -> Non
 
 
 def test_valid_purchase_produces_one_log_write() -> None:
-    writes, warning = _decide()
-    assert warning is None
+    writes, messages = _decide()
+    assert messages == []
     assert len(writes) == 1
     assert writes[0].stream == "log:alice"
-    assert writes[0].obj["payload"]["kind"] == "purchase"
-    assert writes[0].obj["payload"]["quantity"] == {"amount": "1", "unit": "l"}
+    assert writes[0].obj["schema_version"] == 2
+    assert writes[0].obj["type"] == "acquired"
+    assert writes[0].obj["payload"]["product_id"] == "milk"
+    assert writes[0].obj["payload"]["to"] == "pantry"
+    assert writes[0].obj["payload"]["amount"] == "1"
+    assert writes[0].obj["payload"]["unit"] == "l"
+    assert writes[0].obj["payload"]["reason"] is None
 
 
 def test_unknown_location_rejected_with_suggestions() -> None:
@@ -114,8 +124,8 @@ def test_display_path_resolves_to_real_id_not_rejected() -> None:
         "pantry-shelf": Location(id="pantry-shelf", name="Shelf", parent_id="pantry"),
     }
     cfg = _cfg(locations=locations, products={"milk": Product(id="milk", name="Milk", unit="l")})
-    writes, _warning = _decide(to_location="Pantry > Shelf", cfg=cfg)
-    assert writes[0].obj["payload"]["to_location"] == "pantry-shelf"
+    writes, _messages = _decide(to_location="Pantry > Shelf", cfg=cfg)
+    assert writes[0].obj["payload"]["to"] == "pantry-shelf"
 
 
 def test_display_path_to_retired_location_still_rejected() -> None:
@@ -180,14 +190,15 @@ def test_registered_product_applies_conversion() -> None:
             )
         },
     )
-    writes, warning = _decide(product_id="rice-pudding", amount=Decimal("2"), unit="jar", cfg=cfg)
-    assert warning is None
-    assert writes[0].obj["payload"]["quantity"] == {"amount": "680", "unit": "g"}
+    writes, messages = _decide(product_id="rice-pudding", amount=Decimal("2"), unit="jar", cfg=cfg)
+    assert messages == []
+    assert writes[0].obj["payload"]["amount"] == "680"
+    assert writes[0].obj["payload"]["unit"] == "g"
 
 
 def test_unknown_product_auto_registers_before_the_change() -> None:
     cfg = _cfg(locations={"pantry": Location(id="pantry", name="Pantry")}, products={})
-    writes, warning = _decide(product_id="kimchi", unit="jar", cfg=cfg)
+    writes, messages = _decide(product_id="kimchi", unit="jar", cfg=cfg)
     assert len(writes) == 2
     assert writes[0].stream == "config"
     assert writes[0].obj["product"]["id"] == "kimchi"
@@ -195,13 +206,15 @@ def test_unknown_product_auto_registers_before_the_change() -> None:
     assert writes[0].obj["product"]["metadata"] == {"auto": True}
     assert writes[1].stream == "log:alice"
     assert writes[1].obj["payload"]["product_id"] == "kimchi"
-    assert writes[1].obj["payload"]["quantity"] == {"amount": "1", "unit": "jar"}
+    assert writes[1].obj["payload"]["amount"] == "1"
+    assert writes[1].obj["payload"]["unit"] == "jar"
+    assert messages == []
 
 
 def test_unknown_product_no_warning_when_no_near_match() -> None:
     cfg = _cfg(locations={"pantry": Location(id="pantry", name="Pantry")}, products={})
-    _writes, warning = _decide(product_id="kimchi", cfg=cfg)
-    assert warning is None
+    _writes, messages = _decide(product_id="kimchi", cfg=cfg)
+    assert messages == []
 
 
 def test_unknown_product_warns_on_near_match() -> None:
@@ -209,10 +222,10 @@ def test_unknown_product_warns_on_near_match() -> None:
         locations={"pantry": Location(id="pantry", name="Pantry")},
         products={"milk": Product(id="milk", name="Milk", unit="l")},
     )
-    _writes, warning = _decide(product_id="milc", cfg=cfg)
-    assert warning is not None
-    assert "milk" in warning
-    assert "milc" in warning
+    _writes, messages = _decide(product_id="milc", cfg=cfg)
+    assert len(messages) == 1
+    assert "milk" in messages[0]
+    assert "milc" in messages[0]
 
 
 def test_retired_product_does_not_trigger_reregistration() -> None:
@@ -244,3 +257,148 @@ def test_auto_register_tripwire_fires_if_active_known_invariant_breaks() -> None
     )
     with pytest.raises(AssertionError):
         _decide(product_id="milk", cfg=cfg)
+
+
+def test_purchase_with_spurious_from_location_rejected() -> None:
+    """Latent gap found while rewriting for v2 (see _check_endpoint_shape's
+    docstring): a purchase with a from_location too used to silently store
+    it, and the fold would subtract from that location for no real reason."""
+    cfg = _cfg(
+        locations={
+            "pantry": Location(id="pantry", name="Pantry"),
+            "fridge": Location(id="fridge", name="Fridge"),
+        },
+        products={"milk": Product(id="milk", name="Milk", unit="l")},
+    )
+    with pytest.raises(Rejected) as exc_info:
+        _decide(kind=ChangeKind.PURCHASE, from_location="fridge", to_location="pantry", cfg=cfg)
+    assert exc_info.value.reason == "missing_endpoint"
+
+
+def test_consumption_with_spurious_to_location_rejected() -> None:
+    cfg = _cfg(
+        locations={"pantry": Location(id="pantry", name="Pantry")},
+        products={"milk": Product(id="milk", name="Milk", unit="l")},
+    )
+    with pytest.raises(Rejected) as exc_info:
+        _decide(kind=ChangeKind.CONSUMPTION, from_location="pantry", to_location="pantry", cfg=cfg)
+    assert exc_info.value.reason == "missing_endpoint"
+
+
+def test_correction_with_both_endpoints_rejected_before_resolution() -> None:
+    cfg = _cfg(
+        locations={
+            "pantry": Location(id="pantry", name="Pantry"),
+            "fridge": Location(id="fridge", name="Fridge"),
+        },
+        products={"milk": Product(id="milk", name="Milk", unit="l")},
+    )
+    with pytest.raises(Rejected) as exc_info:
+        _decide(kind=ChangeKind.CORRECTION, from_location="pantry", to_location="fridge", cfg=cfg)
+    assert exc_info.value.reason == "missing_endpoint"
+
+
+# --- §3.5 insufficient stock: "the shelf is authoritative, not the log" ---
+
+
+def _cfg_with_pantry_and_fridge() -> config.Config:
+    return _cfg(
+        locations={
+            "pantry": Location(id="pantry", name="Pantry"),
+            "fridge": Location(id="fridge", name="Fridge"),
+        },
+        products={"milk": Product(id="milk", name="Milk", unit="l")},
+    )
+
+
+def test_insufficient_stock_emits_counted_before_consumption() -> None:
+    inventory = ledger.Inventory(by_location={"pantry": {"milk": Quantity(Decimal("1"), "l")}})
+    writes, messages = _decide(
+        kind=ChangeKind.CONSUMPTION,
+        from_location="pantry",
+        to_location=None,
+        amount=Decimal("3"),
+        cfg=_cfg_with_pantry_and_fridge(),
+        inventory=inventory,
+    )
+    assert len(writes) == 2
+    assert writes[0].obj["type"] == "counted"
+    assert writes[0].obj["payload"]["at"] == "pantry"
+    assert writes[0].obj["payload"]["amount"] == "3"
+    assert writes[0].obj["payload"]["reason"] == "implied_by_movement"
+    assert writes[1].obj["type"] == "consumed"
+    assert any("adjusted" in m for m in messages)
+
+
+def test_sufficient_stock_does_not_emit_counted() -> None:
+    inventory = ledger.Inventory(by_location={"pantry": {"milk": Quantity(Decimal("10"), "l")}})
+    writes, messages = _decide(
+        kind=ChangeKind.CONSUMPTION,
+        from_location="pantry",
+        to_location=None,
+        amount=Decimal("3"),
+        cfg=_cfg_with_pantry_and_fridge(),
+        inventory=inventory,
+    )
+    assert len(writes) == 1
+    assert writes[0].obj["type"] == "consumed"
+    assert not any("adjusted" in m for m in messages)
+
+
+def test_nothing_recorded_counts_as_insufficient() -> None:
+    """held is None (nothing ever recorded there) — must still be treated as
+    insufficient, not skipped as "no data to compare"."""
+    writes, _messages = _decide(
+        kind=ChangeKind.CONSUMPTION,
+        from_location="pantry",
+        to_location=None,
+        amount=Decimal("2"),
+        cfg=_cfg_with_pantry_and_fridge(),
+        inventory=ledger.Inventory(by_location={}),
+    )
+    assert len(writes) == 2
+    assert writes[0].obj["type"] == "counted"
+    assert writes[0].obj["payload"]["amount"] == "2"
+
+
+def test_insufficient_stock_skipped_on_preexisting_unit_mismatch() -> None:
+    """A unit mismatch already sitting at this location is a pre-existing
+    fold-level anomaly this check must not try to paper over — leave it to
+    the normal unit_mismatch handling, unchanged."""
+    inventory = ledger.Inventory(by_location={"pantry": {"milk": Quantity(Decimal("1"), "gal")}})
+    writes, messages = _decide(
+        kind=ChangeKind.CONSUMPTION,
+        from_location="pantry",
+        to_location=None,
+        amount=Decimal("3"),
+        cfg=_cfg_with_pantry_and_fridge(),
+        inventory=inventory,
+    )
+    assert len(writes) == 1
+    assert writes[0].obj["type"] == "consumed"
+    assert not any("adjusted" in m for m in messages)
+
+
+def test_insufficient_stock_for_movement_only_touches_from_side() -> None:
+    inventory = ledger.Inventory(by_location={"pantry": {"milk": Quantity(Decimal("1"), "l")}})
+    writes, messages = _decide(
+        kind=ChangeKind.MOVEMENT,
+        from_location="pantry",
+        to_location="fridge",
+        amount=Decimal("3"),
+        cfg=_cfg_with_pantry_and_fridge(),
+        inventory=inventory,
+    )
+    assert len(writes) == 2
+    assert writes[0].obj["type"] == "counted"
+    assert writes[0].obj["payload"]["at"] == "pantry"
+    assert writes[1].obj["type"] == "moved"
+    assert any("pantry" in m for m in messages)
+
+
+def test_acquired_events_never_get_a_counted_correction() -> None:
+    """Acquired has no `frm` side — there's nothing for it to fall short of."""
+    writes, messages = _decide(kind=ChangeKind.PURCHASE, to_location="pantry")
+    assert len(writes) == 1
+    assert writes[0].obj["type"] == "acquired"
+    assert messages == []

@@ -8,7 +8,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.tree import Tree
 
-from sumac import config, ledger, models
+from sumac import config, events, ledger, models
 
 console = Console()
 error_console = Console(stderr=True)
@@ -190,7 +190,9 @@ def print_find(
         console.print(f"[yellow]{product_id!r} not found in current inventory[/yellow]")
 
 
-def _describe_payload(payload: models.InventoryChange | models.InventorySnapshot) -> str:
+def _describe_payload(
+    payload: models.InventoryChange | models.InventorySnapshot | events.Event,
+) -> str:
     if isinstance(payload, models.InventoryChange):
         if payload.from_location and payload.to_location:
             arrow = f" {payload.from_location} -> {payload.to_location}"
@@ -202,7 +204,32 @@ def _describe_payload(payload: models.InventoryChange | models.InventorySnapshot
             arrow = ""
         qty = payload.quantity
         return f"{payload.kind.value} {qty.amount} {qty.unit} {payload.product_id}{arrow}"
-    return f"snapshot of {payload.location_id} ({len(payload.entries)} entries)"
+    if isinstance(payload, models.InventorySnapshot | events.Snapshot):
+        return f"snapshot of {payload.location_id} ({len(payload.entries)} entries)"
+    if isinstance(payload, events.Acquired):
+        reason = f" ({payload.reason})" if payload.reason else ""
+        return (
+            f"acquired{reason} {payload.amount} {payload.unit} {payload.product_id} -> {payload.to}"
+        )
+    if isinstance(payload, events.Consumed):
+        reason = f" ({payload.reason})" if payload.reason else ""
+        return (
+            f"consumed{reason} {payload.amount} {payload.unit} {payload.product_id} "
+            f"from {payload.frm}"
+        )
+    if isinstance(payload, events.Discarded):
+        return f"discarded {payload.amount} {payload.unit} {payload.product_id} from {payload.frm}"
+    if isinstance(payload, events.Moved):
+        return (
+            f"moved {payload.amount} {payload.unit} {payload.product_id} "
+            f"{payload.frm} -> {payload.to}"
+        )
+    if isinstance(payload, events.Counted):
+        reason = f" ({payload.reason})" if payload.reason else ""
+        return (
+            f"counted{reason} {payload.amount} {payload.unit} {payload.product_id} at {payload.at}"
+        )
+    raise TypeError(f"unrecognized payload type: {type(payload).__name__}")  # unreachable
 
 
 def print_log(records: list[models.Record]) -> None:

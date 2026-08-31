@@ -9,7 +9,7 @@ from sealedlog import Vault
 from sealedlog.errors import WrongPassphraseError
 from typer.testing import CliRunner
 
-from sumac import SCHEMA_VERSION, paths, store
+from sumac import paths, store
 from sumac import vault as sumac_vault
 from sumac.cli import app
 from sumac.errors import RetireNonemptyError, VaultExistsError
@@ -45,7 +45,7 @@ def _append_raw_change(
         key,
         f"log:{actor}",
         {
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": 1,  # v1 shape (kind/quantity/*_location), not SCHEMA_VERSION
             "type": "change",
             "id": "raw-1",
             "ts": datetime.now(UTC).isoformat(),
@@ -318,12 +318,14 @@ def test_doctor_flags_unknown_location(data_dir: Path) -> None:
 
 
 def test_log_shows_recorded_events(data_dir: Path) -> None:
+    """A "purchase" kind is now stored (and shown) as an Acquired v2 event —
+    "purchase" survives only as the CLI-facing ChangeKind vocabulary."""
     _run(data_dir, "init")
     _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
     _run(data_dir, "add", "purchase", "milk", "1", "l", "--to", "pantry")
     result = _run(data_dir, "log")
     assert result.exit_code == 0
-    assert "purchase" in result.output
+    assert "acquired" in result.output
 
 
 def test_add_array_creates_numbered_sublocations(data_dir: Path) -> None:

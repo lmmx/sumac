@@ -4,8 +4,11 @@ Edit this module to change what sumac stores; nothing else in the package
 should need to change in step with it.
 
 `Record` is the envelope written to JSONL (id/ts/actor/supersedes live there,
-once); `InventoryChange` and `InventorySnapshot` are its two payload shapes
-and carry only what's specific to each.
+once). Its payload is either a v1 shape (`InventoryChange`/`InventorySnapshot`
+— schema_version 1, the only thing ever written before Phase 4b) or a v2
+event (`sumac.events.Event` — schema_version 2, what the writer emits now).
+Both live in the same log forever; nothing gets rewritten. See
+docs/journal/2026-08-30 §3.3a/§3.3 for the full v1/v2 design.
 """
 
 from __future__ import annotations
@@ -15,6 +18,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
+
+from sumac import events
 
 JsonValue = None | bool | int | float | str | list["JsonValue"] | Mapping[str, "JsonValue"]
 
@@ -105,15 +110,17 @@ class InventorySnapshot:
 
 @dataclass(frozen=True, slots=True)
 class Record:
-    """Envelope for every JSONL line: a snapshot or a change."""
+    """Envelope for every JSONL line: a v1 change/snapshot, or a v2 event."""
 
     schema_version: int
-    type: str  # "snapshot" | "change"
+    # v1: "snapshot" | "change"
+    # v2: "snapshot" | "acquired" | "consumed" | "discarded" | "moved" | "counted"
+    type: str
     id: str
     ts: datetime
     actor: str
     supersedes: str | None
-    payload: InventorySnapshot | InventoryChange
+    payload: InventorySnapshot | InventoryChange | events.Event
 
 
 @dataclass(frozen=True, slots=True)

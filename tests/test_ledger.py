@@ -4,9 +4,15 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
-from sumac import SCHEMA_VERSION, config, ledger, models, paths, store
+from sumac import SCHEMA_VERSION, config, decide, events, ledger, models, paths, store
 
 T0 = datetime(2026, 1, 1, tzinfo=None).astimezone()
+
+# These build v1-shaped wire dicts specifically (kind/quantity/from_location/
+# to_location) — schema_version is hardcoded to 1, not SCHEMA_VERSION (which
+# now tracks the *current* build's max, 2), since a v1 shape under a v2 tag
+# would (correctly) fail validation. Most of this file exists to prove the
+# upcaster still handles exactly these shapes.
 
 
 def _change_obj(
@@ -23,7 +29,7 @@ def _change_obj(
     supersedes: str | None = None,
 ) -> dict:
     return {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": 1,
         "type": "change",
         "id": record_id,
         "ts": ts.isoformat(),
@@ -44,7 +50,7 @@ def _snapshot_obj(
     record_id: str, ts: datetime, actor: str, location_id: str, entries: list[tuple[str, str, str]]
 ) -> dict:
     return {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": 1,
         "type": "snapshot",
         "id": record_id,
         "ts": ts.isoformat(),
@@ -685,3 +691,106 @@ def test_movement_neither_side_commits_when_only_destination_mismatches(
     assert inventory.at("fridge")["flour"].amount == Decimal("1")
     assert inventory.at("fridge")["flour"].unit == "lb"  # unchanged, not overwritten
     assert any(a.reason == "unit_mismatch" for a in inventory.anomalies)
+
+
+def test_mixed_v1_and_v2_records_fold_together(data_dir: Path, osuser: str, key: bytes) -> None:
+    """Phase 4b's acceptance criterion (§3.3a/§5): a log containing both v1
+    and v2 records folds correctly. v1 keeps working through the upcaster
+    forever; v2 is read natively. Both touch the same product/location so a
+    mistake in either path, or in how they compose, shows up as a wrong total."""
+    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _change_obj("c1", T0, osuser, "purchase", "milk", "2", "l", to_location="pantry"),
+    )
+    v2_obj = decide.serialize_event(
+        events.Acquired(product_id="milk", to="pantry", amount=Decimal("3"), unit="l"),
+        actor=osuser,
+        occurred_at=T0 + timedelta(minutes=1),
+    )
+    store.append(data_dir, key, f"log:{osuser}", v2_obj)
+
+    inventory = ledger.build_inventory(data_dir, key)
+    assert inventory.at("pantry")["milk"].amount == Decimal("5")
+    assert inventory.anomalies == ()
+
+
+def test_mixed_v1_and_v2_snapshot_reset_interacts_correctly(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    """A v2 snapshot must reset a location exactly like a v1 one does — the
+    baseline-gating logic in build_inventory doesn't get to know or care
+    which version produced it."""
+    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _change_obj("c1", T0, osuser, "purchase", "milk", "5", "l", to_location="pantry"),
+    )
+    v2_snapshot = decide.serialize_event(
+        events.Snapshot(location_id="pantry", entries=()),
+        actor=osuser,
+        occurred_at=T0 + timedelta(minutes=1),
+    )
+    store.append(data_dir, key, f"log:{osuser}", v2_snapshot)
+
+    inventory = ledger.build_inventory(data_dir, key)
+    assert inventory.at("pantry") == {}
+    assert inventory.anomalies == ()
+
+
+def test_insufficient_stock_counted_actually_precedes_the_movement_after_reload(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    """Regression test for a real bug: decide_change's `writes` list has the
+    Counted correction before the movement, but that ordering only matters if
+    it survives storage and refold. It didn't — both writes shared the same
+    `occurred_at`, so the fold's (ts, actor, id) sort tie-broke on a random
+    uuid4, and the movement committed before the Counted about half the time,
+    silently overwriting the correction's effect (caught by manual end-to-end
+    smoke testing, not by decide.py's own unit tests, which only ever checked
+    list order). Exercises the actual write -> store -> reload -> fold path,
+    not just decide_change's return value, since that's what the bug needed."""
+    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+    config.add_location(data_dir, key, osuser, models.Location(id="fridge", name="Fridge"))
+    config.add_product(data_dir, key, osuser, models.Product(id="milk", name="Milk", unit="l"))
+
+    cfg = config.build_config(data_dir, key)
+    writes, _messages = decide.decide_change(
+        kind=models.ChangeKind.PURCHASE,
+        product_id="milk",
+        amount=Decimal("1"),
+        unit="l",
+        from_location=None,
+        to_location="pantry",
+        actor=osuser,
+        occurred_at=T0,
+        inventory=ledger.build_inventory(data_dir, key),
+        cfg=cfg,
+    )
+    for w in writes:
+        store.append(data_dir, key, w.stream, w.obj)
+
+    cfg = config.build_config(data_dir, key)
+    writes, messages = decide.decide_change(
+        kind=models.ChangeKind.MOVEMENT,
+        product_id="milk",
+        amount=Decimal("3"),
+        unit="l",
+        from_location="pantry",
+        to_location="fridge",
+        actor=osuser,
+        occurred_at=T0 + timedelta(minutes=1),
+        inventory=ledger.build_inventory(data_dir, key),
+        cfg=cfg,
+    )
+    assert any("adjusted" in m for m in messages)
+    for w in writes:
+        store.append(data_dir, key, w.stream, w.obj)
+
+    inventory = ledger.build_inventory(data_dir, key)
+    assert inventory.at("pantry") == {}
+    assert inventory.at("fridge")["milk"].amount == Decimal("3")

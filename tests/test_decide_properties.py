@@ -17,9 +17,18 @@ from decimal import Decimal
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from sumac import config, decide
+from sumac import config, decide, ledger
 from sumac.errors import Rejected
 from sumac.models import ChangeKind, Location, Product
+
+_LOCATION_KEYS_BY_TYPE = {
+    "acquired": ["to"],
+    "consumed": ["frm"],
+    "discarded": ["frm"],
+    "moved": ["frm", "to"],
+    "counted": ["at"],
+}
+_EMPTY_INVENTORY = ledger.Inventory(by_location={})
 
 _LOCATIONS = {
     "pantry": Location(id="pantry", name="Pantry"),
@@ -77,7 +86,7 @@ def test_gate_soundness_accepted_writes_reference_only_known_entities(
 ) -> None:
     cfg = _base_cfg()
     try:
-        writes, _warning = decide.decide_change(
+        writes, _messages = decide.decide_change(
             kind=kind,
             product_id=product_id,
             amount=amount,
@@ -86,6 +95,7 @@ def test_gate_soundness_accepted_writes_reference_only_known_entities(
             to_location=to_loc,
             actor="alice",
             occurred_at=datetime(2026, 1, 1, tzinfo=UTC),
+            inventory=_EMPTY_INVENTORY,
             cfg=cfg,
         )
     except Rejected:
@@ -96,7 +106,8 @@ def test_gate_soundness_accepted_writes_reference_only_known_entities(
         if w.stream == "config":
             continue
         payload = w.obj["payload"]
-        for loc in (payload["from_location"], payload["to_location"]):
+        for key in _LOCATION_KEYS_BY_TYPE[w.obj["type"]]:
+            loc = payload[key]
             assert loc is None or loc in cfg.known_locations
         pid = payload["product_id"]
         if pid not in cfg.known_products:

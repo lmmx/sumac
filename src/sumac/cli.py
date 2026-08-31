@@ -8,7 +8,6 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Annotated
-from uuid import uuid4
 
 import typer
 from sealedlog import Vault
@@ -16,9 +15,9 @@ from sealedlog.errors import SealError
 
 from sumac import (
     FORMAT_VERSION,
-    SCHEMA_VERSION,
     config,
     decide,
+    events,
     ledger,
     models,
     paths,
@@ -27,7 +26,7 @@ from sumac import (
 )
 from sumac import vault as sumac_vault
 from sumac.errors import RetireNonemptyError, SumacError, VaultExistsError, VaultNotFoundError
-from sumac.models import ChangeKind, InventorySnapshot, Quantity, SnapshotEntry
+from sumac.models import ChangeKind
 from sumac.passphrase import get_key, resolve_passphrase
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
@@ -62,39 +61,13 @@ def _parse_decimal(raw: str) -> Decimal:
         raise typer.BadParameter(f"expected a decimal amount, got {raw!r}") from e
 
 
-def _parse_snapshot_entry(spec: str) -> SnapshotEntry:
+def _parse_snapshot_entry(spec: str) -> events.SnapshotEntry:
     try:
         product_id, rest = spec.split("=", 1)
         amount_str, unit = rest.split("/", 1)
-        return SnapshotEntry(product_id=product_id, quantity=Quantity(Decimal(amount_str), unit))
+        return events.SnapshotEntry(product_id=product_id, amount=Decimal(amount_str), unit=unit)
     except (ValueError, InvalidOperation) as e:
         raise typer.BadParameter(f"expected PRODUCT=AMOUNT/UNIT, got {spec!r}") from e
-
-
-def _quantity_obj(q: Quantity) -> dict:
-    return {"amount": str(q.amount), "unit": q.unit}
-
-
-def _snapshot_to_obj(record_id: str, ts: datetime, actor: str, snap: InventorySnapshot) -> dict:
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "type": "snapshot",
-        "id": record_id,
-        "ts": ts.isoformat(),
-        "actor": actor,
-        "supersedes": None,
-        "payload": {
-            "location_id": snap.location_id,
-            "entries": [
-                {
-                    "product_id": e.product_id,
-                    "quantity": _quantity_obj(e.quantity),
-                    "metadata": dict(e.metadata),
-                }
-                for e in snap.entries
-            ],
-        },
-    }
 
 
 @app.command()
@@ -260,7 +233,8 @@ def add(
     key = _key(data_dir)
     actor = paths.current_user()
     cfg = config.build_config(data_dir, key)
-    writes, warning = decide.decide_change(
+    inventory = ledger.build_inventory(data_dir, key)
+    writes, messages = decide.decide_change(
         kind=kind,
         product_id=product_id,
         amount=_parse_decimal(amount),
@@ -269,10 +243,11 @@ def add(
         to_location=to_location,
         actor=actor,
         occurred_at=datetime.now(UTC),
+        inventory=inventory,
         cfg=cfg,
     )
-    if warning:
-        render.print_warning(warning)
+    for message in messages:
+        render.print_warning(message)
     for w in writes:
         store.append(data_dir, key, w.stream, w.obj)
     render.print_success(f"Recorded {kind.value} of {amount} {unit} {product_id}")
@@ -290,8 +265,8 @@ def snapshot(
     key = _key(data_dir)
     actor = paths.current_user()
     parsed = tuple(_parse_snapshot_entry(e) for e in (entries or []))
-    snap = InventorySnapshot(location_id=location_id, entries=parsed)
-    obj = _snapshot_to_obj(str(uuid4()), datetime.now(UTC), actor, snap)
+    event = events.Snapshot(location_id=location_id, entries=parsed)
+    obj = decide.serialize_event(event, actor=actor, occurred_at=datetime.now(UTC))
     store.append(data_dir, key, f"log:{actor}", obj)
     render.print_success(f"Recorded snapshot of {location_id!r} ({len(parsed)} entries)")
 

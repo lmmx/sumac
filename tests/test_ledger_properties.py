@@ -59,7 +59,7 @@ _snapshot_payload = st.fixed_dictionaries(
 )
 _record = st.fixed_dictionaries(
     {
-        "schema_version": st.integers(min_value=-1, max_value=4),  # SCHEMA_VERSION is 1
+        "schema_version": st.integers(min_value=-1, max_value=4),  # SCHEMA_VERSION is 2
         "type": st.sampled_from(["change", "snapshot", "bogus"]),
         "id": _id,
         "ts": st.one_of(st.just("2026-01-01T00:00:00+00:00"), _id),
