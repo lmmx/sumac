@@ -27,7 +27,7 @@ from sealedlog.errors import SealError
 
 from sumac import SCHEMA_VERSION, config, events, paths, store, upcast
 from sumac.errors import SumacError
-from sumac.models import Anomaly, Location, Quantity, Record
+from sumac.models import Anomaly, InventoryChange, InventorySnapshot, Location, Quantity, Record
 from sumac.schemas import RecordSchema
 
 _READ_TIME_ERRORS = (SumacError, SealError, ValidationError)
@@ -112,22 +112,28 @@ def _load_v2(data_dir: Path, key: bytes) -> _V2LoadResult:
 
 
 def observed_product_units(data_dir: Path, key: bytes) -> dict[str, Counter[str]]:
-    """For every product_id recorded in an event, how many times each unit
-    was used with it — including events the fold can't yet apply for
-    unrelated reasons (unknown location, etc.), since the point is what
-    units were actually written, not what currently folds.
+    """For every product_id recorded in a change or snapshot entry, how many
+    times each unit was used with it — including records the fold can't yet
+    apply for unrelated reasons (unknown location, etc.), since the point is
+    what units were actually written, not what currently folds.
+
+    Deliberately reads v1 records via `_load`, not the upcast v2 events via
+    `_load_v2`: a record that fails to upcast (an `upcast_failed` anomaly —
+    currently only an ambiguous `correction`) was still *written*, and this
+    function's whole job is "what was written," not "what currently folds
+    or upcasts." Going through `_load_v2` would silently drop exactly the
+    records this is meant to surface.
 
     Feeds Phase 2c's canonical-unit backfill: a product's most-observed unit is
     a reasonable canonical-unit default, and `sumac config check-units` uses
     this to find (product, unit) pairs `Config.convert` can't yet resolve."""
     counts: dict[str, Counter[str]] = defaultdict(Counter)
-    for r in _load_v2(data_dir, key).records:
-        ev = r.event
-        if isinstance(ev, events.Snapshot):
-            for entry in ev.entries:
-                counts[entry.product_id][entry.unit] += 1
-        else:
-            counts[ev.product_id][ev.unit] += 1
+    for r in _load(data_dir, key).records:
+        if isinstance(r.payload, InventoryChange):
+            counts[r.payload.product_id][r.payload.quantity.unit] += 1
+        elif isinstance(r.payload, InventorySnapshot):
+            for entry in r.payload.entries:
+                counts[entry.product_id][entry.quantity.unit] += 1
     return dict(counts)
 
 
@@ -186,10 +192,20 @@ def _apply_sides(
     sides: list[tuple[str, Quantity]],
 ) -> None:
     """Applies a delta-style event (`Acquired`/`Consumed`/`Discarded`: one
-    side; `Moved`: two) atomically — every location must be known and every
-    side must convert cleanly, or nothing is committed. Mirrors the same
-    all-or-nothing shape the pre-Phase-4a fold used for movement, now shared
-    by every delta event instead of duplicated per two-sided case."""
+    side; `Moved`: two).
+
+    Atomic with respect to *failures*: every location must be known and
+    every side actually attempted must convert cleanly, or nothing commits.
+    Not atomic with respect to baseline gating — a side whose location has
+    since been reset by a later snapshot is skipped on its own, independent
+    of the event's other side(s), per this module's own invariant that a
+    snapshot's reset is scoped to the one location it names, not to every
+    event that ever touched it. So a `Moved` whose source is behind its
+    location's baseline but whose destination isn't will commit the
+    destination side only — that's not a partial-application bug, it's the
+    baseline rule applied per-location the way it's supposed to be; it's
+    also exactly the pre-Phase-4a fold's shape for movement, unchanged here
+    and verified against it on the real log (§3.3a's Phase 4a proof)."""
     bad_location = False
     for loc_id, _delta in sides:
         if loc_id not in locations:

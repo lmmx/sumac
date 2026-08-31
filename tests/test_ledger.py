@@ -633,3 +633,55 @@ def test_discovery_folds_like_purchase(data_dir: Path, osuser: str, key: bytes) 
     inventory = ledger.build_inventory(data_dir, key)
     assert inventory.at("pantry")["jam"].amount == Decimal("1")
     assert inventory.anomalies == ()
+
+
+def test_movement_neither_side_commits_when_only_destination_mismatches(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    """_apply_sides must be atomic w.r.t. failures: a Moved whose source side
+    would resolve cleanly but whose destination side hits a unit mismatch
+    must leave *both* sides untouched, not just skip the bad one."""
+    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+    config.add_location(data_dir, key, osuser, models.Location(id="fridge", name="Fridge"))
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _change_obj("c1", T0, osuser, "purchase", "flour", "5", "kg", to_location="pantry"),
+    )
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _change_obj(
+            "c2",
+            T0 + timedelta(minutes=1),
+            osuser,
+            "purchase",
+            "flour",
+            "1",
+            "lb",
+            to_location="fridge",
+        ),
+    )
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _change_obj(
+            "c3",
+            T0 + timedelta(minutes=2),
+            osuser,
+            "movement",
+            "flour",
+            "1",
+            "kg",
+            from_location="pantry",
+            to_location="fridge",
+        ),
+    )
+    inventory = ledger.build_inventory(data_dir, key)
+    assert inventory.at("pantry")["flour"].amount == Decimal("5")  # unchanged, not 4
+    assert inventory.at("fridge")["flour"].amount == Decimal("1")
+    assert inventory.at("fridge")["flour"].unit == "lb"  # unchanged, not overwritten
+    assert any(a.reason == "unit_mismatch" for a in inventory.anomalies)
