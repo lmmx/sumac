@@ -117,15 +117,15 @@ class ToolCallFormat(StrEnum):
 # unit) so switching models can't leave TOOL_CALL_FORMAT pointing at the
 # wrong wire syntax (§40).
 
-# QUANTIZED_MODEL_ID = "unsloth/Qwen3-1.7B-GGUF"
-# QUANTIZED_FILENAME = "Qwen3-1.7B-Q4_K_M.gguf"
-# TOOL_CALL_FORMAT = ToolCallFormat.QWEN
+QUANTIZED_MODEL_ID = "unsloth/Qwen3-1.7B-GGUF"
+QUANTIZED_FILENAME = "Qwen3-1.7B-Q4_K_M.gguf"
+TOOL_CALL_FORMAT = ToolCallFormat.QWEN
 # QUANTIZED_MODEL_ID = "unsloth/Qwen3-0.6B-GGUF"
 # QUANTIZED_FILENAME = "Qwen3-0.6B-Q4_K_M.gguf"
 # TOOL_CALL_FORMAT = ToolCallFormat.QWEN
-QUANTIZED_MODEL_ID = "unsloth/LFM2.5-1.2B-Instruct-GGUF"
-QUANTIZED_FILENAME = "LFM2.5-1.2B-Instruct-Q4_K_M.gguf"
-TOOL_CALL_FORMAT = ToolCallFormat.LFM
+# QUANTIZED_MODEL_ID = "unsloth/LFM2.5-1.2B-Instruct-GGUF"
+# QUANTIZED_FILENAME = "LFM2.5-1.2B-Instruct-Q4_K_M.gguf"
+# TOOL_CALL_FORMAT = ToolCallFormat.LFM
 
 # §13: a termination guarantee sized for "one write per round" (every
 # sequential search-then-act step a compound request could produce), not a
@@ -642,9 +642,27 @@ class AgentRunner:
         assert self._messages is not None
         self._pending = []
         for round_num in range(1, MAX_TOOL_ROUNDS + 1):
-            response = self._runner.send_chat_completion_request(self._build_request())
+            request = self._build_request()
+            print(f"\n=== REQUEST (round {round_num}) ===")
+            print(repr(request))
+            print(f"tool_schemas: {getattr(request, 'tool_schemas', None)!r}")
+            print(f"tool_choice: {getattr(request, 'tool_choice', None)!r}")
+
+            response = self._runner.send_chat_completion_request(request)
+
+            print(f"\n=== RAW RESPONSE (round {round_num}) ===")
+            print(repr(response))
+
             _print_usage(response, round_num)
             message = response.choices[0].message
+
+            print("\n=== MESSAGE ===")
+            print(repr(message))
+            print("\n=== CONTENT ===")
+            print(repr(message.content))
+            print("\n=== TOOL CALLS ===")
+            print(repr(message.tool_calls))
+
             if not message.tool_calls:
                 self._messages.append({"role": "assistant", "content": message.content or ""})
                 return AgentPlan(reply_text=message.content or "", writes=tuple(self._pending))
