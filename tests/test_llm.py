@@ -115,13 +115,18 @@ def test_find_inventory_returns_matches(data_dir: Path, key: bytes, osuser: str)
         agent.tool_callbacks["sumac_find_inventory"]("sumac_find_inventory", {"query": "jam"})
     )
 
-    assert result["matches"] == [
+    assert result["products"] == [
         {
             "product_id": "jam",
-            "location_id": "pantry",
-            "location_path": "Pantry",
-            "amount": "3",
-            "unit": "jar",
+            "is_exact_match": True,
+            "locations": [
+                {
+                    "location_id": "pantry",
+                    "location_path": "Pantry",
+                    "amount": "3",
+                    "unit": "jar",
+                }
+            ],
         }
     ]
 
@@ -136,7 +141,7 @@ def test_find_inventory_no_match_returns_empty_list(
             "sumac_find_inventory", {"query": "nonexistent"}
         )
     )
-    assert result["matches"] == []
+    assert result["products"] == []
 
 
 def _seed_freezer_and_fridge_butters(data_dir: Path, key: bytes, osuser: str) -> None:
@@ -163,14 +168,15 @@ def _seed_freezer_and_fridge_butters(data_dir: Path, key: bytes, osuser: str) ->
         )
 
 
-def test_find_inventory_excludes_substring_only_match_by_default(
+def test_find_inventory_includes_every_tier_marked_by_is_exact_match(
     data_dir: Path, key: bytes, osuser: str
 ) -> None:
-    """Real usage: `sumac ask "where is the butter?"` returned "Butternut
-    Box Dog Food" alongside actual butter products, and a 0.6B model picked
-    it as the answer. "butter" is a substring of "Butternut" but not a
-    whole word there, so it's noise a query for "butter" shouldn't surface
-    at all while a real whole-word match exists (§29)."""
+    """§36: nothing is withheld or excluded here — every matching product
+    comes back, grouped, ordered by `ledger.search_inventory`'s tier
+    (exact, then whole-word, then substring), each tagged
+    `is_exact_match`. Relevance judgment (is "Butternut Box" plausibly
+    what someone means by "butter"?) is left entirely to the model — this
+    only checks the deterministic data shape it's given to reason over."""
     _seed_freezer_and_fridge_butters(data_dir, key, osuser)
     agent, _fake = _make_agent([], data_dir, key)
 
@@ -178,16 +184,17 @@ def test_find_inventory_excludes_substring_only_match_by_default(
         agent.tool_callbacks["sumac_find_inventory"]("sumac_find_inventory", {"query": "butter"})
     )
 
-    assert [m["product_id"] for m in result["matches"]] == ["Butter", "Salted Butter"]
+    products = result["products"]
+    assert [p["product_id"] for p in products] == ["Butter", "Salted Butter", "Butternut Box"]
+    assert [p["is_exact_match"] for p in products] == [True, False, False]
 
 
-def test_find_inventory_falls_back_to_substring_when_no_whole_word_match(
+def test_find_inventory_substring_only_query_still_returns_a_match(
     data_dir: Path, key: bytes, osuser: str
 ) -> None:
-    """The whole-word-only narrowing must not make a genuine partial search
-    return nothing — "nut" matches no product as a whole word here, only
-    as a substring of "Butternut", so that substring match should still
-    come back rather than an empty result."""
+    """ "nut" matches no product as a whole word here, only as a substring of
+    "Butternut" — that match still comes back, marked as not an exact
+    match, rather than an empty result."""
     _seed_freezer_and_fridge_butters(data_dir, key, osuser)
     agent, _fake = _make_agent([], data_dir, key)
 
@@ -195,7 +202,8 @@ def test_find_inventory_falls_back_to_substring_when_no_whole_word_match(
         agent.tool_callbacks["sumac_find_inventory"]("sumac_find_inventory", {"query": "nut"})
     )
 
-    assert [m["product_id"] for m in result["matches"]] == ["Butternut Box"]
+    assert [p["product_id"] for p in result["products"]] == ["Butternut Box"]
+    assert result["products"][0]["is_exact_match"] is False
 
 
 # --- propose -------------------------------------------------------------
@@ -253,7 +261,7 @@ def test_propose_resolves_a_consume_call_into_a_pending_write(
     assert [t.name for t in plan.trace] == ["sumac_find_inventory", "sumac_consume_inventory"]
     assert plan.trace[0].arguments == {"query": "jam"}
     find_result = json.loads(plan.trace[0].result)
-    assert find_result["matches"][0]["product_id"] == "jam"
+    assert find_result["products"][0]["product_id"] == "jam"
     consume_result = json.loads(plan.trace[1].result)
     assert consume_result["status"] == "proposed"
 
@@ -483,3 +491,20 @@ def test_commit_re_decides_against_fresh_state_not_stale_snapshot(
     # Shortfall reconciliation adjusted the shelf up to 3 before consuming,
     # landing at 0 (removed from the dict) rather than going negative.
     assert "jam" not in ledger.build_inventory(data_dir, key).at("pantry")
+
+
+# --- prompt/schema content ------------------------------------------------
+
+
+def test_prompt_and_schema_do_not_worked_example_specific_products() -> None:
+    """A worked example naming real products in the prompt or tool
+    description (e.g. "Salted Butter is butter, Peanut Butter isn't")
+    would hand the model the answer to exactly the semantic judgment it's
+    supposed to make on its own — the model should apply category
+    reasoning generically, not recognize a memorized pairing. Guards
+    against reintroducing one; not exhaustive, just the specific products
+    this reasoning was worked out against during development."""
+    text = llm.SYSTEM_PROMPT + json.dumps(llm._FIND_INVENTORY_SCHEMA)
+    lowered = text.lower()
+    for word in ("butter", "peanut", "croissant", "milk", "chocolate"):
+        assert word not in lowered, f"{word!r} found in prompt/schema text — worked example leaked"

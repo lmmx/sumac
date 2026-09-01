@@ -92,10 +92,12 @@ from sumac.models import ChangeKind
 # Not empirically checked against the tool schemas below (§21, §24) — pick a
 # different GGUF repo/file here if this one doesn't call tools reliably.
 
-# QUANTIZED_MODEL_ID = "unsloth/Qwen3-1.7B-GGUF"
-# QUANTIZED_FILENAME = "Qwen3-1.7B-Q4_K_M.gguf"
-QUANTIZED_MODEL_ID = "unsloth/Qwen3-0.6B-GGUF"
-QUANTIZED_FILENAME = "Qwen3-0.6B-Q4_K_M.gguf"
+QUANTIZED_MODEL_ID = "unsloth/Qwen3-1.7B-GGUF"
+QUANTIZED_FILENAME = "Qwen3-1.7B-Q4_K_M.gguf"
+# QUANTIZED_MODEL_ID = "unsloth/Qwen3-0.6B-GGUF"
+# QUANTIZED_FILENAME = "Qwen3-0.6B-Q4_K_M.gguf"
+# QUANTIZED_MODEL_ID = "unsloth/LFM2.5-1.2B-Instruct-GGUF"
+# QUANTIZED_FILENAME = "LFM2.5-1.2B-Instruct-Q4_K_M.gguf"
 
 # §13: a termination guarantee sized for "one write per round" (every
 # sequential search-then-act step a compound request could produce), not a
@@ -127,24 +129,28 @@ person; describe a location using its location_path in plain language
 instead.
 
 sumac_find_inventory groups its results by product, each with every
-location that holds it — data for you to reason over, not a script to read
-back. Work out which product, if any, is actually what the person means,
-the way a person would, and answer in your own words, directly and
-concisely. A product marked "is_exact_match": false merely has a name that
-happens to contain the search word — for example "Peanut Butter" and
-"Waitrose All Butter Croissants" both contain the word "butter" but are
-not the same product as "Butter", and a search for "milk" finding "Milk
-Chocolate" does not mean chocolate is a location of milk. Consider one of
-these only if it's plausibly what the person meant, or their own wording
-asks about a broader category of product — otherwise leave it out of your
-reply, rather than listing every product the search returned.
+location that holds it — data for you to reason over, not a script to
+read back. "is_exact_match": true is strong evidence for what the person
+means, but it does not automatically rule out the other, non-exact
+matches. A product name that adds a modifier to the search word (a
+flavor, a variant, a preparation) is often still the same basic kind of
+product a reasonable person would accept; a product name where the search
+word is only part of a different, established product's name usually
+isn't, even though the word appears in it. Use your own ordinary
+knowledge to judge which situation each non-exact match is, the way a
+person reading a shopping list would — don't apply a fixed rule, and
+don't assume a partial match is always relevant or always irrelevant.
 
-If exactly one product in the result has "is_exact_match": true, answer
-directly with every location it appears in — more than one location for
-that product is not ambiguity, it just means it's kept in more than one
-place. Only stop and ask a plain-text clarifying question, with no further
-tool call, when more than one different product has "is_exact_match": true
-and nothing in the person's request distinguishes which one they mean.
+Decide which product or products in the result — the exact one, several
+including some non-exact ones, or just the exact one — actually answer
+what the person asked, then answer in your own words, directly and
+concisely, naming only the ones you judge relevant. More than one
+location for the same product is not ambiguity, it just means it's kept
+in more than one place. If more than one genuinely different product is
+plausible and the person's wording doesn't distinguish them, either cover
+the plausible ones together or ask a concise clarifying question, in
+plain text with no further tool call — whichever better fits how they
+phrased the request. Don't just list every product the search returned.
 
 Call one tool at a time. After each tool call you will see its result before
 deciding the next one — use that result, do not assume what it will be in
@@ -186,15 +192,15 @@ _FIND_INVENTORY_SCHEMA = {
             '"is_exact_match" (true only when the product\'s name exactly '
             'matches the search), and "locations" (every location holding '
             'it, each with "location_id", "location_path", "amount", and '
-            '"unit"). A product with "is_exact_match": false merely has a '
-            "name that happens to contain the search word — e.g. searching "
-            '"butter" also matches "Peanut Butter" and "Waitrose All '
-            'Butter Croissants", which are different products, not butter '
-            "itself. product_id and location_id are internal identifiers — "
-            "use them, verbatim, only in a later consume/move/discover "
-            "call; never invent one and never mention one in a reply to "
-            "the person. Call this before consuming, moving, or "
-            "discovering any product."
+            '"unit"). "is_exact_match": false means the name only partly '
+            "matches — it may still be the same basic kind of product the "
+            "search was for, or it may be a different, established product "
+            "that merely shares a word; judge each one the way a person "
+            "reading the name would. product_id and location_id are "
+            "internal identifiers — use them, verbatim, only in a later "
+            "consume/move/discover call; never invent one and never "
+            "mention one in a reply to the person. Call this before "
+            "consuming, moving, or discovering any product."
         ),
         "strict": True,
         "parameters": {
