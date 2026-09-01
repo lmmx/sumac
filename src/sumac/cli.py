@@ -373,9 +373,18 @@ def doctor(data_dir: DataDirOption = Path("data")) -> None:
 @app.command()
 def ask(
     prompt: str,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Compute and show the plan; write nothing."),
+    ] = False,
     data_dir: DataDirOption = Path("data"),
 ) -> None:
     """Ask the in-process AI agent to perform an inventory operation.
+
+    Resolves an underspecified sentence into a sequence of consumption,
+    movement, and discovery writes against the same `decide_change` gate
+    `sumac add` uses, shows the plan, and asks before writing anything. See
+    docs/journal/2026-09-01-ask-agent-design.md.
 
     Examples:
         sumac ask "where is the jam?"
@@ -388,20 +397,47 @@ def ask(
     try:
         from sumac import llm
     except ImportError as e:
-        raise typer.Exit(
-            f"Agent requires mistralrs. Install with: pip install mistralrs\nDetails: {e}"
-        )
+        render.print_error(f"Agent requires mistralrs. Install with: pip install mistralrs\n{e}")
+        raise typer.Exit(code=1) from e
 
     try:
-        runner = llm.AgentRunner(data_dir, key)
-        result = runner.run(prompt)
-        render.print_success(result)
+        agent = llm.AgentRunner(data_dir, key)
+        plan = agent.propose(prompt)
     except FileNotFoundError as e:
         render.print_error(str(e))
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from e
     except Exception as e:
         render.print_error(f"Agent error: {e}")
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from e
+
+    while True:
+        if not plan.writes:
+            if plan.reply_text:
+                render.console.print(plan.reply_text)
+            return
+
+        render.print_plan(plan)
+        if dry_run:
+            return
+
+        answer = typer.prompt("[a]ccept / [r]eject / or type feedback", default="a").strip()
+        choice = answer.lower()
+        if choice in ("a", "accept"):
+            # Not caught here: a Rejected raised while committing is not a
+            # modeled outcome the model can react to (the human already
+            # accepted the plan) and should propagate exactly the way `add`
+            # already lets `decide_change`'s Rejected reach `main`'s handler.
+            for summary in agent.commit(plan):
+                render.print_success(summary)
+            return
+        if choice in ("r", "reject"):
+            return
+
+        try:
+            plan = agent.revise(answer)
+        except Exception as e:
+            render.print_error(f"Agent error: {e}")
+            raise typer.Exit(code=1) from e
 
 
 def main() -> None:

@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 from collections import Counter
+from typing import TYPE_CHECKING
 
 from rich.console import Console
 from rich.table import Table
 from rich.tree import Tree
 
 from sumac import config, events, ledger, models
+
+if TYPE_CHECKING:
+    from sumac.llm import AgentPlan
 
 console = Console()
 error_console = Console(stderr=True)
@@ -279,6 +283,31 @@ def print_doctor(report: ledger.DoctorReport) -> None:
         for a in suggestions:
             reason = f"{a.reason}: {a.detail}".replace('"', "'")
             console.print(f'  sumac correct {a.record_id} --reason "{reason}"')
+
+
+def print_plan(plan: AgentPlan) -> None:
+    """`sumac ask`'s preview (docs/journal/2026-09-01-ask-agent-design.md §14
+    step 4): the accumulated, not-yet-committed writes an `AgentRunner.propose`/
+    `.revise` call resolved, in the structured-table style of `print_log`/
+    `print_doctor` rather than a single string."""
+    table = Table(title=f"Proposed plan ({len(plan.writes)} write(s))")
+    table.add_column("action")
+    table.add_column("detail")
+    for w in plan.writes:
+        detail = f"{w.amount} {w.unit} {w.product_id}"
+        if w.from_location and w.to_location:
+            detail += f" {w.from_location} -> {w.to_location}"
+        elif w.from_location:
+            detail += f" from {w.from_location}"
+        elif w.to_location:
+            detail += f" to {w.to_location}"
+        table.add_row(w.kind.value, detail)
+    console.print(table)
+    if plan.reply_text:
+        console.print(plan.reply_text)
+    for w in plan.writes:
+        for warning in w.warnings:
+            print_warning(warning)
 
 
 def print_verify(result: ledger.VerifyResult) -> None:

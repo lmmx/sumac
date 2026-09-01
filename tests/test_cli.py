@@ -2,17 +2,20 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 from sealedlog import Vault
 from sealedlog.errors import WrongPassphraseError
 from typer.testing import CliRunner
 
-from sumac import ledger, paths, store
+from sumac import ledger, llm, paths, store
 from sumac import vault as sumac_vault
 from sumac.cli import app
 from sumac.errors import RetireNonemptyError, VaultExistsError
+from sumac.models import ChangeKind
 
 runner = CliRunner()
 PASSPHRASE_ENV = {"SUMAC_PASSPHRASE": "test-pass"}
@@ -68,8 +71,10 @@ def _osuser(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("getpass.getuser", lambda: "alice")
 
 
-def _run(data_dir: Path, *args: str, env: dict[str, str] = PASSPHRASE_ENV):
-    return runner.invoke(app, [*args, "--data-dir", str(data_dir)], env=env)
+def _run(
+    data_dir: Path, *args: str, env: dict[str, str] = PASSPHRASE_ENV, input: str | None = None
+):
+    return runner.invoke(app, [*args, "--data-dir", str(data_dir)], env=env, input=input)
 
 
 def test_init_creates_vault(data_dir: Path) -> None:
@@ -482,3 +487,130 @@ def test_another_user_cannot_write_into_alices_log(
     assert paths.log_path(data_dir, "bob").exists()
     alice_lines = paths.log_path(data_dir, "alice").read_text().splitlines()
     assert len(alice_lines) == 1
+
+
+# --- ask (docs/journal/2026-09-01-ask-agent-design.md §14) -----------------
+#
+# `sumac ask`'s own interactive loop (accept/reject/feedback, --dry-run) is
+# CLI plumbing around `llm.AgentRunner`'s propose/revise/commit interface —
+# `llm.AgentRunner`'s own logic (tool dispatch, self-review, re-deciding on
+# commit) is exercised against a real vault in tests/test_llm.py instead.
+# These tests stand in a fake `AgentRunner` so the loop can be driven without
+# a real model or GGUF download.
+
+
+def _consumption_plan(amount: str = "1") -> llm.AgentPlan:
+    return llm.AgentPlan(
+        reply_text=f"consumed {amount} jar of jam",
+        writes=(
+            llm.ProposedWrite(
+                kind=ChangeKind.CONSUMPTION,
+                product_id="jam",
+                amount=Decimal(amount),
+                unit="jar",
+                from_location="pantry",
+                to_location=None,
+            ),
+        ),
+    )
+
+
+class _FakeAgentRunner:
+    """Scripted stand-in for `llm.AgentRunner`, driven by a per-test queue of
+    `AgentPlan`s. `commits` records each accepted plan so a test can assert
+    whether `commit` was reached without depending on real domain state.
+    `plans` is set per-test by `_patch_agent_runner` as a class attribute on
+    a dynamically built subclass — declared here so its type is known."""
+
+    plans: ClassVar[list[llm.AgentPlan]] = []
+
+    def __init__(self, data_dir: Path, key: bytes) -> None:
+        self.data_dir = data_dir
+        self.key = key
+        self.commits: list[llm.AgentPlan] = []
+
+    def propose(self, prompt: str) -> llm.AgentPlan:
+        return self.plans.pop(0)
+
+    def revise(self, feedback: str) -> llm.AgentPlan:
+        return self.plans.pop(0)
+
+    def commit(self, plan: llm.AgentPlan) -> list[str]:
+        self.commits.append(plan)
+        return [
+            f"Recorded {w.kind.value} of {w.amount} {w.unit} {w.product_id}" for w in plan.writes
+        ]
+
+
+def _patch_agent_runner(
+    monkeypatch: pytest.MonkeyPatch, plans: list[llm.AgentPlan]
+) -> type[_FakeAgentRunner]:
+    """Builds a fresh `_FakeAgentRunner` subclass carrying its own `plans`
+    queue (a class attribute, since `cli.py` constructs the instance itself —
+    there's no seam to pass a queue through `AgentRunner(data_dir, key)`) and
+    monkeypatches `sumac.llm.AgentRunner` to it."""
+    fake_cls = type("_ScriptedAgentRunner", (_FakeAgentRunner,), {"plans": plans})
+    monkeypatch.setattr(llm, "AgentRunner", fake_cls)
+    return fake_cls
+
+
+def test_ask_read_only_reply_prints_text_and_does_not_prompt(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run(data_dir, "init")
+    plan = llm.AgentPlan(reply_text="the jam is in the pantry", writes=())
+    _patch_agent_runner(monkeypatch, [plan])
+
+    result = _run(data_dir, "ask", "where is the jam?")
+
+    assert result.exit_code == 0, result.output
+    assert "the jam is in the pantry" in result.output
+
+
+def test_ask_dry_run_shows_plan_and_never_commits(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run(data_dir, "init")
+    fake_cls = _patch_agent_runner(monkeypatch, [_consumption_plan()])
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam", "--dry-run")
+
+    assert result.exit_code == 0, result.output
+    assert "consumption" in result.output
+    assert "jam" in result.output
+    assert fake_cls.plans == []  # propose() was called, revise()/commit() were not
+
+
+def test_ask_accept_commits_and_prints_summary(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run(data_dir, "init")
+    _patch_agent_runner(monkeypatch, [_consumption_plan()])
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam", input="a\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Recorded consumption of 1 jar jam" in result.output
+
+
+def test_ask_reject_does_not_commit(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _run(data_dir, "init")
+    fake_cls = _patch_agent_runner(monkeypatch, [_consumption_plan()])
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam", input="r\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Recorded" not in result.output
+    assert fake_cls.plans == []
+
+
+def test_ask_feedback_revises_then_accept_commits_the_revised_plan(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run(data_dir, "init")
+    _patch_agent_runner(monkeypatch, [_consumption_plan(amount="1"), _consumption_plan(amount="2")])
+
+    result = _run(data_dir, "ask", "consume some jam", input="actually make it 2 jars\na\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Recorded consumption of 2 jar jam" in result.output
