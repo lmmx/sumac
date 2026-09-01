@@ -326,6 +326,21 @@ class SendsCompletions(Protocol):
     ) -> mistralrs.ChatCompletionResponse: ...
 
 
+def _print_usage(response: mistralrs.ChatCompletionResponse) -> None:
+    """Per-round token/timing numbers straight from mistral.rs's own `Usage`
+    (never computed by sumac) — for diagnosing where wall time actually goes
+    (model load vs. inference vs. round count), not sumac's own guess at it.
+    Printed unconditionally for now; no quieter mode exists yet. A no-op for
+    a fake `SendsCompletions` in tests, which has no real `.usage` to report."""
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return
+    render.console.print(
+        f"[dim]{usage.prompt_tokens} prompt + {usage.completion_tokens} completion tokens, "
+        f"{usage.avg_compl_tok_per_sec:.1f} tok/s, {usage.total_time_sec:.1f}s[/dim]"
+    )
+
+
 def _build_runner() -> mistralrs.Runner:
     # No `tool_callbacks` here — see the module docstring's "Client-side, not
     # server-side" section for why: the Python SDK can only register a
@@ -483,6 +498,7 @@ class AgentRunner:
             model=MODEL_ID,
             tool_schemas=TOOL_SCHEMAS,
             tool_choice=mistralrs.ToolChoice.Auto,
+            enable_thinking=False,
         )
 
     def _run_loop(self) -> AgentPlan:
@@ -505,6 +521,7 @@ class AgentRunner:
         self._pending = []
         for _ in range(MAX_TOOL_ROUNDS):
             response = self._runner.send_chat_completion_request(self._build_request())
+            _print_usage(response)
             message = response.choices[0].message
             if not message.tool_calls:
                 self._messages.append({"role": "assistant", "content": message.content or ""})
