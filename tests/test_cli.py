@@ -614,9 +614,10 @@ class _FakeAgentRunner:
 
     plans: ClassVar[list[llm.AgentPlan]] = []
 
-    def __init__(self, data_dir: Path, key: bytes) -> None:
+    def __init__(self, data_dir: Path, key: bytes, *, debug: bool = False) -> None:
         self.data_dir = data_dir
         self.key = key
+        self.debug = debug
         self.commits: list[llm.AgentPlan] = []
 
     def propose(self, prompt: str) -> llm.AgentPlan:

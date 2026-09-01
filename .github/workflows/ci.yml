@@ -13,7 +13,9 @@ jobs:
       - uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
-      - run: uv sync --all-groups
+      # ask-cuda is a local GPU build (vendor/wheels/*.whl is gitignored and
+      # conflicts with ask by design) — CI runs the CPU fallback (ask) instead.
+      - run: uv sync --all-groups --no-group ask-cuda
       - run: uv run ruff format --check .
       - run: uv run ruff check .
       - run: uv run ty check

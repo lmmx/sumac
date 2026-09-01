@@ -513,11 +513,14 @@ def test_prompt_and_schema_do_not_worked_example_specific_products() -> None:
 # --- §40: per-model tool-call rendering ------------------------------------
 
 
-def test_render_tool_call_qwen_splices_raw_arguments_verbatim() -> None:
+def test_render_tool_call_qwen_splices_raw_arguments_verbatim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """§28: `raw_arguments` (the model's own emitted JSON string) must be
     spliced in as-is, not re-serialized from `arguments` — re-dumping
     could reorder keys or change whitespace relative to what Qwen3's own
     chat template would have produced from a real `tool_calls` field."""
+    monkeypatch.setattr(llm, "TOOL_CALL_FORMAT", llm.ToolCallFormat.QWEN)
     result = llm._render_tool_call("sumac_find_inventory", {"query": "jam"}, '{"query":   "jam"}')
     expected = (
         '<tool_call>\n{"name": "sumac_find_inventory", "arguments": '

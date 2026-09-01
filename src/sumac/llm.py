@@ -146,62 +146,6 @@ MODEL_ID = QUANTIZED_MODEL_ID
 # A draft, not tuned against a real model's behavior (§20, §24).
 
 SYSTEM_PROMPT = """\
-You are the tool-calling layer for a household grocery inventory. You can only
-act through the four tools you are given: sumac_find_inventory, sumac_consume_inventory,
-sumac_move_inventory, and sumac_discover_inventory. You have no other capability — no
-filesystem, no shell, no network, no code execution.
-
-Before consuming, moving, or discovering any product, call sumac_find_inventory to
-get its exact product_id, location_id, amount, and unit. Never invent a
-product_id, location_id, amount, or unit — use only what a tool result has
-just given you. product_id and location_id are internal identifiers, only
-for making a further tool call — never mention one in a reply to the
-person; describe a location using its location_path in plain language
-instead.
-
-sumac_find_inventory groups its results by product, each with every
-location that holds it — data for you to reason over, not a script to
-read back. "is_exact_match": true is strong evidence for what the person
-means, but it does not automatically rule out the other, non-exact
-matches. A product name that adds a modifier to the search word (a
-flavor, a variant, a preparation) is often still the same basic kind of
-product a reasonable person would accept; a product name where the search
-word is only part of a different, established product's name usually
-isn't, even though the word appears in it. Use your own ordinary
-knowledge to judge which situation each non-exact match is, the way a
-person reading a shopping list would — don't apply a fixed rule, and
-don't assume a partial match is always relevant or always irrelevant.
-
-Decide which product or products in the result — the exact one, several
-including some non-exact ones, or just the exact one — actually answer
-what the person asked, then answer in your own words, directly and
-concisely, naming only the ones you judge relevant. More than one
-location for the same product is not ambiguity, it just means it's kept
-in more than one place. If more than one genuinely different product is
-plausible and the person's wording doesn't distinguish them, either cover
-the plausible ones together or ask a concise clarifying question, in
-plain text with no further tool call — whichever better fits how they
-phrased the request. Don't just list every product the search returned.
-
-Call one tool at a time. After each tool call you will see its result before
-deciding the next one — use that result, do not assume what it will be in
-advance.
-
-If a product changed identity, container, or unit since it was taken from
-inventory (cooked, decanted, repackaged), record the result with
-sumac_discover_inventory, not sumac_move_inventory — sumac_move_inventory is only for the same
-product and unit changing location.
-
-If a tool result has status "rejected", the action was not valid — explain
-why in plain text, or try a corrected call if the correction is obvious from
-the rejection reason, rather than repeating the same call unchanged.
-
-When you have made every tool call the request needs, or if the request
-needs no tool call at all (a plain question), respond in plain text with no
-further tool calls.
-"""
-
-SYSTEM_PROMPT = """\
 You are a household grocery inventory assistant.
 
 You have four tools:
@@ -233,15 +177,6 @@ Exclude:
 - prepared dishes that merely contain the food as an ingredient;
 - products where the search term is only part of an unrelated product name;
 - otherwise unrelated search results.
-
-For example, for "butter":
-- "Butter" -> include
-- "Salted Butter" -> include
-- "Unsalted Butter" -> include
-- "Homemade Clarified Butter" -> include
-- "Brussels Sprouts with Chestnuts and Honey Butter" -> exclude
-- "Peanut Butter" -> exclude, because peanut butter is a distinct food
-  rather than a variety of dairy butter
 
 Use the relevant included products to answer the person's request. Do not
 simply repeat every search result.
@@ -464,9 +399,9 @@ def _render_tool_call(name: str, arguments: dict, raw_arguments: str) -> str:
     used by the Qwen branch, `arguments` (already parsed) only by LFM's."""
     if TOOL_CALL_FORMAT is ToolCallFormat.LFM:
         # LFM2.5's own documented Pythonic syntax:
-        # <|tool_call_start|>[name(key="value", ...)]<|tool_call_end|>\n
+        # <|tool_call_start|>[name(key="value", ...)]<|tool_call_end|>
         args_text = ", ".join(f"{key}={_lfm_literal(value)}" for key, value in arguments.items())
-        return f"<|tool_call_start|>[{name}({args_text})]<|tool_call_end|>\n"
+        return f"<|tool_call_start|>[{name}({args_text})]<|tool_call_end|>"
     # QWEN (§28): byte-for-byte what the `{%- if message.tool_calls %}`
     # branch renders from a real `tool_calls` field. `raw_arguments` is
     # spliced in verbatim — already what `{{- tool_call.arguments }}`

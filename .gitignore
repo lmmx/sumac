@@ -4,5 +4,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
+.claude/settings.local.json
+
 .build/
 vendor/wheels/*.whl

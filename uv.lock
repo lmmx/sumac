@@ -3,7 +3,7 @@ revision = 3
 requires-python = ">=3.12"
 conflicts = [[
     { package = "sumac-home", group = "ask" },
-    { package = "sumac-home", group = "ask-sm86" },
+    { package = "sumac-home", group = "ask-cuda" },
 ]]
 
 [options]
@@ -33,7 +33,7 @@ name = "cffi"
 version = "2.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pycparser", marker = "implementation_name != 'PyPy' or (extra == 'group-10-sumac-home-ask' and extra == 'group-10-sumac-home-ask-sm86')" },
+    { name = "pycparser", marker = "implementation_name != 'PyPy' or (extra == 'group-10-sumac-home-ask' and extra == 'group-10-sumac-home-ask-cuda')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/9e/ef/008a1939e372c06329a3fce4279c02f328488f3526744906eeec3da7ad5f/cffi-2.1.1.tar.gz", hash = "sha256:dd31f52ea1086513bb9df30f8fcee9b8918323ae067a3d5b78bc826a000712be", size = 530807, upload-time = "2026-08-03T21:21:18.939Z" }
 wheels = [
@@ -374,7 +374,7 @@ name = "pynacl"
 version = "1.6.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cffi", marker = "platform_python_implementation != 'PyPy' or (extra == 'group-10-sumac-home-ask' and extra == 'group-10-sumac-home-ask-sm86')" },
+    { name = "cffi", marker = "platform_python_implementation != 'PyPy' or (extra == 'group-10-sumac-home-ask' and extra == 'group-10-sumac-home-ask-cuda')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/d9/9a/4019b524b03a13438637b11538c82781a5eda427394380381af8f04f467a/pynacl-1.6.2.tar.gz", hash = "sha256:018494d6d696ae03c7e656e5e74cdfd8ea1326962cc401bcf018f1ed8436811c", size = 3511692, upload-time = "2026-01-01T17:48:10.851Z" }
 wheels = [
@@ -409,7 +409,7 @@ name = "pytest"
 version = "9.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'group-10-sumac-home-ask' and extra == 'group-10-sumac-home-ask-sm86')" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'group-10-sumac-home-ask' and extra == 'group-10-sumac-home-ask-cuda')" },
     { name = "iniconfig" },
     { name = "packaging" },
     { name = "pluggy" },
@@ -501,15 +501,15 @@ dependencies = [
 
 [package.optional-dependencies]
 ask = [
-    { name = "mistralrs", version = "0.9.2", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'group-10-sumac-home-ask' or extra != 'group-10-sumac-home-ask-sm86'" },
-    { name = "mistralrs", version = "0.9.2", source = { path = "vendor/wheels/mistralrs-0.9.2-cp310-abi3-manylinux_2_39_x86_64.whl" }, marker = "extra == 'group-10-sumac-home-ask-sm86'" },
+    { name = "mistralrs", version = "0.9.2", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'group-10-sumac-home-ask' or extra != 'group-10-sumac-home-ask-cuda'" },
+    { name = "mistralrs", version = "0.9.2", source = { path = "vendor/wheels/mistralrs-0.9.2-cp310-abi3-manylinux_2_39_x86_64.whl" }, marker = "extra == 'group-10-sumac-home-ask-cuda'" },
 ]
 
 [package.dev-dependencies]
 ask = [
     { name = "mistralrs", version = "0.9.2", source = { registry = "https://pypi.org/simple" } },
 ]
-ask-sm86 = [
+ask-cuda = [
     { name = "mistralrs", version = "0.9.2", source = { path = "vendor/wheels/mistralrs-0.9.2-cp310-abi3-manylinux_2_39_x86_64.whl" } },
 ]
 dev = [
@@ -532,7 +532,7 @@ provides-extras = ["ask"]
 
 [package.metadata.requires-dev]
 ask = [{ name = "mistralrs", specifier = ">=0.9.2" }]
-ask-sm86 = [{ name = "mistralrs", path = "vendor/wheels/mistralrs-0.9.2-cp310-abi3-manylinux_2_39_x86_64.whl" }]
+ask-cuda = [{ name = "mistralrs", path = "vendor/wheels/mistralrs-0.9.2-cp310-abi3-manylinux_2_39_x86_64.whl" }]
 dev = [
     { name = "hypothesis", specifier = ">=6" },
     { name = "pynacl", specifier = ">=1.5" },
@@ -572,7 +572,7 @@ version = "0.27.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "annotated-doc" },
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'group-10-sumac-home-ask' and extra == 'group-10-sumac-home-ask-sm86')" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'group-10-sumac-home-ask' and extra == 'group-10-sumac-home-ask-cuda')" },
     { name = "rich" },
     { name = "shellingham" },
 ]
