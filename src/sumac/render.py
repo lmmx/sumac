@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import json
 from collections import Counter
+from typing import TYPE_CHECKING
 
 from rich.console import Console
+from rich.panel import Panel
+from rich.pretty import Pretty
 from rich.table import Table
 from rich.tree import Tree
 
 from sumac import config, events, ledger, models
+
+if TYPE_CHECKING:
+    from sumac.llm import AgentPlan, ToolCallRecord
 
 console = Console()
 error_console = Console(stderr=True)
@@ -166,28 +173,46 @@ def print_status(
         console.print(table)
 
 
-def print_find(
-    inventory: ledger.Inventory,
-    locations: dict[str, models.Location],
-    product_id: str,
-    exact: bool = False,
-) -> None:
-    table = Table(title=f"Locations of {product_id!r}")
+def _find_table(
+    title: str, matches: tuple[ledger.InventoryMatch, ...], locations: dict[str, models.Location]
+) -> Table:
+    table = Table(title=title)
     table.add_column("product")
     table.add_column("location")
     table.add_column("quantity", justify="right")
-    found = False
-    for loc_id, entries in sorted(inventory.by_location.items()):
-        for pid, qty in sorted(entries.items()):
-            matches = (pid == product_id) if exact else (product_id.lower() in pid.lower())
-            if matches:
-                found = True
-                table.add_row(
-                    pid, config.location_path(locations, loc_id), f"{qty.amount} {qty.unit}"
-                )
-    console.print(table)
-    if not found:
-        console.print(f"[yellow]{product_id!r} not found in current inventory[/yellow]")
+    for m in matches:
+        table.add_row(
+            m.product_id,
+            config.location_path(locations, m.location_id),
+            f"{m.quantity.amount} {m.quantity.unit}",
+        )
+    return table
+
+
+_FIND_SECTIONS = (
+    (ledger.MatchKind.EXACT, "Exact matches"),
+    (ledger.MatchKind.WHOLE_WORD, "Whole-word matches"),
+    (ledger.MatchKind.SUBSTRING, "Substring matches"),
+)
+
+
+def print_find(
+    matches: tuple[ledger.InventoryMatch, ...],
+    locations: dict[str, models.Location],
+    query: str,
+) -> None:
+    """Renders `ledger.search_inventory`'s classified result as one table per
+    tier that actually has rows — exact, then whole-word, then substring —
+    rather than collapsing whole-word and substring together under a single
+    "related" heading; a tier a caller filtered out entirely (`cli.py`'s
+    `find --whole-word`, say) just has no table, not an empty one."""
+    if not matches:
+        console.print(f"[yellow]{query!r} not found in current inventory[/yellow]")
+        return
+    for kind, title in _FIND_SECTIONS:
+        tier = tuple(m for m in matches if m.match_kind is kind)
+        if tier:
+            console.print(_find_table(title, tier, locations))
 
 
 def _describe_payload(
@@ -279,6 +304,78 @@ def print_doctor(report: ledger.DoctorReport) -> None:
         for a in suggestions:
             reason = f"{a.reason}: {a.detail}".replace('"', "'")
             console.print(f'  sumac correct {a.record_id} --reason "{reason}"')
+
+
+def print_agent_messages(messages: object, title: str) -> None:
+    """The accumulated `AgentRunner._messages` list, at whatever point in
+    `_run_loop` it's passed in — same list object `repr()` used to dump
+    line-by-line, now one `Pretty` panel labeled by the caller."""
+    console.print(Panel(Pretty(messages, expand_all=False), title=title))
+
+
+def print_agent_request(request: object, round_num: int) -> None:
+    console.print(Panel(Pretty(request, expand_all=False), title=f"REQUEST · round {round_num}"))
+
+
+def print_agent_response(response: object, round_num: int) -> None:
+    console.print(
+        Panel(Pretty(response, expand_all=False), title=f"RAW RESPONSE · round {round_num}")
+    )
+
+
+def print_agent_message(message: object) -> None:
+    console.print(Panel(Pretty(message, expand_all=False), title="MESSAGE"))
+
+
+def print_agent_content(content: object) -> None:
+    console.print(Panel(Pretty(content, expand_all=False), title="CONTENT"))
+
+
+def print_agent_tool_calls(tool_calls: object) -> None:
+    console.print(Panel(Pretty(tool_calls, expand_all=False), title="TOOL CALLS"))
+
+
+def print_trace(trace: tuple[ToolCallRecord, ...]) -> None:
+    """The tool calls an `AgentRunner.propose`/`.revise` call actually made,
+    with their raw JSON results — shown before `print_plan`'s writes table or
+    a read-only reply, since neither on its own says what the agent searched
+    or found; added after real usage showed a plain final reply hides that
+    entirely (see `sumac/llm.py`'s `ToolCallRecord`). A no-op for an empty
+    trace, matching `print_anomaly_banner`'s "nothing to say" behavior."""
+    if not trace:
+        return
+    table = Table(title=f"Tool calls ({len(trace)})")
+    table.add_column("tool")
+    table.add_column("arguments")
+    table.add_column("result")
+    for t in trace:
+        table.add_row(t.name, json.dumps(t.arguments), t.result)
+    console.print(table)
+
+
+def print_plan(plan: AgentPlan) -> None:
+    """`sumac ask`'s preview (docs/journal/2026-09-01-ask-agent-design.md §14
+    step 4): the accumulated, not-yet-committed writes an `AgentRunner.propose`/
+    `.revise` call resolved, in the structured-table style of `print_log`/
+    `print_doctor` rather than a single string."""
+    table = Table(title=f"Proposed plan ({len(plan.writes)} write(s))")
+    table.add_column("action")
+    table.add_column("detail")
+    for w in plan.writes:
+        detail = f"{w.amount} {w.unit} {w.product_id}"
+        if w.from_location and w.to_location:
+            detail += f" {w.from_location} -> {w.to_location}"
+        elif w.from_location:
+            detail += f" from {w.from_location}"
+        elif w.to_location:
+            detail += f" to {w.to_location}"
+        table.add_row(w.kind.value, detail)
+    console.print(table)
+    if plan.reply_text:
+        console.print(plan.reply_text)
+    for w in plan.writes:
+        for warning in w.warnings:
+            print_warning(warning)
 
 
 def print_verify(result: ledger.VerifyResult) -> None:

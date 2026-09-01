@@ -17,9 +17,11 @@ via `Anomaly`.
 
 from __future__ import annotations
 
+import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -197,6 +199,63 @@ class Inventory:
 
     def at(self, location_id: str) -> dict[str, Quantity]:
         return dict(self.by_location.get(location_id, {}))
+
+
+class MatchKind(StrEnum):
+    """How closely a product name matched a `search_inventory` query —
+    promoted from a `sumac ask`-tool-only heuristic (docs/journal/
+    2026-09-01-ask-agent-design.md §29) to `search_inventory`'s own contract,
+    so `sumac find` and the agent's search tool classify matches the same
+    way instead of each implementing their own matching rule."""
+
+    EXACT = "exact"
+    WHOLE_WORD = "whole_word"
+    SUBSTRING = "substring"
+
+
+_MATCH_KIND_ORDER = {MatchKind.EXACT: 0, MatchKind.WHOLE_WORD: 1, MatchKind.SUBSTRING: 2}
+
+
+@dataclass(frozen=True, slots=True)
+class InventoryMatch:
+    match_kind: MatchKind
+    product_id: str
+    location_id: str
+    quantity: Quantity
+
+
+def _match_kind(product_id: str, query_lower: str) -> MatchKind | None:
+    pid_lower = product_id.lower()
+    if pid_lower == query_lower:
+        return MatchKind.EXACT
+    if re.search(rf"\b{re.escape(query_lower)}\b", pid_lower):
+        return MatchKind.WHOLE_WORD
+    if query_lower in pid_lower:
+        return MatchKind.SUBSTRING
+    return None
+
+
+def search_inventory(inventory: Inventory, query: str) -> tuple[InventoryMatch, ...]:
+    """Every (location, product) holding a name matching `query`, case-
+    insensitive, classified into exact/whole-word/substring tiers and ordered
+    deterministically by (tier, product_id, location_id). Two records for the
+    same exact product name at different locations both come back tagged
+    `MatchKind.EXACT` — a location count, not a match-confidence count. The
+    one classification `sumac find` (`cli.py`) and `sumac ask`'s search tool
+    (`llm.py`'s `_sumac_find_inventory`) both consume; each decides how much
+    of this to show or return, not how matches are classified."""
+    query_lower = query.lower()
+    matches = [
+        InventoryMatch(kind, pid, loc_id, qty)
+        for loc_id, entries in inventory.by_location.items()
+        for pid, qty in entries.items()
+        if (kind := _match_kind(pid, query_lower)) is not None
+    ]
+    return tuple(
+        sorted(
+            matches, key=lambda m: (_MATCH_KIND_ORDER[m.match_kind], m.product_id, m.location_id)
+        )
+    )
 
 
 def _next_quantity(

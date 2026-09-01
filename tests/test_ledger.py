@@ -944,3 +944,94 @@ def test_seq_gap_detected_after_a_line_is_removed(data_dir: Path, osuser: str, k
     gap_anomalies = [a for a in report.anomalies if a.reason == "seq_gap"]
     assert len(gap_anomalies) == 1
     assert "seq=1" in gap_anomalies[0].detail
+
+
+# --- search_inventory --------------------------------------------------
+#
+# Pure classification over a hand-built `Inventory` — no data_dir/key
+# needed, matching `_fold`'s own in-memory testing pattern (see that
+# function's docstring). `sumac find` (cli.py) and the `ask` agent's
+# `sumac_find_inventory` tool (llm.py) both consume `search_inventory`;
+# these tests cover the shared classification, not either caller.
+
+
+def _butter_inventory() -> ledger.Inventory:
+    return ledger.Inventory(
+        by_location={
+            "fridge": {
+                "Butter": models.Quantity(Decimal(1), "packet"),
+                "Salted Butter": models.Quantity(Decimal(1), "block"),
+            },
+            "freezer": {
+                "Butter": models.Quantity(Decimal(1), "tub"),
+                "Unsalted Butter": models.Quantity(Decimal(1), "block"),
+                "Peanut Butter": models.Quantity(Decimal(1), "jar"),
+                "Butternut Box Dog Food": models.Quantity(Decimal(2), "pack"),
+            },
+        }
+    )
+
+
+def test_search_inventory_classifies_exact_whole_word_and_substring() -> None:
+    matches = ledger.search_inventory(_butter_inventory(), "butter")
+    by_product = {m.product_id: m.match_kind for m in matches}
+    assert by_product["Butter"] is ledger.MatchKind.EXACT
+    assert by_product["Salted Butter"] is ledger.MatchKind.WHOLE_WORD
+    assert by_product["Unsalted Butter"] is ledger.MatchKind.WHOLE_WORD
+    assert by_product["Peanut Butter"] is ledger.MatchKind.WHOLE_WORD
+    assert by_product["Butternut Box Dog Food"] is ledger.MatchKind.SUBSTRING
+
+
+def test_search_inventory_two_locations_of_the_same_product_are_both_exact() -> None:
+    """Two `Butter` records at different locations are two matches, both
+    classified `EXACT` — a location count, not a downgrade to a fuzzier tier
+    just because there's more than one."""
+    matches = ledger.search_inventory(_butter_inventory(), "butter")
+    exact = [m for m in matches if m.product_id == "Butter"]
+    assert {m.location_id for m in exact} == {"fridge", "freezer"}
+    assert all(m.match_kind is ledger.MatchKind.EXACT for m in exact)
+
+
+def test_search_inventory_orders_exact_before_whole_word_before_substring() -> None:
+    matches = ledger.search_inventory(_butter_inventory(), "butter")
+    kinds = [m.match_kind for m in matches]
+    assert kinds == sorted(kinds, key=lambda k: ledger._MATCH_KIND_ORDER[k])
+
+
+def test_search_inventory_deterministic_ordering_within_a_tier() -> None:
+    """Same-tier matches break ties by (product_id, location_id) — running
+    the same query twice against the same inventory produces the same order,
+    not something that depends on dict iteration order."""
+    inventory = _butter_inventory()
+    first = ledger.search_inventory(inventory, "butter")
+    second = ledger.search_inventory(inventory, "butter")
+    assert first == second
+    exact = [(m.product_id, m.location_id) for m in first if m.match_kind is ledger.MatchKind.EXACT]
+    assert exact == sorted(exact)
+
+
+def test_search_inventory_does_not_confuse_butternut_with_butter() -> None:
+    """A query for "tern" (only ever a substring, inside "Butternut", never a
+    whole word or exact match anywhere in this inventory) matches only
+    "Butternut Box Dog Food" — none of the real butter products it sits
+    alongside share that substring."""
+    matches = ledger.search_inventory(_butter_inventory(), "tern")
+    assert [m.product_id for m in matches] == ["Butternut Box Dog Food"]
+    assert matches[0].match_kind is ledger.MatchKind.SUBSTRING
+
+
+def test_search_inventory_no_match_returns_empty() -> None:
+    assert ledger.search_inventory(_butter_inventory(), "nonexistent") == ()
+
+
+def test_search_inventory_is_case_insensitive() -> None:
+    matches = ledger.search_inventory(_butter_inventory(), "BUTTER")
+    assert {m.product_id for m in matches} == {
+        "Butter",
+        "Salted Butter",
+        "Unsalted Butter",
+        "Peanut Butter",
+        "Butternut Box Dog Food",
+    }
+    exact = [m for m in matches if m.match_kind is ledger.MatchKind.EXACT]
+    assert {m.product_id for m in exact} == {"Butter"}

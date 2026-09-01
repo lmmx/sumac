@@ -77,3 +77,49 @@ uv run ruff check .
 uv run ty check
 uv run pytest
 ```
+
+## Optional: natural-language input (`sumac ask`)
+
+`sumac ask` parses freeform text ("consume 1 jar of jam") into structured commands using a local
+LLM via [`mistralrs`](https://github.com/EricLBuehler/mistral.rs). It's an optional dependency
+group, the rest of `sumac` works without it.
+
+```sh
+uv sync --group ask          # CPU/Metal — no GPU required
+```
+
+### NVIDIA GPU acceleration
+
+```sh
+uv sync --no-group ask --group ask-cuda
+```
+
+**Known upstream issue:** mistral.rs's published CUDA wheels for `0.9.1`/`0.9.2` have a broken
+`RPATH` that prevents the extension from loading at all (tracked upstream:
+[EricLBuehler/mistral.rs#2411](https://github.com/EricLBuehler/mistral.rs/issues/2411)). Until
+that's fixed upstream, `ask-cuda` uses a wheel built from source with a local patch — see
+`scripts/build-mistralrs-cuda.sh`.
+
+To (re)build it:
+
+```sh
+./scripts/build-mistralrs-cuda.sh v0.9.2
+```
+
+This clones mistral.rs into `.build/` (gitignored), builds with `maturin` against whatever CUDA
+compute capability is present on the machine you run it on (confirm with `cuobjdump --list-elf
+<extension>.so | grep sm_` if you need to check), and patches the resulting wheel to embed a real
+copy of `libcuda.so.1` from the system driver instead of the incorrectly-vendored one the build
+produces by default — `uv` doesn't preserve symlinks from wheel zips on install, so it's a full
+copy, not a link. The patched wheel lands in `vendor/wheels/` (gitignored — too large for git)
+and `pyproject.toml`'s `ask-cuda` group points at it via a local path source.
+
+**This wheel is tied to the host machine, in two separate ways.** The compiled extension is built
+for whichever GPU's compute capability was present at build time — it is not portable to a
+different GPU architecture. And the embedded `libcuda.so.1` is a byte-for-byte copy of *this
+machine's* driver — if you update the NVIDIA driver, reinstall the OS, swap GPUs, or move to a
+different machine, rebuild rather than reuse the wheel. Requires the CUDA toolkit and a Rust
+toolchain (`rustc >= 1.94`) to build; neither is needed just to *run* `sumac`.
+
+To verify a build run `uv run python -c "import mistralrs"` which should import silently without
+erroring.

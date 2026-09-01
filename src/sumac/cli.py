@@ -331,16 +331,38 @@ def status(
 def find(
     product_id: str,
     exact: Annotated[
-        bool, typer.Option(help="Exact match only (default is partial/substring match)")
+        bool, typer.Option("--exact", help="Include exact product-name matches.")
+    ] = False,
+    whole_word: Annotated[
+        bool, typer.Option("--whole-word", help="Include whole-word matches.")
+    ] = False,
+    substring: Annotated[
+        bool, typer.Option("--substring", help="Include substring matches.")
     ] = False,
     data_dir: DataDirOption = Path("data"),
 ) -> None:
-    """Show every location currently holding PRODUCT_ID (partial match by default)."""
+    """Show every location currently holding PRODUCT_ID, one table per match
+    kind (exact / whole-word / substring). --exact/--whole-word/--substring
+    each restrict the result to that kind, and are combined when more than
+    one is given (e.g. --exact --whole-word shows both, not substring);
+    with none given, shows every kind."""
     key = _key(data_dir)
     inventory = ledger.build_inventory(data_dir, key)
     locations = ledger.load_locations_or_empty(data_dir, key)
     render.print_anomaly_banner(inventory.anomalies)
-    render.print_find(inventory, locations, product_id, exact=exact)
+    matches = ledger.search_inventory(inventory, product_id)
+    selected = {
+        kind
+        for kind, flag in (
+            (ledger.MatchKind.EXACT, exact),
+            (ledger.MatchKind.WHOLE_WORD, whole_word),
+            (ledger.MatchKind.SUBSTRING, substring),
+        )
+        if flag
+    }
+    if selected:
+        matches = tuple(m for m in matches if m.match_kind in selected)
+    render.print_find(matches, locations, product_id)
 
 
 @app.command(name="log")
@@ -368,6 +390,84 @@ def doctor(data_dir: DataDirOption = Path("data")) -> None:
     render.print_doctor(report)
     if report.anomalies:
         raise typer.Exit(code=1)
+
+
+@app.command()
+def ask(
+    prompt: str,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Compute and show the plan; write nothing."),
+    ] = False,
+    debug: Annotated[
+        bool,
+        typer.Option("--debug", help="Show raw agent request/response diagnostics."),
+    ] = False,
+    data_dir: DataDirOption = Path("data"),
+) -> None:
+    """Ask the in-process AI agent to perform an inventory operation.
+
+    Resolves an underspecified sentence into a sequence of consumption,
+    movement, and discovery writes against the same `decide_change` gate
+    `sumac add` uses, shows the plan, and asks before writing anything. See
+    docs/journal/2026-09-01-ask-agent-design.md.
+
+    Examples:
+        sumac ask "where is the jam?"
+        sumac ask "consume 1 jar of jam"
+        sumac ask "move the ragu to the fridge"
+    """
+    key = _key(data_dir)
+
+    # Import llm here so mistralrs is optional
+    try:
+        from sumac import llm
+    except ImportError as e:
+        render.print_error(f"Agent requires mistralrs. Install with: pip install mistralrs\n{e}")
+        raise typer.Exit(code=1) from e
+
+    try:
+        agent = llm.AgentRunner(data_dir, key, debug=debug)
+        plan = agent.propose(prompt)
+    except FileNotFoundError as e:
+        render.print_error(str(e))
+        raise typer.Exit(code=1) from e
+    except Exception as e:
+        render.print_error(f"Agent error: {e}")
+        raise typer.Exit(code=1) from e
+
+    while True:
+        render.print_trace(plan.trace)
+        if not plan.writes:
+            if plan.reply_text:
+                render.console.print(plan.reply_text)
+            if dry_run:
+                render.console.print("[dim](--dry-run: this request produced no writes)[/dim]")
+            return
+
+        render.print_plan(plan)
+        if dry_run:
+            render.console.print("[dim](--dry-run: plan shown above, nothing written)[/dim]")
+            return
+
+        answer = typer.prompt("[a]ccept / [r]eject / or type feedback", default="a").strip()
+        choice = answer.lower()
+        if choice in ("a", "accept"):
+            # Not caught here: a Rejected raised while committing is not a
+            # modeled outcome the model can react to (the human already
+            # accepted the plan) and should propagate exactly the way `add`
+            # already lets `decide_change`'s Rejected reach `main`'s handler.
+            for summary in agent.commit(plan):
+                render.print_success(summary)
+            return
+        if choice in ("r", "reject"):
+            return
+
+        try:
+            plan = agent.revise(answer)
+        except Exception as e:
+            render.print_error(f"Agent error: {e}")
+            raise typer.Exit(code=1) from e
 
 
 def main() -> None:
