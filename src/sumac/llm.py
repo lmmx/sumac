@@ -67,16 +67,16 @@ MODEL_ID = QUANTIZED_MODEL_ID
 
 SYSTEM_PROMPT = """\
 You are the tool-calling layer for a household grocery inventory. You can only
-act through the four tools you are given: find_inventory, consume_inventory,
-move_inventory, and discover_inventory. You have no other capability — no
+act through the four tools you are given: sumac_find_inventory, sumac_consume_inventory,
+sumac_move_inventory, and sumac_discover_inventory. You have no other capability — no
 filesystem, no shell, no network, no code execution.
 
-Before consuming, moving, or discovering any product, call find_inventory to
+Before consuming, moving, or discovering any product, call sumac_find_inventory to
 get its exact product_id, location_id, amount, and unit. Never invent a
 product_id, location_id, amount, or unit — use only what a tool result has
 just given you.
 
-If find_inventory returns more than one plausible match for what the person
+If sumac_find_inventory returns more than one plausible match for what the person
 asked about, and nothing in their request distinguishes which one they mean,
 stop and ask them in plain text which one they mean, with no further tool
 call, rather than guessing.
@@ -87,7 +87,7 @@ advance.
 
 If a product changed identity, container, or unit since it was taken from
 inventory (cooked, decanted, repackaged), record the result with
-discover_inventory, not move_inventory — move_inventory is only for the same
+sumac_discover_inventory, not sumac_move_inventory — sumac_move_inventory is only for the same
 product and unit changing location.
 
 If a tool result has status "rejected", the action was not valid — explain
@@ -112,7 +112,7 @@ _SELF_REVIEW_MESSAGE = (
 _FIND_INVENTORY_SCHEMA = {
     "type": "function",
     "function": {
-        "name": "find_inventory",
+        "name": "sumac_find_inventory",
         "description": (
             "Search current inventory by product name (partial, case-insensitive "
             "match). Returns every location currently holding a matching product, "
@@ -139,11 +139,11 @@ _FIND_INVENTORY_SCHEMA = {
 _CONSUME_INVENTORY_SCHEMA = {
     "type": "function",
     "function": {
-        "name": "consume_inventory",
+        "name": "sumac_consume_inventory",
         "description": (
             "Propose recording that some quantity of a product was used, eaten, or "
             "consumed from one location. product_id, unit, and from_location must be "
-            "exact values already seen in a find_inventory result — never invented. "
+            "exact values already seen in a sumac_find_inventory result — never invented. "
             "Does not immediately alter inventory; the proposal is shown to the "
             "person for review before anything is written."
         ),
@@ -168,13 +168,13 @@ _CONSUME_INVENTORY_SCHEMA = {
 _MOVE_INVENTORY_SCHEMA = {
     "type": "function",
     "function": {
-        "name": "move_inventory",
+        "name": "sumac_move_inventory",
         "description": (
             "Propose recording that some quantity of a product was relocated from "
             "one location to another, unchanged — same product, same unit, only the "
             "location differs. If the product's identity, container, or unit changed "
-            "(cooked, decanted, repackaged), use discover_inventory for the result "
-            "instead of move_inventory."
+            "(cooked, decanted, repackaged), use sumac_discover_inventory for the result "
+            "instead of sumac_move_inventory."
         ),
         "strict": True,
         "parameters": {
@@ -195,7 +195,7 @@ _MOVE_INVENTORY_SCHEMA = {
 _DISCOVER_INVENTORY_SCHEMA = {
     "type": "function",
     "function": {
-        "name": "discover_inventory",
+        "name": "sumac_discover_inventory",
         "description": (
             "Propose recording that some quantity of a product now exists at a "
             "location, with no claim about where it came from. Use this for a "
@@ -231,9 +231,9 @@ TOOL_SCHEMAS = [
 ]
 
 _KIND_BY_TOOL = {
-    "consume_inventory": ChangeKind.CONSUMPTION,
-    "move_inventory": ChangeKind.MOVEMENT,
-    "discover_inventory": ChangeKind.DISCOVERY,
+    "sumac_consume_inventory": ChangeKind.CONSUMPTION,
+    "sumac_move_inventory": ChangeKind.MOVEMENT,
+    "sumac_discover_inventory": ChangeKind.DISCOVERY,
 }
 
 # --- Orchestration types (§19) ----------------------------------------------
@@ -297,10 +297,10 @@ class AgentRunner:
         self._session_id: str | None = None
         self._pending: list[ProposedWrite] = []
         self.tool_callbacks: dict[str, Callable[[str, dict], str]] = {
-            "find_inventory": self._find_inventory,
-            "consume_inventory": self._consume_inventory,
-            "move_inventory": self._move_inventory,
-            "discover_inventory": self._discover_inventory,
+            "sumac_find_inventory": self._sumac_find_inventory,
+            "sumac_consume_inventory": self._sumac_consume_inventory,
+            "sumac_move_inventory": self._sumac_move_inventory,
+            "sumac_discover_inventory": self._sumac_discover_inventory,
         }
         self._runner: SendsCompletions = (
             runner
@@ -314,7 +314,7 @@ class AgentRunner:
 
     # -- tool callbacks (§18) ------------------------------------------------
 
-    def _find_inventory(self, _name: str, args: dict) -> str:
+    def _sumac_find_inventory(self, _name: str, args: dict) -> str:
         query = str(args.get("query", ""))
         inventory = ledger.build_inventory(self._data_dir, self._key)
         locations = ledger.load_locations_or_empty(self._data_dir, self._key)
@@ -400,13 +400,13 @@ class AgentRunner:
             }
         )
 
-    def _consume_inventory(self, name: str, args: dict) -> str:
+    def _sumac_consume_inventory(self, name: str, args: dict) -> str:
         return self._propose_write(name, args)
 
-    def _move_inventory(self, name: str, args: dict) -> str:
+    def _sumac_move_inventory(self, name: str, args: dict) -> str:
         return self._propose_write(name, args)
 
-    def _discover_inventory(self, name: str, args: dict) -> str:
+    def _sumac_discover_inventory(self, name: str, args: dict) -> str:
         return self._propose_write(name, args)
 
     # -- request plumbing -----------------------------------------------------

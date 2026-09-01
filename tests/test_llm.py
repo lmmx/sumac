@@ -102,7 +102,9 @@ def test_find_inventory_returns_matches(data_dir: Path, key: bytes, osuser: str)
     _seed_pantry_with_jam(data_dir, key, osuser)
     agent, _fake = _make_agent([], data_dir, key)
 
-    result = json.loads(agent.tool_callbacks["find_inventory"]("find_inventory", {"query": "jam"}))
+    result = json.loads(
+        agent.tool_callbacks["sumac_find_inventory"]("sumac_find_inventory", {"query": "jam"})
+    )
 
     assert result["matches"] == [
         {
@@ -121,7 +123,9 @@ def test_find_inventory_no_match_returns_empty_list(
     agent, _fake = _make_agent([], data_dir, key)
 
     result = json.loads(
-        agent.tool_callbacks["find_inventory"]("find_inventory", {"query": "nonexistent"})
+        agent.tool_callbacks["sumac_find_inventory"](
+            "sumac_find_inventory", {"query": "nonexistent"}
+        )
     )
     assert result["matches"] == []
 
@@ -151,9 +155,9 @@ def test_propose_resolves_a_consume_call_into_a_pending_write(
     turns = [
         ScriptedTurn(
             tool_calls=[
-                ("find_inventory", {"query": "jam"}),
+                ("sumac_find_inventory", {"query": "jam"}),
                 (
-                    "consume_inventory",
+                    "sumac_consume_inventory",
                     {"product_id": "jam", "amount": "1", "unit": "jar", "from_location": "pantry"},
                 ),
             ],
@@ -186,7 +190,7 @@ def test_rejected_tool_call_is_reported_and_not_added_to_pending(
         ScriptedTurn(
             tool_calls=[
                 (
-                    "consume_inventory",
+                    "sumac_consume_inventory",
                     {
                         "product_id": "jam",
                         "amount": "1",
@@ -201,8 +205,8 @@ def test_rejected_tool_call_is_reported_and_not_added_to_pending(
     agent, _fake = _make_agent(turns, data_dir, key)
 
     result = json.loads(
-        agent.tool_callbacks["consume_inventory"](
-            "consume_inventory",
+        agent.tool_callbacks["sumac_consume_inventory"](
+            "sumac_consume_inventory",
             {
                 "product_id": "jam",
                 "amount": "1",
@@ -229,7 +233,7 @@ def test_self_review_replaces_plan_when_model_revises_it(
         ScriptedTurn(
             tool_calls=[
                 (
-                    "consume_inventory",
+                    "sumac_consume_inventory",
                     {"product_id": "jam", "amount": "1", "unit": "jar", "from_location": "pantry"},
                 )
             ],
@@ -238,7 +242,7 @@ def test_self_review_replaces_plan_when_model_revises_it(
         ScriptedTurn(
             tool_calls=[
                 (
-                    "consume_inventory",
+                    "sumac_consume_inventory",
                     {"product_id": "jam", "amount": "2", "unit": "jar", "from_location": "pantry"},
                 )
             ],
@@ -262,7 +266,7 @@ def test_self_review_keeps_original_plan_when_model_confirms(
         ScriptedTurn(
             tool_calls=[
                 (
-                    "consume_inventory",
+                    "sumac_consume_inventory",
                     {"product_id": "jam", "amount": "1", "unit": "jar", "from_location": "pantry"},
                 )
             ],
@@ -294,7 +298,7 @@ def test_revise_continues_after_propose(data_dir: Path, key: bytes, osuser: str)
         ScriptedTurn(
             tool_calls=[
                 (
-                    "consume_inventory",
+                    "sumac_consume_inventory",
                     {"product_id": "jam", "amount": "1", "unit": "jar", "from_location": "pantry"},
                 )
             ],
@@ -304,7 +308,7 @@ def test_revise_continues_after_propose(data_dir: Path, key: bytes, osuser: str)
         ScriptedTurn(
             tool_calls=[
                 (
-                    "consume_inventory",
+                    "sumac_consume_inventory",
                     {"product_id": "jam", "amount": "2", "unit": "jar", "from_location": "pantry"},
                 )
             ],
