@@ -532,10 +532,16 @@ class AgentRunner:
     rather than registered on the `Runner`."""
 
     def __init__(
-        self, data_dir: Path, key: bytes, *, runner: SendsCompletions | None = None
+        self,
+        data_dir: Path,
+        key: bytes,
+        *,
+        runner: SendsCompletions | None = None,
+        debug: bool = False,
     ) -> None:
         self._data_dir = data_dir
         self._key = key
+        self._debug = debug
         self._messages: list[dict[str, str]] | None = None
         self._pending: list[ProposedWrite] = []
         self._trace: list[ToolCallRecord] = []
@@ -697,28 +703,22 @@ class AgentRunner:
         self._pending = []
         for round_num in range(1, MAX_TOOL_ROUNDS + 1):
             request = self._build_request()
-            print(f"\n=== REQUEST (round {round_num}) ===")
-            print("MESSAGES:")
-            for message in self._messages:
-                print(repr(message))
-            print(repr(request))
-            print(f"tool_schemas: {getattr(request, 'tool_schemas', None)!r}")
-            print(f"tool_choice: {getattr(request, 'tool_choice', None)!r}")
+            if self._debug:
+                render.print_agent_messages(self._messages, f"MESSAGES · round {round_num}")
+                render.print_agent_request(request, round_num)
 
             response = self._runner.send_chat_completion_request(request)
 
-            print(f"\n=== RAW RESPONSE (round {round_num}) ===")
-            print(repr(response))
+            if self._debug:
+                render.print_agent_response(response, round_num)
 
             _print_usage(response, round_num)
             message = response.choices[0].message
 
-            print("\n=== MESSAGE ===")
-            print(repr(message))
-            print("\n=== CONTENT ===")
-            print(repr(message.content))
-            print("\n=== TOOL CALLS ===")
-            print(repr(message.tool_calls))
+            if self._debug:
+                render.print_agent_message(message)
+                render.print_agent_content(message.content)
+                render.print_agent_tool_calls(message.tool_calls)
 
             if not message.tool_calls:
                 self._messages.append({"role": "assistant", "content": message.content or ""})
@@ -735,9 +735,8 @@ class AgentRunner:
                 }
             )
             self._messages.append({"role": "tool", "content": result})
-            print("\n=== MESSAGES FOR NEXT ROUND ===")
-            for msg in self._messages:
-                print(repr(msg))
+            if self._debug:
+                render.print_agent_messages(self._messages, "MESSAGES FOR NEXT ROUND")
 
         # Round cap reached with no final reply — the accumulated plan (if
         # any) is still returned rather than raised, matching §13's framing

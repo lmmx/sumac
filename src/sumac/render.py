@@ -7,6 +7,8 @@ from collections import Counter
 from typing import TYPE_CHECKING
 
 from rich.console import Console
+from rich.panel import Panel
+from rich.pretty import Pretty
 from rich.table import Table
 from rich.tree import Tree
 
@@ -302,6 +304,35 @@ def print_doctor(report: ledger.DoctorReport) -> None:
         for a in suggestions:
             reason = f"{a.reason}: {a.detail}".replace('"', "'")
             console.print(f'  sumac correct {a.record_id} --reason "{reason}"')
+
+
+def print_agent_messages(messages: object, title: str) -> None:
+    """The accumulated `AgentRunner._messages` list, at whatever point in
+    `_run_loop` it's passed in — same list object `repr()` used to dump
+    line-by-line, now one `Pretty` panel labeled by the caller."""
+    console.print(Panel(Pretty(messages, expand_all=False), title=title))
+
+
+def print_agent_request(request: object, round_num: int) -> None:
+    console.print(Panel(Pretty(request, expand_all=False), title=f"REQUEST · round {round_num}"))
+
+
+def print_agent_response(response: object, round_num: int) -> None:
+    console.print(
+        Panel(Pretty(response, expand_all=False), title=f"RAW RESPONSE · round {round_num}")
+    )
+
+
+def print_agent_message(message: object) -> None:
+    console.print(Panel(Pretty(message, expand_all=False), title="MESSAGE"))
+
+
+def print_agent_content(content: object) -> None:
+    console.print(Panel(Pretty(content, expand_all=False), title="CONTENT"))
+
+
+def print_agent_tool_calls(tool_calls: object) -> None:
+    console.print(Panel(Pretty(tool_calls, expand_all=False), title="TOOL CALLS"))
 
 
 def print_trace(trace: tuple[ToolCallRecord, ...]) -> None:

@@ -399,6 +399,10 @@ def ask(
         bool,
         typer.Option("--dry-run", help="Compute and show the plan; write nothing."),
     ] = False,
+    debug: Annotated[
+        bool,
+        typer.Option("--debug", help="Show raw agent request/response diagnostics."),
+    ] = False,
     data_dir: DataDirOption = Path("data"),
 ) -> None:
     """Ask the in-process AI agent to perform an inventory operation.
@@ -423,7 +427,7 @@ def ask(
         raise typer.Exit(code=1) from e
 
     try:
-        agent = llm.AgentRunner(data_dir, key)
+        agent = llm.AgentRunner(data_dir, key, debug=debug)
         plan = agent.propose(prompt)
     except FileNotFoundError as e:
         render.print_error(str(e))
