@@ -92,10 +92,10 @@ from sumac.models import ChangeKind
 # Not empirically checked against the tool schemas below (§21, §24) — pick a
 # different GGUF repo/file here if this one doesn't call tools reliably.
 
-QUANTIZED_MODEL_ID = "unsloth/Qwen3-1.7B-GGUF"
-QUANTIZED_FILENAME = "Qwen3-1.7B-Q4_K_M.gguf"
-# QUANTIZED_MODEL_ID = "unsloth/Qwen3-0.6B-GGUF"
-# QUANTIZED_FILENAME = "Qwen3-0.6B-Q4_K_M.gguf"
+# QUANTIZED_MODEL_ID = "unsloth/Qwen3-1.7B-GGUF"
+# QUANTIZED_FILENAME = "Qwen3-1.7B-Q4_K_M.gguf"
+QUANTIZED_MODEL_ID = "unsloth/Qwen3-0.6B-GGUF"
+QUANTIZED_FILENAME = "Qwen3-0.6B-Q4_K_M.gguf"
 
 # §13: a termination guarantee sized for "one write per round" (every
 # sequential search-then-act step a compound request could produce), not a
@@ -121,12 +121,30 @@ filesystem, no shell, no network, no code execution.
 Before consuming, moving, or discovering any product, call sumac_find_inventory to
 get its exact product_id, location_id, amount, and unit. Never invent a
 product_id, location_id, amount, or unit — use only what a tool result has
-just given you.
+just given you. product_id and location_id are internal identifiers, only
+for making a further tool call — never mention one in a reply to the
+person; describe a location using its location_path in plain language
+instead.
 
-If sumac_find_inventory returns more than one plausible match for what the person
-asked about, and nothing in their request distinguishes which one they mean,
-stop and ask them in plain text which one they mean, with no further tool
-call, rather than guessing.
+sumac_find_inventory groups its results by product, each with every
+location that holds it — data for you to reason over, not a script to read
+back. Work out which product, if any, is actually what the person means,
+the way a person would, and answer in your own words, directly and
+concisely. A product marked "is_exact_match": false merely has a name that
+happens to contain the search word — for example "Peanut Butter" and
+"Waitrose All Butter Croissants" both contain the word "butter" but are
+not the same product as "Butter", and a search for "milk" finding "Milk
+Chocolate" does not mean chocolate is a location of milk. Consider one of
+these only if it's plausibly what the person meant, or their own wording
+asks about a broader category of product — otherwise leave it out of your
+reply, rather than listing every product the search returned.
+
+If exactly one product in the result has "is_exact_match": true, answer
+directly with every location it appears in — more than one location for
+that product is not ambiguity, it just means it's kept in more than one
+place. Only stop and ask a plain-text clarifying question, with no further
+tool call, when more than one different product has "is_exact_match": true
+and nothing in the person's request distinguishes which one they mean.
 
 Call one tool at a time. After each tool call you will see its result before
 deciding the next one — use that result, do not assume what it will be in
@@ -161,16 +179,22 @@ _FIND_INVENTORY_SCHEMA = {
     "function": {
         "name": "sumac_find_inventory",
         "description": (
-            "Search current inventory by product name, case-insensitive, "
-            'matching whole words by default ("butter" matches "Salted '
-            'Butter" but not "Butternut"; falls back to any substring '
-            "match if nothing matches as a whole word). Ordered with the "
-            "closest matches first. Returns every location currently "
-            "holding a matching product, with its exact product_id, "
-            "location_id, amount, and unit as sumac has them recorded. Call "
-            "this before consuming, moving, or discovering any product — "
-            "never guess a product_id, location_id, amount, or unit that "
-            "has not been returned by this tool."
+            "Search current inventory by product name, case-insensitive. "
+            'Returns {"products": [...]}, one entry per distinct product '
+            "name that matched — never one row per location. Each entry "
+            'has "product_id" (its exact spelling as stored), '
+            '"is_exact_match" (true only when the product\'s name exactly '
+            'matches the search), and "locations" (every location holding '
+            'it, each with "location_id", "location_path", "amount", and '
+            '"unit"). A product with "is_exact_match": false merely has a '
+            "name that happens to contain the search word — e.g. searching "
+            '"butter" also matches "Peanut Butter" and "Waitrose All '
+            'Butter Croissants", which are different products, not butter '
+            "itself. product_id and location_id are internal identifiers — "
+            "use them, verbatim, only in a later consume/move/discover "
+            "call; never invent one and never mention one in a reply to "
+            "the person. Call this before consuming, moving, or "
+            "discovering any product."
         ),
         "strict": True,
         "parameters": {
@@ -416,30 +440,41 @@ class AgentRunner:
     # -- tool callbacks (§18) ------------------------------------------------
 
     def _sumac_find_inventory(self, _name: str, args: dict) -> str:
+        """§36: grouped by product, not by `ledger.MatchKind` tier (§34) and
+        not a flat per-location list (pre-§34) — every location holding a
+        given product_id is collected under that product's one entry, so
+        "two rows, same product_id, different location_id" is no longer
+        bookkeeping the model has to notice itself (§35's real trace: it
+        was still doing that bookkeeping wrong). `ledger.search_inventory`'s
+        classification is still the only matching logic — this only
+        reshapes its already-computed, already-ordered output; nothing
+        about what counts as a match changes here. `is_exact_match` is
+        `True` only for a product whose match_kind is `MatchKind.EXACT`;
+        entries stay in `search_inventory`'s tier order (exact, then
+        whole-word, then substring) without naming the tiers themselves —
+        §36 also dropped that jargon from the model-facing contract."""
         query = str(args.get("query", ""))
         inventory = ledger.build_inventory(self._data_dir, self._key)
         locations = ledger.load_locations_or_empty(self._data_dir, self._key)
-        all_matches = ledger.search_inventory(inventory, query)
-        # Whole-word-or-better matches only by default (§29) — "butter"
-        # should not return "Butternut Box Dog Food". Falls back to the full,
-        # substring-inclusive result when nothing matches as a whole word, so
-        # a genuine partial search ("nut") still returns something rather
-        # than nothing. `ledger.search_inventory` classifies every tier; this
-        # is the agent's own policy for how much of that to hand to a small
-        # model, not part of the classification itself.
-        narrowed = tuple(m for m in all_matches if m.match_kind is not ledger.MatchKind.SUBSTRING)
-        found = narrowed or all_matches
-        matches = [
-            {
-                "product_id": m.product_id,
-                "location_id": m.location_id,
-                "location_path": config.location_path(locations, m.location_id),
-                "amount": str(m.quantity.amount),
-                "unit": m.quantity.unit,
-            }
-            for m in found
-        ]
-        return json.dumps({"matches": matches})
+        products: dict[str, dict] = {}
+        for m in ledger.search_inventory(inventory, query):
+            entry = products.setdefault(
+                m.product_id,
+                {
+                    "product_id": m.product_id,
+                    "is_exact_match": m.match_kind is ledger.MatchKind.EXACT,
+                    "locations": [],
+                },
+            )
+            entry["locations"].append(
+                {
+                    "location_id": m.location_id,
+                    "location_path": config.location_path(locations, m.location_id),
+                    "amount": str(m.quantity.amount),
+                    "unit": m.quantity.unit,
+                }
+            )
+        return json.dumps({"products": list(products.values())})
 
     def _propose_write(self, name: str, args: dict) -> str:
         kind = _KIND_BY_TOOL[name]
