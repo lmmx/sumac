@@ -7,7 +7,7 @@ This document describes the minimal in-process AI agent for Sumac that translate
 ### 1. Install mistral.rs
 
 ```bash
-pip install mistral-rs
+pip install mistralrs
 ```
 
 ### 2. Download a model
@@ -245,7 +245,7 @@ mistral.rs is a Rust library for LLM inference with Python bindings. Key feature
 - Tool calling via function callbacks
 - No separate server needed
 
-The Python SDK (`mistral-rs` on PyPI) exposes:
+The Python SDK (`mistralrs` on PyPI) exposes:
 - `Runner`: Model runner that handles tool callbacks
 - Tool registration with function definitions (JSON Schema)
 - `generate()` method that returns model output with tool calls

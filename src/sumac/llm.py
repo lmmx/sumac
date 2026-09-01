@@ -12,7 +12,6 @@ from pathlib import Path
 
 from sumac import agent
 
-
 # Model configuration (environment overrides defaults)
 DEFAULT_MODEL_ID = "tinyllama"
 DEFAULT_MODEL_PATH = "~/.cache/sumac-models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
@@ -39,9 +38,7 @@ class AgentRunner:
         try:
             from mistralrs import Runner, Task
         except ImportError as e:
-            raise ImportError(
-                "mistral-rs not installed. Install with: pip install mistral-rs"
-            ) from e
+            raise ImportError("mistralrs not installed. Install with: pip install mistralrs") from e
 
         self.Runner = Runner
         self.Task = Task

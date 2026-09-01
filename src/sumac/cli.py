@@ -384,12 +384,12 @@ def ask(
     """
     key = _key(data_dir)
 
-    # Import llm here so mistral-rs is optional
+    # Import llm here so mistralrs is optional
     try:
         from sumac import llm
     except ImportError as e:
         raise typer.Exit(
-            f"Agent requires mistral-rs. Install with: pip install mistral-rs\nDetails: {e}"
+            f"Agent requires mistralrs. Install with: pip install mistralrs\nDetails: {e}"
         )
 
     try:
