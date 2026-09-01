@@ -370,6 +370,40 @@ def doctor(data_dir: DataDirOption = Path("data")) -> None:
         raise typer.Exit(code=1)
 
 
+@app.command()
+def ask(
+    prompt: str,
+    data_dir: DataDirOption = Path("data"),
+) -> None:
+    """Ask the in-process AI agent to perform an inventory operation.
+
+    Examples:
+        sumac ask "where is the jam?"
+        sumac ask "consume 1 jar of jam"
+        sumac ask "move the ragu to the fridge"
+    """
+    key = _key(data_dir)
+
+    # Import llm here so mistralrs is optional
+    try:
+        from sumac import llm
+    except ImportError as e:
+        raise typer.Exit(
+            f"Agent requires mistralrs. Install with: pip install mistralrs\nDetails: {e}"
+        )
+
+    try:
+        runner = llm.AgentRunner(data_dir, key)
+        result = runner.run(prompt)
+        render.print_success(result)
+    except FileNotFoundError as e:
+        render.print_error(str(e))
+        raise typer.Exit(code=1)
+    except Exception as e:
+        render.print_error(f"Agent error: {e}")
+        raise typer.Exit(code=1)
+
+
 def main() -> None:
     try:
         app()
