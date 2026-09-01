@@ -567,6 +567,30 @@ def test_ask_read_only_reply_prints_text_and_does_not_prompt(
     assert "the jam is in the pantry" in result.output
 
 
+def test_ask_shows_tool_call_trace_before_reply(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run(data_dir, "init")
+    plan = llm.AgentPlan(
+        reply_text="the jam is in the pantry",
+        writes=(),
+        trace=(
+            llm.ToolCallRecord(
+                name="sumac_find_inventory",
+                arguments={"query": "jam"},
+                result='{"matches": [{"product_id": "jam", "location_path": "Pantry"}]}',
+            ),
+        ),
+    )
+    _patch_agent_runner(monkeypatch, [plan])
+
+    result = _run(data_dir, "ask", "where is the jam?")
+
+    assert result.exit_code == 0, result.output
+    assert "sumac_find_inventory" in result.output
+    assert "Pantry" in result.output
+
+
 def test_ask_dry_run_shows_plan_and_never_commits(
     data_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

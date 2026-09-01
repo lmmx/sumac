@@ -3,7 +3,8 @@ layer's existing `ledger`/`decide` entry points.
 
 Implements docs/journal/2026-09-01-ask-agent-design.md — section numbers in
 comments below refer to that document. This is the `sumac/llm.py` §16
-describes as not-yet-existing.
+describes as not-yet-existing, with one load-bearing deviation from §9/§12's
+recommended mechanism — see "Client-side, not server-side" below.
 
 Two phases per invocation, matching §12/§14:
 
@@ -24,18 +25,62 @@ never escapes `propose`/`revise`. `Rejected` raised during `commit` is not a
 modeled outcome (the human is no longer in the loop) and propagates normally,
 the same way `cli.py`'s `add` command already lets it reach `cli.main`'s
 top-level handler (§23).
+
+**Client-side, not server-side (deviation from §9/§12, found empirically).**
+§9/§12 recommended registering `tool_callbacks` on `Runner` and letting
+mistral.rs's server-side loop dispatch them (`max_tool_rounds`,
+`agent_permission`, per-invocation `session_id`). Running that against a real
+model surfaced a bug in the installed 0.9.2 Python SDK: `Runner(tool_callbacks=
+{...})` registers each callback through the Rust builder's schema-less
+`with_tool_callback(name, callback)` (confirmed against
+`EricLBuehler/mistral.rs`'s `mistralrs/src/builder_macros.rs` and
+`mistralrs-pyo3/src/lib.rs` on `master`) — every registered tool gets an empty
+`Tool` (`parameters: None`, `description: None`, `strict: None`), not the
+schema this module defines below. The richer `with_tool_callback_and_tool(name,
+callback, tool)` that would attach a real schema exists in Rust but is not
+exposed through the Python bindings. Supplying the real schema the only way
+left — via `ChatCompletionRequest.tool_schemas` on the request, alongside the
+same-named `tool_callbacks` registration — hits a separate check in
+`mistralrs-core/src/engine/agentic_loop.rs` that rejects any request tool
+whose name already exists in `tool_callbacks`, with exactly the error this
+module's tools were seen tripping: `"Tool '<name>' conflicts with a registered
+internal tool. Internal tool names cannot be overridden."` ("internal" there
+means "already in `tool_callbacks`", not "hardcoded engine builtin" — sumac's
+own tools trip it against themselves). This affects the SDK's own
+`examples/python/agentic_tools.py`, not just sumac's usage — it registers
+`tool_callbacks` and passes matching `tool_schemas` in the same shape this
+module used to. Filed upstream as inconsistent with `with_tool_callback`'s
+empty-schema behavior; not something a different tool name or a request-field
+change on sumac's side can work around while still using the server-side loop.
+
+The fix is the *other* documented loop shape (§7's "client-side loop",
+`examples/python/tool_call.py`): `Runner` is built with no `tool_callbacks` at
+all, `tool_schemas` carries the real schemas on every request as before, and
+this module drives the round-trip itself — inspect
+`response.choices[0].message.tool_calls`, dispatch the matching Python
+function directly, append the result as a new message, and re-send. This
+also simplifies session handling: `self._messages` is sumac's own accumulated
+history for one `propose`/`revise` invocation, so there is no need for
+mistral.rs's `session_id` continuity mechanism (§13's original reason for
+minting one) — §10's open question about whether `remember_for_session` has
+anything to scope to is moot along with it, along with `agent_permission` and
+`max_tool_rounds` as request fields (the round cap is enforced in this
+module's own loop instead, as `MAX_TOOL_ROUNDS` below). Per mistral.rs's own
+docs (`agentic-runtime.md`, "the standard OpenAI-compatible flow"), only the
+*first* tool call in a multi-call response is executed and the rest are
+dropped — matching the server-side loop's own documented one-call-per-round
+behavior (§7), so behavior here is the same shape either way.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Protocol, cast
-from uuid import uuid4
 
 import mistralrs
 
@@ -47,8 +92,8 @@ from sumac.models import ChangeKind
 # Not empirically checked against the tool schemas below (§21, §24) — pick a
 # different GGUF repo/file here if this one doesn't call tools reliably.
 
-QUANTIZED_MODEL_ID = "unsloth/Qwen3-1.7B-GGUF"
-QUANTIZED_FILENAME = "Qwen3-1.7B-Q4_K_M.gguf"
+QUANTIZED_MODEL_ID = "unsloth/Qwen3-0.6B-GGUF"
+QUANTIZED_FILENAME = "Qwen3-0.6B-Q4_K_M.gguf"
 
 # §13: a termination guarantee sized for "one write per round" (every
 # sequential search-then-act step a compound request could produce), not a
@@ -251,9 +296,24 @@ class ProposedWrite:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolCallRecord:
+    """One tool call `AgentRunner._run_loop` dispatched and its raw JSON
+    result — not part of §19's original `ProposedWrite`/`AgentPlan` pair,
+    added once real usage showed a plain final reply (e.g. "the jam is in
+    the fridge") hides the exact `sumac_find_inventory` query and match data
+    that produced it, with no way for a human to tell a vague answer from a
+    genuinely empty result without seeing the underlying call."""
+
+    name: str
+    arguments: dict
+    result: str
+
+
+@dataclass(frozen=True, slots=True)
 class AgentPlan:
     reply_text: str
     writes: tuple[ProposedWrite, ...]
+    trace: tuple[ToolCallRecord, ...] = ()
 
 
 class SendsCompletions(Protocol):
@@ -266,7 +326,12 @@ class SendsCompletions(Protocol):
     ) -> mistralrs.ChatCompletionResponse: ...
 
 
-def _build_runner(tool_callbacks: Mapping[str, Callable[[str, dict], str]]) -> mistralrs.Runner:
+def _build_runner() -> mistralrs.Runner:
+    # No `tool_callbacks` here — see the module docstring's "Client-side, not
+    # server-side" section for why: the Python SDK can only register a
+    # callback with an empty schema, and supplying the real schema via
+    # `tool_schemas` on the request then collides with that registration.
+    # `AgentRunner` dispatches tool calls itself instead (`_run_loop`).
     render.console.print(
         f"[dim]Loading {QUANTIZED_MODEL_ID} (first run downloads it; may take a while)...[/dim]"
     )
@@ -277,25 +342,25 @@ def _build_runner(tool_callbacks: Mapping[str, Callable[[str, dict], str]]) -> m
     # `Which.GGUF` is a nested dataclass, not a `Which` subclass, in the
     # installed 0.9.2 stub — the mismatch below is a stub-modeling gap, not a
     # real one; `Which.GGUF(...)` is mistral.rs's own documented construction.
-    return mistralrs.Runner(
-        which=which,  # ty: ignore[invalid-argument-type]
-        tool_callbacks=dict(tool_callbacks),
-    )
+    return mistralrs.Runner(which=which)  # ty: ignore[invalid-argument-type]
 
 
 class AgentRunner:
     """§19. `data_dir`/`key` are closed over by the tool callbacks below,
     matching `cli.py`'s existing `AgentRunner(data_dir, key)` construction
     (§16). Pass `runner` to substitute a fake `SendsCompletions` in tests
-    (§22) instead of building a real `mistralrs.Runner`."""
+    (§22) instead of building a real `mistralrs.Runner`. `tool_callbacks` is
+    dispatched by this class itself, client-side — see the module docstring —
+    rather than registered on the `Runner`."""
 
     def __init__(
         self, data_dir: Path, key: bytes, *, runner: SendsCompletions | None = None
     ) -> None:
         self._data_dir = data_dir
         self._key = key
-        self._session_id: str | None = None
+        self._messages: list[dict[str, str]] | None = None
         self._pending: list[ProposedWrite] = []
+        self._trace: list[ToolCallRecord] = []
         self.tool_callbacks: dict[str, Callable[[str, dict], str]] = {
             "sumac_find_inventory": self._sumac_find_inventory,
             "sumac_consume_inventory": self._sumac_consume_inventory,
@@ -309,7 +374,7 @@ class AgentRunner:
             # iterator when `stream=True`; `_build_request` never sets it, so
             # narrowing to the non-streaming `SendsCompletions` shape here is
             # safe for every request this class actually sends.
-            else cast(SendsCompletions, _build_runner(self.tool_callbacks))
+            else cast(SendsCompletions, _build_runner())
         )
 
     # -- tool callbacks (§18) ------------------------------------------------
@@ -409,24 +474,58 @@ class AgentRunner:
     def _sumac_discover_inventory(self, name: str, args: dict) -> str:
         return self._propose_write(name, args)
 
-    # -- request plumbing -----------------------------------------------------
+    # -- request plumbing (client-side loop — see module docstring) ---------
 
-    def _build_request(self, messages: list[dict[str, str]]) -> mistralrs.ChatCompletionRequest:
+    def _build_request(self) -> mistralrs.ChatCompletionRequest:
+        assert self._messages is not None
         return mistralrs.ChatCompletionRequest(
-            messages=messages,
+            messages=self._messages,
             model=MODEL_ID,
             tool_schemas=TOOL_SCHEMAS,
             tool_choice=mistralrs.ToolChoice.Auto,
-            max_tool_rounds=MAX_TOOL_ROUNDS,
-            agent_permission=mistralrs.AgentPermission.Auto,
-            session_id=self._session_id,
         )
 
-    def _run_request(self, request: mistralrs.ChatCompletionRequest) -> AgentPlan:
+    def _run_loop(self) -> AgentPlan:
+        """Drives the round-trip sumac now owns instead of mistral.rs's
+        server-side loop: send the accumulated `self._messages`, and if the
+        model asks for a tool call, dispatch it directly and append the
+        exchange (`examples/python/tool_call.py`'s shape — an `assistant`
+        message carrying `{"name", "parameters"}` as its content, then a
+        plain-string `tool` message) before sending again. Only the first
+        tool call in a response is executed, matching the server-side loop's
+        own documented behavior (module docstring) — the system prompt (§20)
+        also asks the model for one call per turn. `MAX_TOOL_ROUNDS` bounds
+        this loop the way `ChatCompletionRequest.max_tool_rounds` bounded the
+        server-side one (§13) — a termination guarantee, not a plan-size cap.
+        Every dispatched call is appended to `self._trace` (never reset here,
+        unlike `self._pending` — `propose`/`revise` reset and read it, so a
+        self-review pass's calls stay part of the same trace as the pass it
+        reviewed)."""
+        assert self._messages is not None
         self._pending = []
-        response = self._runner.send_chat_completion_request(request)
-        reply_text = response.choices[0].message.content or ""
-        return AgentPlan(reply_text=reply_text, writes=tuple(self._pending))
+        for _ in range(MAX_TOOL_ROUNDS):
+            response = self._runner.send_chat_completion_request(self._build_request())
+            message = response.choices[0].message
+            if not message.tool_calls:
+                self._messages.append({"role": "assistant", "content": message.content or ""})
+                return AgentPlan(reply_text=message.content or "", writes=tuple(self._pending))
+
+            call = message.tool_calls[0].function
+            args = json.loads(call.arguments)
+            result = self.tool_callbacks[call.name](call.name, args)
+            self._trace.append(ToolCallRecord(name=call.name, arguments=args, result=result))
+            self._messages.append(
+                {
+                    "role": "assistant",
+                    "content": json.dumps({"name": call.name, "parameters": args}),
+                }
+            )
+            self._messages.append({"role": "tool", "content": result})
+
+        # Round cap reached with no final reply — the accumulated plan (if
+        # any) is still returned rather than raised, matching §13's framing
+        # of this cap as a termination guarantee, not a success condition.
+        return AgentPlan(reply_text="", writes=tuple(self._pending))
 
     def _maybe_self_review(self, plan: AgentPlan) -> AgentPlan:
         """§13/§14 step 3: the model checks its own plan against the original
@@ -434,12 +533,12 @@ class AgentRunner:
         satisfied with `plan` as it stands — stop and keep it. A round that
         does make new tool calls replaces `plan` and, if rounds remain, is
         itself reviewed again."""
+        assert self._messages is not None
         if not plan.writes:
             return plan
         for _ in range(SELF_REVIEW_ROUNDS):
-            reviewed = self._run_request(
-                self._build_request([{"role": "user", "content": _SELF_REVIEW_MESSAGE}])
-            )
+            self._messages.append({"role": "user", "content": _SELF_REVIEW_MESSAGE})
+            reviewed = self._run_loop()
             if not reviewed.writes:
                 return plan
             plan = reviewed
@@ -448,22 +547,21 @@ class AgentRunner:
     # -- public interface (§19) ----------------------------------------------
 
     def propose(self, prompt: str) -> AgentPlan:
-        self._session_id = str(uuid4())
-        plan = self._run_request(
-            self._build_request(
-                [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
-                ]
-            )
-        )
-        return self._maybe_self_review(plan)
+        self._messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ]
+        self._trace = []
+        plan = self._maybe_self_review(self._run_loop())
+        return replace(plan, trace=tuple(self._trace))
 
     def revise(self, feedback: str) -> AgentPlan:
-        if self._session_id is None:
+        if self._messages is None:
             raise RuntimeError("AgentRunner.revise() called before propose()")
-        plan = self._run_request(self._build_request([{"role": "user", "content": feedback}]))
-        return self._maybe_self_review(plan)
+        self._messages.append({"role": "user", "content": feedback})
+        self._trace = []
+        plan = self._maybe_self_review(self._run_loop())
+        return replace(plan, trace=tuple(self._trace))
 
     def commit(self, plan: AgentPlan) -> list[str]:
         """§14 step 5 ("Accept"), §23: re-decides each write against freshly

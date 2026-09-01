@@ -411,6 +411,7 @@ def ask(
         raise typer.Exit(code=1) from e
 
     while True:
+        render.print_trace(plan.trace)
         if not plan.writes:
             if plan.reply_text:
                 render.console.print(plan.reply_text)

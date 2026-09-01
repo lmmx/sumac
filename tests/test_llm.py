@@ -1,13 +1,19 @@
 """§22: orchestration (`AgentRunner`) driven by a hand-built fake in place of
 `mistralrs.Runner` — no real model, no GGUF download. The fake still drives
 real `decide.decide_change`/`store.append` calls against a real encrypted
-`data_dir`/`key`, via `AgentRunner`'s actual tool callbacks."""
+`data_dir`/`key`, via `AgentRunner`'s actual tool callbacks.
+
+`AgentRunner` drives a client-side tool-calling loop itself (see the module
+docstring in `sumac/llm.py`, "Client-side, not server-side") rather than
+registering callbacks on `Runner` — so one scripted `ScriptedResponse` here
+is one `send_chat_completion_request` *round*, not a whole multi-tool-call
+turn: a tool call the loop must dispatch itself, or a final plain-text reply
+with no further tool call."""
 
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -22,45 +28,48 @@ from sumac.models import ChangeKind, Location, Product
 
 
 @dataclass
-class ScriptedTurn:
-    """One `send_chat_completion_request` call's worth of scripted behavior:
-    `tool_calls` are dispatched, in order, through `FakeRunner.tool_callbacks`
-    (mimicking what mistral.rs's server-side loop does internally, one round
-    at a time — see docs/journal/2026-09-01-ask-agent-design.md §7), then the
-    turn ends with `final_content` as the assistant's plain-text reply."""
+class ScriptedResponse:
+    tool_call: tuple[str, dict] | None = None
+    content: str = ""
 
-    tool_calls: list[tuple[str, dict]] = field(default_factory=list)
-    final_content: str = ""
+
+def _tool_round(name: str, args: dict) -> ScriptedResponse:
+    return ScriptedResponse(tool_call=(name, args))
+
+
+def _final_round(content: str) -> ScriptedResponse:
+    return ScriptedResponse(content=content)
 
 
 class FakeRunner:
-    """A `llm.SendsCompletions`. `tool_callbacks` is wired in after
-    construction — `AgentRunner.__init__` builds the callbacks closure before
-    it has a runner to hand them to (real `mistralrs.Runner` takes them at
-    construction time; this fake takes them after, since dispatch only
-    happens once a request actually arrives)."""
+    """A `llm.SendsCompletions` returning one scripted response per round.
+    Never dispatches a tool itself — `AgentRunner._run_loop` does that,
+    against its own `tool_callbacks`, exactly as it would against a real
+    `mistralrs.Runner`'s response."""
 
-    def __init__(self, turns: list[ScriptedTurn]) -> None:
-        self.tool_callbacks: dict[str, Callable[[str, dict], str]] = {}
-        self._turns = list(turns)
+    def __init__(self, responses: list[ScriptedResponse]) -> None:
+        self._responses = list(responses)
         self.requests: list[object] = []
 
     def send_chat_completion_request(self, request, model_id=None):  # noqa: ANN001, ANN201
         self.requests.append(request)
-        turn = self._turns.pop(0)
-        for name, args in turn.tool_calls:
-            self.tool_callbacks[name](name, args)
-        message = SimpleNamespace(content=turn.final_content, role="assistant", tool_calls=None)
+        scripted = self._responses.pop(0)
+        if scripted.tool_call is None:
+            message = SimpleNamespace(content=scripted.content, role="assistant", tool_calls=None)
+        else:
+            name, args = scripted.tool_call
+            function = SimpleNamespace(name=name, arguments=json.dumps(args))
+            tool_call = SimpleNamespace(function=function)
+            message = SimpleNamespace(content=None, role="assistant", tool_calls=[tool_call])
         choice = SimpleNamespace(finish_reason="stop", index=0, message=message)
         return SimpleNamespace(choices=[choice])
 
 
 def _make_agent(
-    turns: list[ScriptedTurn], data_dir: Path, key: bytes
+    responses: list[ScriptedResponse], data_dir: Path, key: bytes
 ) -> tuple[llm.AgentRunner, FakeRunner]:
-    fake = FakeRunner(turns)
+    fake = FakeRunner(responses)
     agent = llm.AgentRunner(data_dir, key, runner=fake)
-    fake.tool_callbacks = agent.tool_callbacks
     return agent, fake
 
 
@@ -136,37 +145,36 @@ def test_find_inventory_no_match_returns_empty_list(
 def test_propose_read_only_request_produces_no_writes(
     data_dir: Path, key: bytes, osuser: str
 ) -> None:
-    turns = [ScriptedTurn(tool_calls=[], final_content="the jam is in the pantry")]
-    agent, fake = _make_agent(turns, data_dir, key)
+    responses = [_final_round("the jam is in the pantry")]
+    agent, fake = _make_agent(responses, data_dir, key)
 
     plan = agent.propose("where is the jam?")
 
     assert plan.writes == ()
     assert plan.reply_text == "the jam is in the pantry"
     # No writes proposed -> self-review (§13) has nothing to check, so only
-    # the one request fires.
+    # the one round fires.
     assert len(fake.requests) == 1
+    # No tool call happened either — a read-only reply with no search behind
+    # it still surfaces an (empty) trace rather than something to infer.
+    assert plan.trace == ()
 
 
 def test_propose_resolves_a_consume_call_into_a_pending_write(
     data_dir: Path, key: bytes, osuser: str
 ) -> None:
     _seed_pantry_with_jam(data_dir, key, osuser)
-    turns = [
-        ScriptedTurn(
-            tool_calls=[
-                ("sumac_find_inventory", {"query": "jam"}),
-                (
-                    "sumac_consume_inventory",
-                    {"product_id": "jam", "amount": "1", "unit": "jar", "from_location": "pantry"},
-                ),
-            ],
-            final_content="consumed 1 jar of jam",
+    responses = [
+        _tool_round("sumac_find_inventory", {"query": "jam"}),
+        _tool_round(
+            "sumac_consume_inventory",
+            {"product_id": "jam", "amount": "1", "unit": "jar", "from_location": "pantry"},
         ),
+        _final_round("consumed 1 jar of jam"),
         # self-review round: model is satisfied, no further tool calls.
-        ScriptedTurn(tool_calls=[], final_content="looks correct"),
+        _final_round("looks correct"),
     ]
-    agent, fake = _make_agent(turns, data_dir, key)
+    agent, fake = _make_agent(responses, data_dir, key)
 
     plan = agent.propose("consume 1 jar of jam")
 
@@ -179,30 +187,35 @@ def test_propose_resolves_a_consume_call_into_a_pending_write(
     assert w.from_location == "pantry"
     # Nothing committed yet — still a dry run (§11/§12).
     assert ledger.build_inventory(data_dir, key).at("pantry")["jam"].amount == Decimal(3)
-    assert len(fake.requests) == 2
+    assert len(fake.requests) == 4
+
+    # The trace records both calls, in order, with their raw results — not
+    # just the final "consumed 1 jar of jam" the model happened to say.
+    assert [t.name for t in plan.trace] == ["sumac_find_inventory", "sumac_consume_inventory"]
+    assert plan.trace[0].arguments == {"query": "jam"}
+    find_result = json.loads(plan.trace[0].result)
+    assert find_result["matches"][0]["product_id"] == "jam"
+    consume_result = json.loads(plan.trace[1].result)
+    assert consume_result["status"] == "proposed"
 
 
 def test_rejected_tool_call_is_reported_and_not_added_to_pending(
     data_dir: Path, key: bytes, osuser: str
 ) -> None:
     _seed_pantry_with_jam(data_dir, key, osuser)
-    turns = [
-        ScriptedTurn(
-            tool_calls=[
-                (
-                    "sumac_consume_inventory",
-                    {
-                        "product_id": "jam",
-                        "amount": "1",
-                        "unit": "jar",
-                        "from_location": "nonexistent-location",
-                    },
-                )
-            ],
-            final_content="that location doesn't exist",
-        )
+    responses = [
+        _tool_round(
+            "sumac_consume_inventory",
+            {
+                "product_id": "jam",
+                "amount": "1",
+                "unit": "jar",
+                "from_location": "nonexistent-location",
+            },
+        ),
+        _final_round("that location doesn't exist"),
     ]
-    agent, _fake = _make_agent(turns, data_dir, key)
+    agent, _fake = _make_agent(responses, data_dir, key)
 
     result = json.loads(
         agent.tool_callbacks["sumac_consume_inventory"](
@@ -229,27 +242,20 @@ def test_self_review_replaces_plan_when_model_revises_it(
     data_dir: Path, key: bytes, osuser: str
 ) -> None:
     _seed_pantry_with_jam(data_dir, key, osuser)
-    turns = [
-        ScriptedTurn(
-            tool_calls=[
-                (
-                    "sumac_consume_inventory",
-                    {"product_id": "jam", "amount": "1", "unit": "jar", "from_location": "pantry"},
-                )
-            ],
-            final_content="consumed 1 jar",
+    responses = [
+        _tool_round(
+            "sumac_consume_inventory",
+            {"product_id": "jam", "amount": "1", "unit": "jar", "from_location": "pantry"},
         ),
-        ScriptedTurn(
-            tool_calls=[
-                (
-                    "sumac_consume_inventory",
-                    {"product_id": "jam", "amount": "2", "unit": "jar", "from_location": "pantry"},
-                )
-            ],
-            final_content="actually, 2 jars",
+        _final_round("consumed 1 jar"),
+        # self-review round: the model reconsiders and makes a new call.
+        _tool_round(
+            "sumac_consume_inventory",
+            {"product_id": "jam", "amount": "2", "unit": "jar", "from_location": "pantry"},
         ),
+        _final_round("actually, 2 jars"),
     ]
-    agent, _fake = _make_agent(turns, data_dir, key)
+    agent, _fake = _make_agent(responses, data_dir, key)
 
     plan = agent.propose("consume some jam")
 
@@ -262,19 +268,16 @@ def test_self_review_keeps_original_plan_when_model_confirms(
     data_dir: Path, key: bytes, osuser: str
 ) -> None:
     _seed_pantry_with_jam(data_dir, key, osuser)
-    turns = [
-        ScriptedTurn(
-            tool_calls=[
-                (
-                    "sumac_consume_inventory",
-                    {"product_id": "jam", "amount": "1", "unit": "jar", "from_location": "pantry"},
-                )
-            ],
-            final_content="consumed 1 jar",
+    responses = [
+        _tool_round(
+            "sumac_consume_inventory",
+            {"product_id": "jam", "amount": "1", "unit": "jar", "from_location": "pantry"},
         ),
-        ScriptedTurn(tool_calls=[], final_content="confirmed, no changes"),
+        _final_round("consumed 1 jar"),
+        # self-review round: no further tool call, so the original plan stands.
+        _final_round("confirmed, no changes"),
     ]
-    agent, _fake = _make_agent(turns, data_dir, key)
+    agent, _fake = _make_agent(responses, data_dir, key)
 
     plan = agent.propose("consume some jam")
 
@@ -294,35 +297,36 @@ def test_revise_before_propose_raises(data_dir: Path, key: bytes, osuser: str) -
 
 def test_revise_continues_after_propose(data_dir: Path, key: bytes, osuser: str) -> None:
     _seed_pantry_with_jam(data_dir, key, osuser)
-    turns = [
-        ScriptedTurn(
-            tool_calls=[
-                (
-                    "sumac_consume_inventory",
-                    {"product_id": "jam", "amount": "1", "unit": "jar", "from_location": "pantry"},
-                )
-            ],
-            final_content="consumed 1 jar",
+    responses = [
+        # propose
+        _tool_round(
+            "sumac_consume_inventory",
+            {"product_id": "jam", "amount": "1", "unit": "jar", "from_location": "pantry"},
         ),
-        ScriptedTurn(tool_calls=[], final_content="confirmed"),
-        ScriptedTurn(
-            tool_calls=[
-                (
-                    "sumac_consume_inventory",
-                    {"product_id": "jam", "amount": "2", "unit": "jar", "from_location": "pantry"},
-                )
-            ],
-            final_content="updated to 2 jars",
+        _final_round("consumed 1 jar"),
+        # self-review of propose: confirmed, no change
+        _final_round("confirmed"),
+        # revise
+        _tool_round(
+            "sumac_consume_inventory",
+            {"product_id": "jam", "amount": "2", "unit": "jar", "from_location": "pantry"},
         ),
-        ScriptedTurn(tool_calls=[], final_content="confirmed"),
+        _final_round("updated to 2 jars"),
+        # self-review of revise: confirmed, no change
+        _final_round("confirmed"),
     ]
-    agent, _fake = _make_agent(turns, data_dir, key)
+    agent, _fake = _make_agent(responses, data_dir, key)
 
-    agent.propose("consume some jam")
+    proposed = agent.propose("consume some jam")
     plan = agent.revise("actually make it 2 jars")
 
     assert len(plan.writes) == 1
     assert plan.writes[0].amount == Decimal(2)
+
+    # revise()'s trace covers only its own round, not propose()'s — each
+    # returned AgentPlan explains only the plan it is currently attached to.
+    assert [Decimal(t.arguments["amount"]) for t in proposed.trace] == [Decimal(1)]
+    assert [Decimal(t.arguments["amount"]) for t in plan.trace] == [Decimal(2)]
 
 
 # --- commit (§14 step 5, §23) ---------------------------------------------

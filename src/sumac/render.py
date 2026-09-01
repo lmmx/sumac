@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from typing import TYPE_CHECKING
 
@@ -12,7 +13,7 @@ from rich.tree import Tree
 from sumac import config, events, ledger, models
 
 if TYPE_CHECKING:
-    from sumac.llm import AgentPlan
+    from sumac.llm import AgentPlan, ToolCallRecord
 
 console = Console()
 error_console = Console(stderr=True)
@@ -283,6 +284,24 @@ def print_doctor(report: ledger.DoctorReport) -> None:
         for a in suggestions:
             reason = f"{a.reason}: {a.detail}".replace('"', "'")
             console.print(f'  sumac correct {a.record_id} --reason "{reason}"')
+
+
+def print_trace(trace: tuple[ToolCallRecord, ...]) -> None:
+    """The tool calls an `AgentRunner.propose`/`.revise` call actually made,
+    with their raw JSON results — shown before `print_plan`'s writes table or
+    a read-only reply, since neither on its own says what the agent searched
+    or found; added after real usage showed a plain final reply hides that
+    entirely (see `sumac/llm.py`'s `ToolCallRecord`). A no-op for an empty
+    trace, matching `print_anomaly_banner`'s "nothing to say" behavior."""
+    if not trace:
+        return
+    table = Table(title=f"Tool calls ({len(trace)})")
+    table.add_column("tool")
+    table.add_column("arguments")
+    table.add_column("result")
+    for t in trace:
+        table.add_row(t.name, json.dumps(t.arguments), t.result)
+    console.print(table)
 
 
 def print_plan(plan: AgentPlan) -> None:
