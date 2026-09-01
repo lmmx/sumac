@@ -314,6 +314,96 @@ def test_find_shows_anomaly_banner(data_dir: Path) -> None:
     assert "could not be applied" in result.output
 
 
+def _seed_butter_tiers(data_dir: Path) -> None:
+    """One product per tier for a "butter" query: `Butter` (exact),
+    `Salted Butter` (whole-word), `Butternut Squash` (substring only —
+    "butter" isn't a whole word inside "butternut")."""
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Fridge", "--id", "fridge")
+    _run(data_dir, "add", "purchase", "Butter", "1", "packet", "--to", "fridge")
+    _run(data_dir, "add", "purchase", "Salted Butter", "1", "block", "--to", "fridge")
+    _run(data_dir, "add", "purchase", "Butternut Squash", "1", "pack", "--to", "fridge")
+
+
+def test_find_shows_one_table_per_match_kind_in_tier_order(data_dir: Path) -> None:
+    _seed_butter_tiers(data_dir)
+
+    result = _run(data_dir, "find", "Butter")
+
+    assert result.exit_code == 0, result.output
+    for heading in ("Exact matches", "Whole-word matches", "Substring matches"):
+        assert heading in result.output
+    exact_idx = result.output.index("Exact matches")
+    whole_idx = result.output.index("Whole-word matches")
+    substring_idx = result.output.index("Substring matches")
+    assert exact_idx < whole_idx < substring_idx
+
+
+def test_find_omits_tables_for_absent_tiers(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Fridge", "--id", "fridge")
+    _run(data_dir, "add", "purchase", "Butter", "1", "packet", "--to", "fridge")
+
+    result = _run(data_dir, "find", "Butter")
+
+    assert "Exact matches" in result.output
+    assert "Whole-word matches" not in result.output
+    assert "Substring matches" not in result.output
+
+
+def test_find_no_only_flags_shows_every_kind(data_dir: Path) -> None:
+    _seed_butter_tiers(data_dir)
+
+    result = _run(data_dir, "find", "Butter")
+
+    assert "Salted Butter" in result.output
+    assert "Butternut Squash" in result.output
+
+
+def test_find_single_only_flag_restricts_to_that_kind(data_dir: Path) -> None:
+    _seed_butter_tiers(data_dir)
+
+    result = _run(data_dir, "find", "Butter", "--exact")
+
+    assert "Exact matches" in result.output
+    assert "Whole-word matches" not in result.output
+    assert "Substring matches" not in result.output
+    assert "Salted Butter" not in result.output
+    assert "Butternut Squash" not in result.output
+
+
+def test_find_combined_only_flags_are_unioned(data_dir: Path) -> None:
+    """Passing --exact and --whole-word together means "only these two
+    kinds", not "only records passing both" — substring is still excluded."""
+    _seed_butter_tiers(data_dir)
+
+    result = _run(data_dir, "find", "Butter", "--exact", "--whole-word")
+
+    assert "Exact matches" in result.output
+    assert "Whole-word matches" in result.output
+    assert "Substring matches" not in result.output
+    assert "Salted Butter" in result.output
+    assert "Butternut Squash" not in result.output
+
+
+def test_find_substring_only_flag_shows_only_substring_tier(data_dir: Path) -> None:
+    _seed_butter_tiers(data_dir)
+
+    result = _run(data_dir, "find", "Butter", "--substring")
+
+    assert "Exact matches" not in result.output
+    assert "Whole-word matches" not in result.output
+    assert "Substring matches" in result.output
+    assert "Butternut Squash" in result.output
+
+
+def test_find_no_match_reports_not_found(data_dir: Path) -> None:
+    _run(data_dir, "init")
+    result = _run(data_dir, "find", "nonexistent")
+    assert result.exit_code == 0, result.output
+    assert "not found" in result.output
+
+
 def test_verify_clean(data_dir: Path) -> None:
     _run(data_dir, "init")
     _run(data_dir, "add", "purchase", "milk", "1", "l", "--to", "pantry")

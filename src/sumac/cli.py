@@ -331,16 +331,38 @@ def status(
 def find(
     product_id: str,
     exact: Annotated[
-        bool, typer.Option(help="Exact match only (default is partial/substring match)")
+        bool, typer.Option("--exact", help="Include exact product-name matches.")
+    ] = False,
+    whole_word: Annotated[
+        bool, typer.Option("--whole-word", help="Include whole-word matches.")
+    ] = False,
+    substring: Annotated[
+        bool, typer.Option("--substring", help="Include substring matches.")
     ] = False,
     data_dir: DataDirOption = Path("data"),
 ) -> None:
-    """Show every location currently holding PRODUCT_ID (partial match by default)."""
+    """Show every location currently holding PRODUCT_ID, one table per match
+    kind (exact / whole-word / substring). --exact/--whole-word/--substring
+    each restrict the result to that kind, and are combined when more than
+    one is given (e.g. --exact --whole-word shows both, not substring);
+    with none given, shows every kind."""
     key = _key(data_dir)
     inventory = ledger.build_inventory(data_dir, key)
     locations = ledger.load_locations_or_empty(data_dir, key)
     render.print_anomaly_banner(inventory.anomalies)
-    render.print_find(inventory, locations, product_id, exact=exact)
+    matches = ledger.search_inventory(inventory, product_id)
+    selected = {
+        kind
+        for kind, flag in (
+            (ledger.MatchKind.EXACT, exact),
+            (ledger.MatchKind.WHOLE_WORD, whole_word),
+            (ledger.MatchKind.SUBSTRING, substring),
+        )
+        if flag
+    }
+    if selected:
+        matches = tuple(m for m in matches if m.match_kind in selected)
+    render.print_find(matches, locations, product_id)
 
 
 @app.command(name="log")

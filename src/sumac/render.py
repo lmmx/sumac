@@ -171,28 +171,46 @@ def print_status(
         console.print(table)
 
 
-def print_find(
-    inventory: ledger.Inventory,
-    locations: dict[str, models.Location],
-    product_id: str,
-    exact: bool = False,
-) -> None:
-    table = Table(title=f"Locations of {product_id!r}")
+def _find_table(
+    title: str, matches: tuple[ledger.InventoryMatch, ...], locations: dict[str, models.Location]
+) -> Table:
+    table = Table(title=title)
     table.add_column("product")
     table.add_column("location")
     table.add_column("quantity", justify="right")
-    found = False
-    for loc_id, entries in sorted(inventory.by_location.items()):
-        for pid, qty in sorted(entries.items()):
-            matches = (pid == product_id) if exact else (product_id.lower() in pid.lower())
-            if matches:
-                found = True
-                table.add_row(
-                    pid, config.location_path(locations, loc_id), f"{qty.amount} {qty.unit}"
-                )
-    console.print(table)
-    if not found:
-        console.print(f"[yellow]{product_id!r} not found in current inventory[/yellow]")
+    for m in matches:
+        table.add_row(
+            m.product_id,
+            config.location_path(locations, m.location_id),
+            f"{m.quantity.amount} {m.quantity.unit}",
+        )
+    return table
+
+
+_FIND_SECTIONS = (
+    (ledger.MatchKind.EXACT, "Exact matches"),
+    (ledger.MatchKind.WHOLE_WORD, "Whole-word matches"),
+    (ledger.MatchKind.SUBSTRING, "Substring matches"),
+)
+
+
+def print_find(
+    matches: tuple[ledger.InventoryMatch, ...],
+    locations: dict[str, models.Location],
+    query: str,
+) -> None:
+    """Renders `ledger.search_inventory`'s classified result as one table per
+    tier that actually has rows — exact, then whole-word, then substring —
+    rather than collapsing whole-word and substring together under a single
+    "related" heading; a tier a caller filtered out entirely (`cli.py`'s
+    `find --whole-word`, say) just has no table, not an empty one."""
+    if not matches:
+        console.print(f"[yellow]{query!r} not found in current inventory[/yellow]")
+        return
+    for kind, title in _FIND_SECTIONS:
+        tier = tuple(m for m in matches if m.match_kind is kind)
+        if tier:
+            console.print(_find_table(title, tier, locations))
 
 
 def _describe_payload(

@@ -75,7 +75,6 @@ behavior (§7), so behavior here is the same shape either way.
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -289,17 +288,6 @@ _KIND_BY_TOOL = {
 }
 
 
-def _find_match_rank(product_id: str, query_lower: str) -> int:
-    """0 = exact match, 1 = query appears as a whole word, 2 = any other
-    substring match (e.g. "butter" inside "Butternut")."""
-    pid_lower = product_id.lower()
-    if pid_lower == query_lower:
-        return 0
-    if re.search(rf"\b{re.escape(query_lower)}\b", pid_lower):
-        return 1
-    return 2
-
-
 # --- Orchestration types (§19) ----------------------------------------------
 
 
@@ -429,30 +417,27 @@ class AgentRunner:
 
     def _sumac_find_inventory(self, _name: str, args: dict) -> str:
         query = str(args.get("query", ""))
-        query_lower = query.lower()
         inventory = ledger.build_inventory(self._data_dir, self._key)
         locations = ledger.load_locations_or_empty(self._data_dir, self._key)
-        ranked = [
-            (_find_match_rank(pid, query_lower), loc_id, pid, qty)
-            for loc_id, entries in inventory.by_location.items()
-            for pid, qty in entries.items()
-            if query_lower in pid.lower()
-        ]
-        # Whole-word matches only by default (§29) — "butter" should not
-        # return "Butternut Box Dog Food". Falls back to substring-only
-        # matches when there is no whole-word match at all, so a genuine
-        # partial search still returns something rather than nothing.
-        narrowed = [m for m in ranked if m[0] <= 1]
-        found = sorted(narrowed or ranked, key=lambda item: (item[0], item[2], item[1]))
+        all_matches = ledger.search_inventory(inventory, query)
+        # Whole-word-or-better matches only by default (§29) — "butter"
+        # should not return "Butternut Box Dog Food". Falls back to the full,
+        # substring-inclusive result when nothing matches as a whole word, so
+        # a genuine partial search ("nut") still returns something rather
+        # than nothing. `ledger.search_inventory` classifies every tier; this
+        # is the agent's own policy for how much of that to hand to a small
+        # model, not part of the classification itself.
+        narrowed = tuple(m for m in all_matches if m.match_kind is not ledger.MatchKind.SUBSTRING)
+        found = narrowed or all_matches
         matches = [
             {
-                "product_id": pid,
-                "location_id": loc_id,
-                "location_path": config.location_path(locations, loc_id),
-                "amount": str(qty.amount),
-                "unit": qty.unit,
+                "product_id": m.product_id,
+                "location_id": m.location_id,
+                "location_path": config.location_path(locations, m.location_id),
+                "amount": str(m.quantity.amount),
+                "unit": m.quantity.unit,
             }
-            for _rank, loc_id, pid, qty in found
+            for m in found
         ]
         return json.dumps({"matches": matches})
 
