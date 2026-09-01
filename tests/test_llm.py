@@ -508,3 +508,74 @@ def test_prompt_and_schema_do_not_worked_example_specific_products() -> None:
     lowered = text.lower()
     for word in ("butter", "peanut", "croissant", "milk", "chocolate"):
         assert word not in lowered, f"{word!r} found in prompt/schema text — worked example leaked"
+
+
+# --- §40: per-model tool-call rendering ------------------------------------
+
+
+def test_render_tool_call_qwen_splices_raw_arguments_verbatim() -> None:
+    """§28: `raw_arguments` (the model's own emitted JSON string) must be
+    spliced in as-is, not re-serialized from `arguments` — re-dumping
+    could reorder keys or change whitespace relative to what Qwen3's own
+    chat template would have produced from a real `tool_calls` field."""
+    result = llm._render_tool_call("sumac_find_inventory", {"query": "jam"}, '{"query":   "jam"}')
+    expected = (
+        '<tool_call>\n{"name": "sumac_find_inventory", "arguments": '
+        '{"query":   "jam"}}\n</tool_call>'
+    )
+    assert result == expected
+
+
+def test_render_tool_call_lfm_uses_pythonic_syntax(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(llm, "TOOL_CALL_FORMAT", llm.ToolCallFormat.LFM)
+
+    result = llm._render_tool_call(
+        "sumac_consume_inventory",
+        {"product_id": "jam", "amount": "1", "unit": "jar", "from_location": "pantry"},
+        "unused for LFM",
+    )
+
+    assert result == (
+        '<|tool_call_start|>[sumac_consume_inventory(product_id="jam", amount="1", '
+        'unit="jar", from_location="pantry")]<|tool_call_end|>'
+    )
+
+
+def test_render_tool_call_lfm_escapes_embedded_quotes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(llm, "TOOL_CALL_FORMAT", llm.ToolCallFormat.LFM)
+
+    result = llm._render_tool_call("sumac_find_inventory", {"query": 'jam "special"'}, "unused")
+
+    assert (
+        result
+        == '<|tool_call_start|>[sumac_find_inventory(query="jam \\"special\\"")]<|tool_call_end|>'
+    )
+
+
+def test_run_loop_appends_lfm_formatted_assistant_message_when_configured(
+    monkeypatch: pytest.MonkeyPatch, data_dir: Path, key: bytes, osuser: str
+) -> None:
+    """Confirms `TOOL_CALL_FORMAT` actually reaches `_run_loop`'s message
+    history, not just that `_render_tool_call` produces the right string
+    in isolation — `mistralrs.ChatCompletionRequest` is an opaque Rust
+    object with no readable `.messages` attribute, so this checks
+    `AgentRunner`'s own accumulated `self._messages` instead."""
+    monkeypatch.setattr(llm, "TOOL_CALL_FORMAT", llm.ToolCallFormat.LFM)
+    _seed_pantry_with_jam(data_dir, key, osuser)
+    responses = [
+        _tool_round("sumac_find_inventory", {"query": "jam"}),
+        _final_round("the jam is in the pantry"),
+    ]
+    agent, _fake = _make_agent(responses, data_dir, key)
+
+    agent.propose("where is the jam?")
+
+    assert agent._messages is not None
+    tool_call_messages = [
+        m
+        for m in agent._messages
+        if m["role"] == "assistant" and "<|tool_call_start|>" in m["content"]
+    ]
+    assert len(tool_call_messages) == 1
+    assert "sumac_find_inventory" in tool_call_messages[0]["content"]
+    assert "<tool_call>" not in tool_call_messages[0]["content"]

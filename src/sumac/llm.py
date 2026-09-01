@@ -79,6 +79,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+from enum import StrEnum
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -88,16 +89,43 @@ from sumac import config, decide, ledger, paths, render, store
 from sumac.errors import Rejected
 from sumac.models import ChangeKind
 
+
+class ToolCallFormat(StrEnum):
+    """Which chat-template convention the loaded GGUF expects a completed
+    tool call replayed in, as the assistant's own prior turn — see
+    `_render_tool_call`. Not one universal format: mistralrs-pyo3 0.9.2
+    drops the structured `tool_calls` field when building a message from a
+    plain dict (module docstring, "Client-side, not server-side") and
+    passes only `content` through, so this module has to hand-render
+    exactly what each model's own chat template would have produced from a
+    real `tool_calls` field — and that rendering is template-specific, not
+    generic. §28 worked this out for Qwen3's `<tool_call>` JSON block by
+    reading its GGUF-embedded Jinja template line by line; LFM2.5 uses an
+    entirely different, Pythonic `<|tool_call_start|>[name(...)]
+    <|tool_call_end|>` syntax (§40) — unconfirmed against a real LFM2.5 run
+    in this environment, same as every other real-model claim in this
+    module (§21, §24)."""
+
+    QWEN = "qwen"
+    LFM = "lfm"
+
+
 # --- Configuration (§21) ----------------------------------------------------
 # Not empirically checked against the tool schemas below (§21, §24) — pick a
 # different GGUF repo/file here if this one doesn't call tools reliably.
+# id/filename/format travel together as one block (comment/uncomment as a
+# unit) so switching models can't leave TOOL_CALL_FORMAT pointing at the
+# wrong wire syntax (§40).
 
-QUANTIZED_MODEL_ID = "unsloth/Qwen3-1.7B-GGUF"
-QUANTIZED_FILENAME = "Qwen3-1.7B-Q4_K_M.gguf"
+# QUANTIZED_MODEL_ID = "unsloth/Qwen3-1.7B-GGUF"
+# QUANTIZED_FILENAME = "Qwen3-1.7B-Q4_K_M.gguf"
+# TOOL_CALL_FORMAT = ToolCallFormat.QWEN
 # QUANTIZED_MODEL_ID = "unsloth/Qwen3-0.6B-GGUF"
 # QUANTIZED_FILENAME = "Qwen3-0.6B-Q4_K_M.gguf"
-# QUANTIZED_MODEL_ID = "unsloth/LFM2.5-1.2B-Instruct-GGUF"
-# QUANTIZED_FILENAME = "LFM2.5-1.2B-Instruct-Q4_K_M.gguf"
+# TOOL_CALL_FORMAT = ToolCallFormat.QWEN
+QUANTIZED_MODEL_ID = "unsloth/LFM2.5-1.2B-Instruct-GGUF"
+QUANTIZED_FILENAME = "LFM2.5-1.2B-Instruct-Q4_K_M.gguf"
+TOOL_CALL_FORMAT = ToolCallFormat.LFM
 
 # §13: a termination guarantee sized for "one write per round" (every
 # sequential search-then-act step a compound request could produce), not a
@@ -363,6 +391,36 @@ class SendsCompletions(Protocol):
     ) -> mistralrs.ChatCompletionResponse: ...
 
 
+def _lfm_literal(value: object) -> str:
+    """A double-quoted, escaped string literal for LFM2.5's Pythonic
+    tool-call syntax, e.g. `query="butter"`. Every argument this module's
+    tool schemas define is string-typed (§17's comment on why `amount` is
+    `"string"`, not `"number"`, applies here too), so this only ever needs
+    to quote and escape a plain string, not represent other JSON types."""
+    escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _render_tool_call(name: str, arguments: dict, raw_arguments: str) -> str:
+    """Hand-renders exactly what the loaded model's own GGUF chat template
+    would produce for a completed tool call — see `ToolCallFormat`'s
+    docstring for why this can't just pass a real `tool_calls` field
+    through. `TOOL_CALL_FORMAT` selects which template convention to
+    target; `raw_arguments` (the model's own emitted JSON string) is only
+    used by the Qwen branch, `arguments` (already parsed) only by LFM's."""
+    if TOOL_CALL_FORMAT is ToolCallFormat.LFM:
+        # LFM2.5's own documented Pythonic syntax:
+        # <|tool_call_start|>[name(key="value", ...)]<|tool_call_end|>
+        args_text = ", ".join(f"{key}={_lfm_literal(value)}" for key, value in arguments.items())
+        return f"<|tool_call_start|>[{name}({args_text})]<|tool_call_end|>"
+    # QWEN (§28): byte-for-byte what the `{%- if message.tool_calls %}`
+    # branch renders from a real `tool_calls` field. `raw_arguments` is
+    # spliced in verbatim — already what `{{- tool_call.arguments }}`
+    # inserts when `arguments is string` — rather than re-serializing
+    # `arguments`, which could reorder keys or whitespace differently.
+    return f'<tool_call>\n{{"name": "{name}", "arguments": {raw_arguments}}}\n</tool_call>'
+
+
 def _round_preview(message: mistralrs.ResponseMessage, limit: int = 100) -> str:
     """What the model actually did this round, truncated — a tool call's
     name and arguments, or its plain-text reply. §31: the trace table alone
@@ -572,14 +630,15 @@ class AgentRunner:
         )
 
     def _run_loop(self) -> AgentPlan:
-        """Client-side tool-calling loop (§25/§26/§27/§28 — see the journal
-        for why). The assistant message for a dispatched call is rendered as
-        `<tool_call>\\n{"name": ..., "arguments": ...}\\n</tool_call>` (§28) —
-        the model's own native tag format, hand-built here because the
-        Python bindings drop a real `tool_calls` field but pass `content`
-        through unchanged, so this is byte-for-byte what the chat template
-        would have produced from a real `tool_calls` field. `MAX_TOOL_ROUNDS`
-        is a termination guarantee, not a plan-size cap (§13)."""
+        """Client-side tool-calling loop (§25/§26/§27/§28/§40 — see the
+        journal for why). The assistant message for a dispatched call is
+        rendered by `_render_tool_call`, per `TOOL_CALL_FORMAT` — hand-built
+        because the Python bindings drop a real `tool_calls` field but pass
+        `content` through unchanged, so this has to be byte-for-byte what
+        the loaded model's own chat template would have produced from a
+        real `tool_calls` field, and that rendering differs by model family
+        (§40). `MAX_TOOL_ROUNDS` is a termination guarantee, not a
+        plan-size cap (§13)."""
         assert self._messages is not None
         self._pending = []
         for round_num in range(1, MAX_TOOL_ROUNDS + 1):
@@ -597,10 +656,7 @@ class AgentRunner:
             self._messages.append(
                 {
                     "role": "assistant",
-                    "content": (
-                        f'<tool_call>\n{{"name": "{call.name}", "arguments": {call.arguments}}}\n'
-                        "</tool_call>"
-                    ),
+                    "content": _render_tool_call(call.name, args, call.arguments),
                 }
             )
             self._messages.append({"role": "tool", "content": result})
