@@ -117,15 +117,18 @@ class ToolCallFormat(StrEnum):
 # unit) so switching models can't leave TOOL_CALL_FORMAT pointing at the
 # wrong wire syntax (§40).
 
-QUANTIZED_MODEL_ID = "unsloth/Qwen3-1.7B-GGUF"
-QUANTIZED_FILENAME = "Qwen3-1.7B-Q4_K_M.gguf"
-TOOL_CALL_FORMAT = ToolCallFormat.QWEN
-# QUANTIZED_MODEL_ID = "unsloth/Qwen3-0.6B-GGUF"
-# QUANTIZED_FILENAME = "Qwen3-0.6B-Q4_K_M.gguf"
-# TOOL_CALL_FORMAT = ToolCallFormat.QWEN
 # QUANTIZED_MODEL_ID = "unsloth/LFM2.5-1.2B-Instruct-GGUF"
 # QUANTIZED_FILENAME = "LFM2.5-1.2B-Instruct-Q4_K_M.gguf"
 # TOOL_CALL_FORMAT = ToolCallFormat.LFM
+QUANTIZED_MODEL_ID = "LiquidAI/LFM2.5-2.6B-GGUF"
+QUANTIZED_FILENAME = "LFM2.5-2.6B-Q4_K_M.gguf"
+TOOL_CALL_FORMAT = ToolCallFormat.LFM
+# QUANTIZED_MODEL_ID = "unsloth/Qwen3-1.7B-GGUF"
+# QUANTIZED_FILENAME = "Qwen3-1.7B-Q4_K_M.gguf"
+# TOOL_CALL_FORMAT = ToolCallFormat.QWEN
+# QUANTIZED_MODEL_ID = "unsloth/Qwen3-0.6B-GGUF"
+# QUANTIZED_FILENAME = "Qwen3-0.6B-Q4_K_M.gguf"
+# TOOL_CALL_FORMAT = ToolCallFormat.QWEN
 
 # §13: a termination guarantee sized for "one write per round" (every
 # sequential search-then-act step a compound request could produce), not a
@@ -197,6 +200,57 @@ When you have made every tool call the request needs, or if the request
 needs no tool call at all (a plain question), respond in plain text with no
 further tool calls.
 """
+
+SYSTEM_PROMPT = """\
+You are a household grocery inventory assistant.
+
+You have four tools:
+- sumac_find_inventory
+- sumac_consume_inventory
+- sumac_move_inventory
+- sumac_discover_inventory
+
+Use the tools to answer the person's request.
+
+When the person asks where an item is, call sumac_find_inventory with the
+item name as the query. For example, if they ask "where is the jam?",
+call sumac_find_inventory with {"query": "jam"}.
+
+For consume, move, or discover actions, first use sumac_find_inventory to
+find the relevant product and its current location and quantity. Only use
+product_id, location_id, amount, and unit exactly as returned by a tool.
+Never invent identifiers or quantities.
+
+When interpreting search results, distinguish between products that are
+actually the requested food and products that merely contain the search
+term.
+
+Include:
+- an exact match for the requested food;
+- named varieties, preparations, or forms of that food.
+
+Exclude:
+- prepared dishes that merely contain the food as an ingredient;
+- products where the search term is only part of an unrelated product name;
+- otherwise unrelated search results.
+
+For example, for "butter":
+- "Butter" -> include
+- "Salted Butter" -> include
+- "Unsalted Butter" -> include
+- "Homemade Clarified Butter" -> include
+- "Brussels Sprouts with Chestnuts and Honey Butter" -> exclude
+- "Peanut Butter" -> exclude, because peanut butter is a distinct food
+  rather than a variety of dairy butter
+
+Use the relevant included products to answer the person's request. Do not
+simply repeat every search result.
+
+Call one tool at a time. Wait for its result before deciding what to do next.
+
+When no more tool calls are needed, answer the person directly in plain text.
+"""
+
 
 _SELF_REVIEW_MESSAGE = (
     "Check the plan above against the original request. If it is correct, "
@@ -410,9 +464,9 @@ def _render_tool_call(name: str, arguments: dict, raw_arguments: str) -> str:
     used by the Qwen branch, `arguments` (already parsed) only by LFM's."""
     if TOOL_CALL_FORMAT is ToolCallFormat.LFM:
         # LFM2.5's own documented Pythonic syntax:
-        # <|tool_call_start|>[name(key="value", ...)]<|tool_call_end|>
+        # <|tool_call_start|>[name(key="value", ...)]<|tool_call_end|>\n
         args_text = ", ".join(f"{key}={_lfm_literal(value)}" for key, value in arguments.items())
-        return f"<|tool_call_start|>[{name}({args_text})]<|tool_call_end|>"
+        return f"<|tool_call_start|>[{name}({args_text})]<|tool_call_end|>\n"
     # QWEN (§28): byte-for-byte what the `{%- if message.tool_calls %}`
     # branch renders from a real `tool_calls` field. `raw_arguments` is
     # spliced in verbatim — already what `{{- tool_call.arguments }}`
@@ -644,6 +698,9 @@ class AgentRunner:
         for round_num in range(1, MAX_TOOL_ROUNDS + 1):
             request = self._build_request()
             print(f"\n=== REQUEST (round {round_num}) ===")
+            print("MESSAGES:")
+            for message in self._messages:
+                print(repr(message))
             print(repr(request))
             print(f"tool_schemas: {getattr(request, 'tool_schemas', None)!r}")
             print(f"tool_choice: {getattr(request, 'tool_choice', None)!r}")
@@ -678,6 +735,9 @@ class AgentRunner:
                 }
             )
             self._messages.append({"role": "tool", "content": result})
+            print("\n=== MESSAGES FOR NEXT ROUND ===")
+            for msg in self._messages:
+                print(repr(msg))
 
         # Round cap reached with no final reply — the accumulated plan (if
         # any) is still returned rather than raised, matching §13's framing
