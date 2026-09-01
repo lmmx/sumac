@@ -30,12 +30,29 @@ packages = ["src/sumac"]
 ask = [
     "mistralrs>=0.9.2",
 ]
+ask-cuda = [                          # local CUDA build for this machine's GPU — see scripts/build-mistralrs-cuda.sh
+    "mistralrs==0.9.2",
+]
 dev = [
     "pynacl>=1.5",
     "ruff>=0.6",
     "ty>=0.0.1a1",
     "pytest>=8",
     "hypothesis>=6",
+]
+
+[tool.uv]
+default-groups = ["dev"]
+conflicts = [
+    [
+        { group = "ask" },
+        { group = "ask-cuda" },
+    ],
+]
+
+[tool.uv.sources]
+mistralrs = [
+    { path = "vendor/wheels/mistralrs-0.9.2-cp310-abi3-manylinux_2_39_x86_64.whl", group = "ask-cuda" },
 ]
 
 [tool.ruff]
@@ -47,6 +64,3 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-
-[tool.uv]
-default-groups = ["ask", "dev"]
