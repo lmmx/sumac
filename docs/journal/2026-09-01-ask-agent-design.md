@@ -140,7 +140,11 @@ The requirement that prompted this update: after a preview, the human should be 
 
 **Rejected: sumac reconstructs the message history itself and resends the whole thing.** `ChatCompletionResponse` carries `agentic_tool_calls: list[AgenticToolCallRecord]` (round, name, arguments, result_content) but no `messages` field — the expanded per-round assistant/tool messages the server-side loop actually produced internally are not handed back to the caller. Rebuilding them well enough to append a correction and resend would mean sumac reconstructing tool-call IDs and message shapes for the model's own chat template, matching a wire format sumac does not own — the getting-started guide's "not a chat product" position (§4) is about not accumulating a *persisted* conversation across separate CLI invocations; it says nothing against a library-native mechanism for continuing one conversation within a single invocation's lifetime, and reconstructing that mechanism by hand duplicates something the SDK already does more reliably.
 
-**Adopted: an ephemeral, per-invocation `session_id`.** `agentic-runtime.md`: "Use `session_id` when your app needs continuity across requests: message history, tool records, media, and code-execution state." `sumac ask` mints one `session_id` (e.g. `str(uuid4())`) when the command starts, holds it only in process memory, and passes it on every `ChatCompletionRequest` for the duration of that one invocation — never written to disk, never read back on a later `sumac ask` call, so the "not a chat product" position from §4 is preserved at the granularity that matters: no history persists *between* invocations, only *within* one. The feedback loop becomes: append the human's typed correction as a new `{"role": "user", "content": ...}` message, call `send_chat_completion_request` again with the same `session_id`, and let mistral.rs's session state supply everything the model already knows about the original request and what it already proposed — sumac does not need to re-explain any of it. Sumac's own accumulated-plan list (§14) is cleared before each such call: a revision replaces the previous proposal rather than appending to it, since the model is being asked to reconsider the whole plan, not extend it. A small cap on the number of feedback rounds (a fixed constant, not user-configurable in a first pass) avoids an unbounded back-and-forth with no natural stopping point.
+**Adopted: an ephemeral, per-invocation `session_id`.** `agentic-runtime.md`: "Use `session_id` when your app needs continuity across requests: message history, tool records, media, and code-execution state." `sumac ask` mints one `session_id` (e.g. `str(uuid4())`) when the command starts, holds it only in process memory, and passes it on every `ChatCompletionRequest` for the duration of that one invocation — never written to disk, never read back on a later `sumac ask` call, so the "not a chat product" position from §4 is preserved at the granularity that matters: no history persists *between* invocations, only *within* one. The feedback loop becomes: append the human's typed correction as a new `{"role": "user", "content": ...}` message, call `send_chat_completion_request` again with the same `session_id`, and let mistral.rs's session state supply everything the model already knows about the original request and what it already proposed — sumac does not need to re-explain any of it. Sumac's own accumulated-plan list (§14) is cleared before each such call: a revision replaces the previous proposal rather than appending to it, since the model is being asked to reconsider the whole plan, not extend it.
+
+**No cap on the number of feedback rounds.** An earlier draft of this section proposed a small fixed cap on how many times the human could give feedback in one session, reasoned about as guarding against "an unbounded back-and-forth." That reasoning does not hold up: every round of feedback is the human spending their own local time and their own machine's CPU, at no cost to anything else, and no other command in this CLI is designed to stop responding to its own user after a fixed number of tries — `sumac correct` does not refuse a third correction, `sumac add` does not refuse a third attempt at an invocation it rejected twice. There is one real cap in this design, and it applies to something else entirely: `max_tool_rounds` (§9, §14 step 2), which bounds how many sequential tool calls the *model* can make while producing a single preview or a single revision. That cap exists to guarantee the call terminates — a model that never stops calling tools would otherwise hang the process — not to ration how much of the model's or the CLI's own time the human is allowed to use. `max_tool_rounds=20` is recommended as that termination guarantee: generous relative to §2's worked example (two searches plus four writes, six rounds), enough headroom for a request several times more compound before the cap is what stops a real request rather than a runaway loop.
+
+**A third, distinct cap: `self_review_rounds`, model-initiated rather than human-initiated.** Separate from both of the above is a self-review step — the model checking its own just-produced plan against the original sentence, revising if it finds a mismatch, before a human ever sees it. Mechanically this is the same continuation pattern as the human feedback loop (§14 step 4's "Feedback" branch): clear the accumulated list, send a message on the same `session_id`, let the model respond, replace the plan if it changed. The difference is who writes the message and who decides whether to do it again — human feedback is typed by a person who chooses each time whether it is worth another round; a self-review pass is a fixed message sumac sends itself (e.g. "Check the plan above against the original request. If it is correct, say so with no further tool calls. If not, revise it.") with nothing external gating whether it happens again. That absence of a human decision on each round is exactly why this one needs a cap and the feedback loop does not: an ungated automatic loop risks not converging — a small model oscillating between two plans rather than settling on one is a real, known failure mode, and each pass is a full extra local-inference round-trip the human is waiting on before seeing anything at all. Recommended default: `self_review_rounds=1` — one self-check pass, not zero (skips the check entirely) and not several (compounding latency against uncertain benefit for a model in the 0.6B-1.7B range, where confidence in self-critique quality is weakest). Configurable down to `0` (disabled, the plan from step 3 goes straight to the human) per the same "put model configuration somewhere sensible, changeable without touching agent logic" requirement §3/the originating request already states for model choice generally.
 
 ## 14. Concrete interaction shape
 
@@ -148,12 +152,13 @@ Design-level only, in the same sense as §9 — no code follows from this sectio
 
 1. `sumac ask "<sentence>"` mints `session_id = str(uuid4())`, kept in memory only.
 2. Sumac builds one `ChatCompletionRequest` — the system-role prompt from §9 plus the user's sentence, `tool_schemas` with `strict: true` per §9, `tool_choice=ToolChoice.Auto`, `max_tool_rounds` sized per §9's "one write per round" finding, `agent_permission=AgentPermission.Auto`, `session_id=session_id` — and calls `send_chat_completion_request`. Every mutating tool callback (`consume_inventory`/`move_inventory`/`discover_inventory`) calls the matching `decide.*` function against the real, current `ledger.build_inventory`/`config.build_config` state (so the plan reflects genuinely valid operations, warnings and all — a query that would raise `Rejected` still raises it here, surfacing the domain error to the model exactly as §3 already specifies) but does not call `store.append`; instead it appends the resolved call — which `decide.*` function, and the exact keyword arguments used to call it — to a plain list closed over by the orchestration layer, and returns a description of the resolved effect to the model as the tool result (so the model's own subsequent reasoning proceeds as if the write had happened).
-3. When the call returns — the model produced a final reply with no further tool call, or `max_tool_rounds` was reached — sumac renders the accumulated list. An empty list (a read-only request like "where is the jam?") skips straight to printing the model's final text and exiting; there is nothing to accept or reject. A non-empty list is rendered as a structured plan — reusing `render.py`'s existing table-building style (`print_log`, `print_doctor`) rather than the single `print_success(str)` call `cli.py`'s current stub uses (§8).
-4. For a non-empty plan, sumac prompts for one of: accept, reject, or free-text feedback.
+3. When the call returns — the model produced a final reply with no further tool call, or `max_tool_rounds` was reached — and the accumulated list is non-empty (§13's self-review has nothing to check for a read-only request, so this step is skipped when the model made no mutating tool calls), sumac runs up to `self_review_rounds` self-review passes (§13): send the fixed self-check message on the same `session_id`, and if the model's response contains new tool calls, clear and replace the accumulated list and repeat, up to the configured limit; a response with no new tool calls ends the loop early, before the limit.
+4. Sumac renders the accumulated list. An empty list (a read-only request like "where is the jam?") skips straight to printing the model's final text and exiting; there is nothing to accept or reject. A non-empty list is rendered as a structured plan — reusing `render.py`'s existing table-building style (`print_log`, `print_doctor`) rather than the single `print_success(str)` call `cli.py`'s current stub uses (§8).
+5. For a non-empty plan, sumac prompts for one of: accept, reject, or free-text feedback.
    - **Reject**: print nothing further, exit 0, nothing written. The `session_id` is discarded with the process.
-   - **Feedback**: clear the accumulated list, append the typed text as a new user message, call `send_chat_completion_request` again with the same `session_id`, and go to step 3 with the new response. Bounded by the round cap from §13.
+   - **Feedback**: clear the accumulated list, append the typed text as a new user message, call `send_chat_completion_request` again with the same `session_id`, and go to step 3 with the new response. Not capped (§13) — the human may give feedback as many times as they choose; only `max_tool_rounds=20` (per call, not per session) bounds any single one of these calls, as a termination guarantee rather than a limit on how many times the loop may run.
    - **Accept**: for each resolved call recorded in step 2, in the same order, call the matching `decide.*` function *again* — same keyword arguments, but against a *freshly reloaded* `ledger.build_inventory`/`config.build_config` and a fresh `occurred_at=datetime.now(UTC)` — rather than replaying the `Write` objects computed during the dry run. Then `store.append` each resulting write, printing any messages `decide.*` returns exactly as `cli.py`'s `add` command already does (cli.py:262-263).
-5. `--dry-run` (naming: the user's own "preview" and the more conventional Unix "dry run" name the same thing here, treated as synonyms in this entry) runs steps 1-3 only and exits — no accept/reject/feedback prompt, since there is nothing to act on the answer to. Useful non-interactively (no TTY to prompt against) and for iterating on a request's wording before ever risking a real commit.
+6. `--dry-run` (naming: the user's own "preview" and the more conventional Unix "dry run" name the same thing here, treated as synonyms in this entry) runs steps 1-4 only and exits — self-review (step 3) still runs, since its purpose is plan quality and a dry run's whole output *is* the plan, but there is no accept/reject/feedback prompt (step 5), since there is nothing to act on the answer to. Useful non-interactively (no TTY to prompt against) and for iterating on a request's wording before ever risking a real commit.
 
 Re-deciding on accept rather than replaying the dry run's `Write` objects verbatim is deliberate, not an oversight: `decide.decide_change`'s stock-shortfall handling (`docs/journal/2026-08-30_decide-pattern-data-integrity-upgrade.md` §3.5, "the shelf is authoritative, not the log") exists precisely to reconcile a decision against whatever the real holdings are *at commit time* — real time passes between a preview and an accept (at minimum, the time spent reading the preview; more if a feedback round happened), and something else could have changed the vault in between. Replaying stale `Write` objects computed during the dry run would bypass that reconciliation and could commit a `Counted` correction sized for inventory levels that no longer hold; re-invoking `decide.*` with the same arguments against current state gets the shelf-is-authoritative behaviour for free, the same way it already works for `sumac add`.
 
@@ -161,7 +166,230 @@ Re-deciding on accept rather than replaying the dry run's `Write` objects verbat
 
 - **A dry run's own tool calls do not see each other's not-yet-committed effects.** If a compound request's plan includes a second `find_inventory` search against a product or location an earlier step in the *same* dry run already proposed changing, that search still reads real, on-disk state — nothing was written, so there is nothing different for it to see. §9's rejected staged-inventory-overlay alternative would have solved this (and its counterpart for a live per-write-approval design), and remains available to build later if a real compound request is found to need it; it is not built for this entry's recommendation, on the grounds that no example so far (§2's ragu/tomatoes case included) actually re-queries a product it has already proposed changing within the same request.
 - **A revision (§13) discards the previous proposal rather than diffing against it.** The human sees a full new plan after feedback, not a highlighted delta from the one before. Acceptable for a first pass; worth revisiting if compound requests commonly need several small corrections rather than one.
-- **The feedback-round cap (§13) is unspecified** beyond "a small fixed constant" — no number is chosen by this entry.
+
+## 16. Implementation handoff
+
+§1-§15 record how this design was reached and why. What follows is written for an implementing agent starting cold, with no memory of the conversation that produced it — everything it needs to act on is restated here rather than referenced back. It is a specification of shapes, contracts, and content (tool schemas, class interfaces, prompt text, error mapping) — not a sequence of edit steps. Nothing in §16-§24 has been written to code; `cli.py`, `decide.py`, `ledger.py`, `config.py`, `models.py`, `render.py`, and `store.py` are exactly as described in the Current State section below, unchanged by this entry.
+
+**Module.** `cli.py`'s already-committed `ask` command (cli.py:373-404) imports `from sumac import llm` and calls `llm.AgentRunner(data_dir, key)`. That fixes the module's name (`sumac/llm.py`, a new file) and the entry class's name (`AgentRunner`) as a starting constraint, not a free choice — changing either means also changing `cli.py`'s import and call site, which this entry does not do. §19 below gives `AgentRunner` a richer interface than the single `.run(prompt) -> str` method `cli.py` currently calls; reconciling `cli.py`'s call site with that richer interface (or preserving `.run()` as a thin compatibility wrapper around it) is left to the implementing agent, called out again in §24.
+
+**Tool surface: four tools, not the three named in the MVP scope, and why.** The originating request's "MVP tools" list names three: find/search, consume, move. §2's reference example — the ragu/tomatoes request already committed to throughout §3 and §14 — needs a fourth: after the ragu is consumed from the freezer, it comes back as "ragu for one" in a Tupperware box; after the tin of tomatoes is consumed from the pantry, it comes back as a jam jar of tomatoes in the fridge. Neither can be expressed as a `move`: `models.InventoryChange`'s own shape ties a `MOVEMENT` to one `product_id`, one `Quantity`, moving from one `from_location` to one `to_location` (models.py:73-93) — there is no field for the product or unit changing in transit, because a movement is not a transformation. The fourth tool, `discover_inventory`, maps to `ChangeKind.DISCOVERY` (models.py:31), already exactly the "this new thing now exists here, with no claim about where it came from" event `sumac add discovery` uses today. This is a decision made by this entry, not left open: four tools, because the worked example the whole design has been validated against needs all four, and `purchase`/`waste`/`correction` remain out of scope exactly as the originating request specified (`decide.decide_correct` is not exposed as a tool at all in this design).
+
+## 17. Tool schemas
+
+All four as OpenAI-style function schemas, each with `"strict": true` (§7, §9 — required explicitly; not on by default for a custom tool). `amount` is typed `"string"`, not `"number"`, deliberately: `cli.py`'s own `add` command takes `amount: str` and parses it through `_parse_decimal` (cli.py, `_parse_decimal`) rather than accepting a numeric type, because `Decimal` needs an exact decimal string and JSON's number type does not guarantee one — the tool schemas keep the same convention `sumac add` already uses rather than introducing a second, JSON-number-based one.
+
+```json
+{
+  "type": "function",
+  "function": {
+    "name": "find_inventory",
+    "description": "Search current inventory by product name (partial, case-insensitive match). Returns every location currently holding a matching product, with its exact product_id, location_id, amount, and unit as sumac has them recorded. Call this before consuming, moving, or discovering any product — never guess a product_id, location_id, amount, or unit that has not been returned by this tool.",
+    "strict": true,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "query": {"type": "string", "description": "Product name or partial name, e.g. \"ragu\" or \"jam\"."}
+      },
+      "required": ["query"],
+      "additionalProperties": false
+    }
+  }
+}
+```
+
+```json
+{
+  "type": "function",
+  "function": {
+    "name": "consume_inventory",
+    "description": "Propose recording that some quantity of a product was used, eaten, or consumed from one location. product_id, unit, and from_location must be exact values already seen in a find_inventory result — never invented. Does not immediately alter inventory; the proposal is shown to the person for review before anything is written.",
+    "strict": true,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "product_id": {"type": "string"},
+        "amount": {"type": "string", "description": "Plain decimal string, e.g. \"1\" or \"0.5\"."},
+        "unit": {"type": "string"},
+        "from_location": {"type": "string"}
+      },
+      "required": ["product_id", "amount", "unit", "from_location"],
+      "additionalProperties": false
+    }
+  }
+}
+```
+
+```json
+{
+  "type": "function",
+  "function": {
+    "name": "move_inventory",
+    "description": "Propose recording that some quantity of a product was relocated from one location to another, unchanged — same product, same unit, only the location differs. If the product's identity, container, or unit changed (cooked, decanted, repackaged), use discover_inventory for the result instead of move_inventory.",
+    "strict": true,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "product_id": {"type": "string"},
+        "amount": {"type": "string"},
+        "unit": {"type": "string"},
+        "from_location": {"type": "string"},
+        "to_location": {"type": "string"}
+      },
+      "required": ["product_id", "amount", "unit", "from_location", "to_location"],
+      "additionalProperties": false
+    }
+  }
+}
+```
+
+```json
+{
+  "type": "function",
+  "function": {
+    "name": "discover_inventory",
+    "description": "Propose recording that some quantity of a product now exists at a location, with no claim about where it came from. Use this for a product whose identity, container, or unit changed since it was taken from inventory — a cooked dish, a decanted portion, a repackaged remainder — where the result cannot be expressed as a move. product_id may be a new name distinct from any product consumed earlier in this request.",
+    "strict": true,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "product_id": {"type": "string"},
+        "amount": {"type": "string"},
+        "unit": {"type": "string"},
+        "to_location": {"type": "string"}
+      },
+      "required": ["product_id", "amount", "unit", "to_location"],
+      "additionalProperties": false
+    }
+  }
+}
+```
+
+Each tool's required-field set matches `decide._ENDPOINT_SHAPE` (decide.py:42-48) for the `ChangeKind` it produces: `CONSUMPTION` is `(True, False)` — `from_location` required, `to_location` absent; `MOVEMENT` is `(True, True)` — both required; `DISCOVERY` is `(False, True)` — `to_location` required, `from_location` absent. This is not a coincidence to preserve by hand: it is the same shape constraint `decide._check_endpoint_shape` (decide.py:64) already enforces on the domain side, expressed a second time in the tool schema so a malformed call is rejected by strict-mode decoding before it ever reaches `decide.decide_change`.
+
+## 18. Tool callback behavior and result shapes
+
+`find_inventory`'s callback calls `ledger.build_inventory(data_dir, key)` and `ledger.load_locations_or_empty(data_dir, key)`, then filters `inventory.by_location` the same way `render.print_find` already does (render.py:169-190: substring match, case-insensitive, `product_id.lower() in pid.lower()`) rather than inventing a second matching rule. Returns a JSON string: `{"matches": [{"product_id": ..., "location_id": ..., "location_path": ..., "amount": ..., "unit": ...}, ...]}`, `location_path` via `config.location_path(locations, loc_id)` (config.py:256) so the model sees the same human-readable path `sumac find` shows, and an empty `matches` list (not an error) when nothing matches — mirroring `render.print_find`'s own "not found" case, which is not treated as failure there either.
+
+Each mutating tool's callback (`consume_inventory`/`move_inventory`/`discover_inventory`) parses `amount` via the same decimal-parsing rule `cli.py`'s `_parse_decimal` uses (cli.py, `_parse_decimal` — `Decimal(raw)`, catching `InvalidOperation`), builds the matching `ChangeKind` (`CONSUMPTION`/`MOVEMENT`/`DISCOVERY`), and calls `decide.decide_change` with that `kind` plus the tool's other arguments passed straight through as `product_id`/`amount`/`unit`/`from_location`/`to_location`, and `actor=paths.current_user()`, `occurred_at=datetime.now(UTC)`, `inventory=ledger.build_inventory(data_dir, key)`, `cfg=config.build_config(data_dir, key)` — the same four values `cli.py`'s `add` command already supplies (cli.py:246-249). Two outcomes:
+
+- **`decide_change` returns `(writes, messages)` without raising.** The callback does not call `store.append` on `writes` (§11 — that is what makes this a dry run). It appends one `ProposedWrite` (§19) built from the *resolved* call — the same `kind`/`product_id`/`amount`/`unit`/`from_location`/`to_location` just passed to `decide_change`, plus `messages` as `warnings` — to the orchestration's accumulated list, and returns a JSON string tool result describing the proposed effect as if it had happened: `{"status": "proposed", "product_id": ..., "amount": ..., "unit": ..., "from_location": ..., "to_location": ..., "warnings": [...]}`, so the model's own subsequent reasoning (e.g. a later step in the same compound request) proceeds on the assumption the write will land, consistent with §3's "use the actual results returned by Sumac."
+- **`decide_change` raises `Rejected`.** Nothing is appended to the accumulated list. The callback catches it and returns a JSON string tool result — `{"status": "rejected", "reason": e.reason, "detail": {k: str(v) for k, v in e.detail.items()}}` (`errors.Rejected.detail` is `dict[str, object]` and can hold non-JSON-serializable values such as `Decimal`; stringify every value before `json.dumps`, the same coercion `Rejected.__str__` already performs for its own message, errors.py:44) — back to the model as the tool result, per §3's "return the domain error to the model so it can recover or explain the problem," not as a raised exception that would end the request.
+
+No other exception type is expected from a mutating callback under normal operation — `decide.decide_change`'s own docstring names `Rejected` as the only thing it raises (decide.py, `decide_change` docstring). Anything else escaping a callback is a bug in the callback or in sumac's own domain code, not a modeled outcome, and should not be caught and stringified the same way — see §23.
+
+## 19. Orchestration interface
+
+Three small types in `sumac/llm.py`, none of which exist yet:
+
+```python
+@dataclass(frozen=True, slots=True)
+class ProposedWrite:
+    kind: ChangeKind
+    product_id: str
+    amount: Decimal
+    unit: str
+    from_location: str | None
+    to_location: str | None
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class AgentPlan:
+    reply_text: str
+    writes: tuple[ProposedWrite, ...]
+```
+
+`AgentPlan` is what §14's steps 3-5 render and act on — the single object a dry run, a preview, or a revision produces. `AgentRunner` is the class `cli.py` already names:
+
+```python
+class AgentRunner:
+    def __init__(self, data_dir: Path, key: bytes) -> None: ...
+    def propose(self, prompt: str) -> AgentPlan: ...
+    def revise(self, feedback: str) -> AgentPlan: ...
+    def commit(self, plan: AgentPlan) -> list[str]: ...
+```
+
+`__init__` constructs the `mistralrs.Runner` once (§21) with `tool_callbacks` bound to the four callbacks in §18, closed over `data_dir`/`key`. `propose` mints the per-invocation `session_id` (§13), sends the system prompt (§20) plus the user's sentence, runs up to `self_review_rounds` self-review passes internally (§13, §14 step 3) before returning, and returns the resulting `AgentPlan` — callers do not see the self-review passes happen. `revise` sends `feedback` as a new user message on the same `session_id` (§13), also running its own internal self-review passes, and raises if called before `propose` (no session to continue). `commit` is §14 step 5's "Accept" branch as a method: for each `ProposedWrite` in `plan.writes`, in order, call `decide.decide_change` again with the same resolved arguments against a freshly reloaded `Inventory`/`Config` and `occurred_at=datetime.now(UTC)` (§14's "re-decide, don't replay" reasoning), then `store.append` each resulting write, and return one human-readable summary string per write — `f"Recorded {kind.value} of {amount} {unit} {product_id}"`, matching `cli.py`'s own `add` command's success message exactly (cli.py:266) rather than inventing new wording for the same fact.
+
+This supersedes the `.run(prompt) -> str` contract `cli.py`'s current stub calls (§8's critique) — reconciling the two is explicitly left open, §24.
+
+## 20. System prompt
+
+A draft, not a final wording — needs tuning against an actual model's actual tool-calling behavior, which this entry has not done (§10, §16's own framing). Given as a concrete starting point rather than left unstated, since §7 found no API-level lever for any of the three behaviors it encodes (search-before-act, one tool call at a time, ask rather than guess):
+
+```text
+You are the tool-calling layer for a household grocery inventory. You can only
+act through the four tools you are given: find_inventory, consume_inventory,
+move_inventory, and discover_inventory. You have no other capability — no
+filesystem, no shell, no network, no code execution.
+
+Before consuming, moving, or discovering any product, call find_inventory to
+get its exact product_id, location_id, amount, and unit. Never invent a
+product_id, location_id, amount, or unit — use only what a tool result has
+just given you.
+
+If find_inventory returns more than one plausible match for what the person
+asked about, and nothing in their request distinguishes which one they mean,
+stop and ask them in plain text which one they mean, with no further tool
+call, rather than guessing.
+
+Call one tool at a time. After each tool call you will see its result before
+deciding the next one — use that result, do not assume what it will be in
+advance.
+
+If a product changed identity, container, or unit since it was taken from
+inventory (cooked, decanted, repackaged), record the result with
+discover_inventory, not move_inventory — move_inventory is only for the same
+product and unit changing location.
+
+If a tool result has status "rejected", the action was not valid — explain
+why in plain text, or try a corrected call if the correction is obvious from
+the rejection reason, rather than repeating the same call unchanged.
+
+When you have made every tool call the request needs, or if the request
+needs no tool call at all (a plain question), respond in plain text with no
+further tool calls.
+```
+
+Whether this is passed as a `{"role": "system", ...}` message is itself unconfirmed against a worked mistral.rs example (§10, §7) — assumed from OpenAI wire-format compatibility, to be verified against the actual chosen model's chat template once one is selected (§21).
+
+## 21. Model loading and configuration
+
+`Which.GGUF(quantized_model_id=..., quantized_filename=...)` over `Which.Plain(...) + in_situ_quant=...`, per §9's reasoning (avoids downloading an fp16 checkpoint before local requantization). No specific repository or filename is chosen by this entry — §9 named Qwen3 in the 0.6B-1.7B range as the class of model to try first, following mistral.rs's own GGUF documentation example (which uses an `unsloth/Qwen3-0.6B-GGUF`-style repository), but this entry has not run that model against the tool schemas in §17 and cannot confirm it calls tools reliably at that size. Selecting and recording a specific `quantized_model_id`/`quantized_filename` pair that has been empirically checked against §2's reference example is left to the implementing agent (§24).
+
+Getting the first model weights onto the machine needs a network fetch from Hugging Face's cache resolution — the getting-started guide's own words: "The first run downloads the weights into the Hugging Face cache." This is a one-time asset fetch, not a cloud inference call, but it is still network activity the first time `sumac ask` (or `--dry-run`) runs on a machine, worth a visible message before `Runner` construction begins (e.g. "Downloading <model> (first run only)...") rather than a silent multi-minute pause — no other sumac command touches the network at all, so a `sumac ask` first-run pause with no explanation would look like a hang.
+
+Configuration values named by this entry so far — the model identifier/filename, `max_tool_rounds=20` (§13), `self_review_rounds=1` (§13) — are recommended to live as named constants at the top of `sumac/llm.py`, matching how `paths.py` keeps its own fixed values as module-level constants (`VAULT_FILENAME`, `CONFIG_FILENAME`, `LOG_DIRNAME`, paths.py:14-16) rather than scattering them through function bodies. An env-var override (matching `DataDirOption`'s existing `envvar="SUMAC_DATA_DIR"` pattern, cli.py:39-40) is a reasonable later addition, not required for a first pass.
+
+## 22. Testability
+
+`mistralrs.Runner` is a compiled extension type (`mistralrs.abi3.so`, confirmed by the installed package's file layout) — it cannot be instantiated cheaply or driven deterministically in a unit test the way `Config`/`Inventory` can. `AgentRunner`'s constructor should accept its underlying runner through a narrow, structurally-typed interface rather than importing and depending on `mistralrs.Runner` concretely everywhere it's used:
+
+```python
+class SendsCompletions(Protocol):
+    def send_chat_completion_request(
+        self, request: mistralrs.ChatCompletionRequest, model_id: str | None = None
+    ) -> mistralrs.ChatCompletionResponse: ...
+```
+
+Production code passes a real `mistralrs.Runner` (which already satisfies this shape structurally); tests pass a small hand-built fake whose `send_chat_completion_request` returns canned response objects (or minimal stand-ins exposing the same `.choices[0].message.{content,tool_calls}` attributes `AgentRunner`'s code actually reads) to drive the tool-callback dispatch path deterministically — no real model, no real inference, no GGUF download — while still exercising real `decide.decide_change`/`store.append` calls against a real encrypted `data_dir`/`key` pair, using the same `data_dir`/`key`/`osuser` fixtures every other test module already uses (tests/conftest.py). This mirrors the originating request's own requirement, restated in §6: "separating orchestration... from inference... so the orchestration can be driven by a fake model/fake tool-call sequence in tests." A new `tests/test_llm.py`, following the existing one-test-file-per-module convention (`tests/test_decide.py`, `tests/test_ledger.py`, ...), is where this belongs; none exists yet.
+
+## 23. Error-handling boundary
+
+Two different places an exception can occur, and they should not be handled the same way. §18 already draws this line for `Rejected` specifically; restated here as the general rule, because it is exactly what the already-committed `cli.py` stub gets wrong (Stubbed, below): a `Rejected` raised *inside* a tool callback, while the model is still proposing (`propose`/`revise`, §19), is expected and recoverable — caught, turned into a `{"status": "rejected", ...}` tool result, and handed back to the model, never propagated as a Python exception out of `send_chat_completion_request`. A `Rejected` (or any other `SumacError`) raised during `commit` (§19), after the human has already reviewed and accepted the plan, is not a modeled outcome the model gets a chance to react to — the human is no longer in a position to revise anything, the loop is over — and should propagate normally, the same way `cli.py`'s `add` command already lets `decide_change`'s `Rejected` propagate to `cli.main`'s existing top-level handler (cli.py, `main`) rather than being caught and reworded. `cli.py`'s current `ask` stub's blanket `except Exception` (cli.py:402-404) does not draw this distinction at all — it would catch and reword a `commit`-time `Rejected` exactly the way it catches a genuine bug, which is the thing to specifically not carry forward into whatever replaces this stub (§24).
+
+## 24. Left to the implementing agent
+
+Restated from where each was first raised, gathered here as the working list:
+
+- Reconciling `cli.py`'s existing `AgentRunner(data_dir, key).run(prompt) -> str` call site with §19's richer `propose`/`revise`/`commit` interface — including where the interactive accept/reject/feedback loop (§14) itself lives: as logic inside `cli.py`'s `ask` command, or as a separate function in `llm.py` that `cli.py` calls into, matching the existing pattern of keeping `cli.py` thin and pushing logic into dedicated, independently-testable modules (`decide.py`, `render.py`) (§8, §19).
+- A specific, empirically-checked `quantized_model_id`/`quantized_filename` pair (§21) — not chosen by this entry, only the class of model and the loading mechanism.
+- Tuning §20's system prompt against that model's actual behavior on §2's reference example and on simpler single-write requests.
+- Confirming a system-role message is honored by mistral.rs's Python SDK the way `user`/`assistant`/`tool` roles are (§10, §20) — unverified here.
+- Confirming `agent_approval_callback` gates a `tool_callbacks`-registered tool the way `permissions-and-approvals.mdx`'s prose says it does (§10) — moot for the recommended default design (§12 demotes it to optional, unused), but relevant again if defense-in-depth per-write approval is ever added around `commit` (§12).
+- Whether `--dry-run` needs a short flag alias, and the exact flag/option names for accept/reject/feedback at the interactive prompt (§14 describes the three outcomes, not the literal prompt text or keybindings).
+- Rendering: a concrete `render.py` addition (or a new function in `llm.py`) for an `AgentPlan`'s table, in the style of `print_log`/`print_doctor` (§14 step 4, §18) — no such function exists yet, and its exact columns/layout are not specified here beyond "structured, not a single string."
 
 ---
 
@@ -203,6 +431,10 @@ This entry's format is scoped by `docs/JOURNAL.md` to repository state. §7-§10
 - No source examined for this entry (the installed 0.9.2 `.pyi` stub or the fetched `docs/src/content/docs/guides/agents/*` pages) states whether `AgentToolApprovalDecision.approve(remember_for_session=True)` has a session to scope to across the internal rounds of one `send_chat_completion_request` call made without an explicit `session_id` — §9's proposed fast-forward escape hatch for a compound `sumac ask` request (four writes in the ragu/tomatoes example) depends on a specific answer to this that this entry did not obtain (docs/journal/2026-09-01-ask-agent-design.md §10).
 - No fetched example includes a `{"role": "system", ...}` message in a `Runner.send_chat_completion_request` call — every example examined for §7 uses only `user`/`assistant`/`tool` roles. §9's design places the entirety of "search before acting," "one action per turn," and "ask when ambiguous" (§3's behavioral requirements) into a system-role message, on the grounds that §7 found no `tool_choice` value in the Python SDK's `ToolChoice` enum capable of enforcing any of the three — that placement is inferred from OpenAI wire-format compatibility, not confirmed against a worked mistral.rs example.
 - No fetched example exercises `agent_approval_callback`'s `AgentToolMetadata.kind` against a custom (`tool_callbacks`-registered) tool, so whether it reports as `AgentToolKind.Custom`, `.External`, or another member of that enum is unconfirmed — material if §9's approval policy needs to branch on `call.tool.kind` (rather than on `call.tool.label`, i.e., the tool name) to tell sumac's own tools apart from a built-in tool enabled on the same `Runner`.
+- None of §16-§24's named types exist: no `ProposedWrite` or `AgentPlan` dataclass, no `SendsCompletions` protocol, and `AgentRunner` has no `propose`/`revise`/`commit` methods — `sumac/llm.py` does not exist at all (repeated from above; restated here because §19 gives these names and signatures specifically, not present anywhere in the tree to check against).
+- No JSON tool schema for `find_inventory`, `consume_inventory`, `move_inventory`, or `discover_inventory` exists anywhere in the repository (no match for any of those four names outside `docs/journal/2026-09-01-ask-agent-design.md` itself) — §17's schemas are proposed text, not extracted from an implementation.
+- No system-prompt text for the agent exists anywhere in the repository — §20's draft is the only text of this kind in the tree, and is explicitly unverified against a real model's behavior (§20, §24).
+- `render.py` has no function taking an `AgentPlan` or a list of `ProposedWrite`s (confirmed by the same full-file check as the bullet above it) — §18/§24's proposed rendering has no implementation to point to.
 
 ## Divergence
 
