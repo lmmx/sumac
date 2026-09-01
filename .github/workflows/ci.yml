@@ -15,8 +15,14 @@ jobs:
           enable-cache: true
       # ask-cuda is a local GPU build (vendor/wheels/*.whl is gitignored and
       # conflicts with ask by design) — CI runs the CPU fallback (ask) instead.
-      - run: uv sync --all-groups --no-group ask-cuda
-      - run: uv run ruff format --check .
-      - run: uv run ruff check .
-      - run: uv run ty check
-      - run: uv run pytest
+      # --frozen: install from the committed uv.lock as-is. Without it, `uv
+      # sync`/`uv run` re-resolve the full dependency graph (this lock uses a
+      # relative exclude-newer-span, so it's never considered "up to date"),
+      # and resolution touches ask-cuda's local wheel source even when
+      # --no-group excludes it from install — which fails here since the
+      # gitignored wheel was never checked out.
+      - run: uv sync --frozen --all-groups --no-group ask-cuda
+      - run: uv run --no-sync ruff format --check .
+      - run: uv run --no-sync ruff check .
+      - run: uv run --no-sync ty check
+      - run: uv run --no-sync pytest
