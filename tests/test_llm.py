@@ -139,6 +139,65 @@ def test_find_inventory_no_match_returns_empty_list(
     assert result["matches"] == []
 
 
+def _seed_freezer_and_fridge_butters(data_dir: Path, key: bytes, osuser: str) -> None:
+    config.add_location(data_dir, key, osuser, Location(id="freezer", name="Freezer"))
+    config.add_location(data_dir, key, osuser, Location(id="fridge", name="Fridge"))
+    # Products are unregistered — `decide_change` auto-registers under the
+    # exact product_id string passed below, which is all `_sumac_find_
+    # inventory` needs (it matches/returns raw product_id, not a `Product`).
+    for product_id, unit, loc in (
+        ("Butternut Box", "pack", "freezer"),
+        ("Salted Butter", "block", "freezer"),
+        ("Butter", "packet", "fridge"),
+    ):
+        _apply_change(
+            data_dir,
+            key,
+            osuser,
+            kind=ChangeKind.PURCHASE,
+            product_id=product_id,
+            amount=Decimal(1),
+            unit=unit,
+            from_location=None,
+            to_location=loc,
+        )
+
+
+def test_find_inventory_excludes_substring_only_match_by_default(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    """Real usage: `sumac ask "where is the butter?"` returned "Butternut
+    Box Dog Food" alongside actual butter products, and a 0.6B model picked
+    it as the answer. "butter" is a substring of "Butternut" but not a
+    whole word there, so it's noise a query for "butter" shouldn't surface
+    at all while a real whole-word match exists (§29)."""
+    _seed_freezer_and_fridge_butters(data_dir, key, osuser)
+    agent, _fake = _make_agent([], data_dir, key)
+
+    result = json.loads(
+        agent.tool_callbacks["sumac_find_inventory"]("sumac_find_inventory", {"query": "butter"})
+    )
+
+    assert [m["product_id"] for m in result["matches"]] == ["Butter", "Salted Butter"]
+
+
+def test_find_inventory_falls_back_to_substring_when_no_whole_word_match(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    """The whole-word-only narrowing must not make a genuine partial search
+    return nothing — "nut" matches no product as a whole word here, only
+    as a substring of "Butternut", so that substring match should still
+    come back rather than an empty result."""
+    _seed_freezer_and_fridge_butters(data_dir, key, osuser)
+    agent, _fake = _make_agent([], data_dir, key)
+
+    result = json.loads(
+        agent.tool_callbacks["sumac_find_inventory"]("sumac_find_inventory", {"query": "nut"})
+    )
+
+    assert [m["product_id"] for m in result["matches"]] == ["Butternut Box"]
+
+
 # --- propose -------------------------------------------------------------
 
 

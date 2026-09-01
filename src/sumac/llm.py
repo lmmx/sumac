@@ -75,6 +75,7 @@ behavior (§7), so behavior here is the same shape either way.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -92,8 +93,10 @@ from sumac.models import ChangeKind
 # Not empirically checked against the tool schemas below (§21, §24) — pick a
 # different GGUF repo/file here if this one doesn't call tools reliably.
 
-QUANTIZED_MODEL_ID = "unsloth/Qwen3-0.6B-GGUF"
-QUANTIZED_FILENAME = "Qwen3-0.6B-Q4_K_M.gguf"
+QUANTIZED_MODEL_ID = "unsloth/Qwen3-1.7B-GGUF"
+QUANTIZED_FILENAME = "Qwen3-1.7B-Q4_K_M.gguf"
+# QUANTIZED_MODEL_ID = "unsloth/Qwen3-0.6B-GGUF"
+# QUANTIZED_FILENAME = "Qwen3-0.6B-Q4_K_M.gguf"
 
 # §13: a termination guarantee sized for "one write per round" (every
 # sequential search-then-act step a compound request could produce), not a
@@ -159,11 +162,15 @@ _FIND_INVENTORY_SCHEMA = {
     "function": {
         "name": "sumac_find_inventory",
         "description": (
-            "Search current inventory by product name (partial, case-insensitive "
-            "match). Returns every location currently holding a matching product, "
-            "with its exact product_id, location_id, amount, and unit as sumac has "
-            "them recorded. Call this before consuming, moving, or discovering any "
-            "product — never guess a product_id, location_id, amount, or unit that "
+            "Search current inventory by product name, case-insensitive, "
+            'matching whole words by default ("butter" matches "Salted '
+            'Butter" but not "Butternut"; falls back to any substring '
+            "match if nothing matches as a whole word). Ordered with the "
+            "closest matches first. Returns every location currently "
+            "holding a matching product, with its exact product_id, "
+            "location_id, amount, and unit as sumac has them recorded. Call "
+            "this before consuming, moving, or discovering any product — "
+            "never guess a product_id, location_id, amount, or unit that "
             "has not been returned by this tool."
         ),
         "strict": True,
@@ -281,6 +288,18 @@ _KIND_BY_TOOL = {
     "sumac_discover_inventory": ChangeKind.DISCOVERY,
 }
 
+
+def _find_match_rank(product_id: str, query_lower: str) -> int:
+    """0 = exact match, 1 = query appears as a whole word, 2 = any other
+    substring match (e.g. "butter" inside "Butternut")."""
+    pid_lower = product_id.lower()
+    if pid_lower == query_lower:
+        return 0
+    if re.search(rf"\b{re.escape(query_lower)}\b", pid_lower):
+        return 1
+    return 2
+
+
 # --- Orchestration types (§19) ----------------------------------------------
 
 
@@ -326,18 +345,32 @@ class SendsCompletions(Protocol):
     ) -> mistralrs.ChatCompletionResponse: ...
 
 
-def _print_usage(response: mistralrs.ChatCompletionResponse) -> None:
-    """Per-round token/timing numbers straight from mistral.rs's own `Usage`
-    (never computed by sumac) — for diagnosing where wall time actually goes
-    (model load vs. inference vs. round count), not sumac's own guess at it.
-    Printed unconditionally for now; no quieter mode exists yet. A no-op for
-    a fake `SendsCompletions` in tests, which has no real `.usage` to report."""
+def _round_preview(message: mistralrs.ResponseMessage, limit: int = 100) -> str:
+    """What the model actually did this round, truncated — a tool call's
+    name and arguments, or its plain-text reply. §31: the trace table alone
+    didn't say which round was which without cross-referencing by hand."""
+    if message.tool_calls:
+        call = message.tool_calls[0].function
+        text = f"tool call: {call.name}({call.arguments})"
+    else:
+        text = (message.content or "").strip().replace("\n", " ")
+    return text if len(text) <= limit else text[:limit] + "..."
+
+
+def _print_usage(response: mistralrs.ChatCompletionResponse, round_num: int) -> None:
+    """Per-round token/timing numbers from mistral.rs's own `Usage`, labeled
+    with `round_num` and a preview of what the round actually produced
+    (§30/§31 — unlabeled, content-free rounds made this "impossible to
+    trace"). No-op for a fake `SendsCompletions` in tests, which has no
+    real `.usage`."""
     usage = getattr(response, "usage", None)
     if usage is None:
         return
+    preview = _round_preview(response.choices[0].message)
     render.console.print(
-        f"[dim]{usage.prompt_tokens} prompt + {usage.completion_tokens} completion tokens, "
-        f"{usage.avg_compl_tok_per_sec:.1f} tok/s, {usage.total_time_sec:.1f}s[/dim]"
+        f"[dim]round {round_num}: {usage.prompt_tokens} prompt + "
+        f"{usage.completion_tokens} completion tokens, "
+        f"{usage.avg_compl_tok_per_sec:.1f} tok/s, {usage.total_time_sec:.1f}s — {preview}[/dim]"
     )
 
 
@@ -396,8 +429,21 @@ class AgentRunner:
 
     def _sumac_find_inventory(self, _name: str, args: dict) -> str:
         query = str(args.get("query", ""))
+        query_lower = query.lower()
         inventory = ledger.build_inventory(self._data_dir, self._key)
         locations = ledger.load_locations_or_empty(self._data_dir, self._key)
+        ranked = [
+            (_find_match_rank(pid, query_lower), loc_id, pid, qty)
+            for loc_id, entries in inventory.by_location.items()
+            for pid, qty in entries.items()
+            if query_lower in pid.lower()
+        ]
+        # Whole-word matches only by default (§29) — "butter" should not
+        # return "Butternut Box Dog Food". Falls back to substring-only
+        # matches when there is no whole-word match at all, so a genuine
+        # partial search still returns something rather than nothing.
+        narrowed = [m for m in ranked if m[0] <= 1]
+        found = sorted(narrowed or ranked, key=lambda item: (item[0], item[2], item[1]))
         matches = [
             {
                 "product_id": pid,
@@ -406,9 +452,7 @@ class AgentRunner:
                 "amount": str(qty.amount),
                 "unit": qty.unit,
             }
-            for loc_id, entries in sorted(inventory.by_location.items())
-            for pid, qty in sorted(entries.items())
-            if query.lower() in pid.lower()
+            for _rank, loc_id, pid, qty in found
         ]
         return json.dumps({"matches": matches})
 
@@ -502,26 +546,19 @@ class AgentRunner:
         )
 
     def _run_loop(self) -> AgentPlan:
-        """Drives the round-trip sumac now owns instead of mistral.rs's
-        server-side loop: send the accumulated `self._messages`, and if the
-        model asks for a tool call, dispatch it directly and append the
-        exchange (`examples/python/tool_call.py`'s shape — an `assistant`
-        message carrying `{"name", "parameters"}` as its content, then a
-        plain-string `tool` message) before sending again. Only the first
-        tool call in a response is executed, matching the server-side loop's
-        own documented behavior (module docstring) — the system prompt (§20)
-        also asks the model for one call per turn. `MAX_TOOL_ROUNDS` bounds
-        this loop the way `ChatCompletionRequest.max_tool_rounds` bounded the
-        server-side one (§13) — a termination guarantee, not a plan-size cap.
-        Every dispatched call is appended to `self._trace` (never reset here,
-        unlike `self._pending` — `propose`/`revise` reset and read it, so a
-        self-review pass's calls stay part of the same trace as the pass it
-        reviewed)."""
+        """Client-side tool-calling loop (§25/§26/§27/§28 — see the journal
+        for why). The assistant message for a dispatched call is rendered as
+        `<tool_call>\\n{"name": ..., "arguments": ...}\\n</tool_call>` (§28) —
+        the model's own native tag format, hand-built here because the
+        Python bindings drop a real `tool_calls` field but pass `content`
+        through unchanged, so this is byte-for-byte what the chat template
+        would have produced from a real `tool_calls` field. `MAX_TOOL_ROUNDS`
+        is a termination guarantee, not a plan-size cap (§13)."""
         assert self._messages is not None
         self._pending = []
-        for _ in range(MAX_TOOL_ROUNDS):
+        for round_num in range(1, MAX_TOOL_ROUNDS + 1):
             response = self._runner.send_chat_completion_request(self._build_request())
-            _print_usage(response)
+            _print_usage(response, round_num)
             message = response.choices[0].message
             if not message.tool_calls:
                 self._messages.append({"role": "assistant", "content": message.content or ""})
@@ -534,7 +571,10 @@ class AgentRunner:
             self._messages.append(
                 {
                     "role": "assistant",
-                    "content": json.dumps({"name": call.name, "parameters": args}),
+                    "content": (
+                        f'<tool_call>\n{{"name": "{call.name}", "arguments": {call.arguments}}}\n'
+                        "</tool_call>"
+                    ),
                 }
             )
             self._messages.append({"role": "tool", "content": result})

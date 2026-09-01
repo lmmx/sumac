@@ -415,10 +415,13 @@ def ask(
         if not plan.writes:
             if plan.reply_text:
                 render.console.print(plan.reply_text)
+            if dry_run:
+                render.console.print("[dim](--dry-run: this request produced no writes)[/dim]")
             return
 
         render.print_plan(plan)
         if dry_run:
+            render.console.print("[dim](--dry-run: plan shown above, nothing written)[/dim]")
             return
 
         answer = typer.prompt("[a]ccept / [r]eject / or type feedback", default="a").strip()

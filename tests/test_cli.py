@@ -567,6 +567,23 @@ def test_ask_read_only_reply_prints_text_and_does_not_prompt(
     assert "the jam is in the pantry" in result.output
 
 
+def test_ask_dry_run_on_read_only_request_still_shows_dry_run_indicator(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read-only request has no writes to withhold either way, so
+    `--dry-run` and a normal run produce identical output unless something
+    says otherwise — this line is that something."""
+    _run(data_dir, "init")
+    plan = llm.AgentPlan(reply_text="the jam is in the pantry", writes=())
+    _patch_agent_runner(monkeypatch, [plan])
+
+    result = _run(data_dir, "ask", "where is the jam?", "--dry-run")
+
+    assert result.exit_code == 0, result.output
+    assert "the jam is in the pantry" in result.output
+    assert "--dry-run" in result.output
+
+
 def test_ask_shows_tool_call_trace_before_reply(
     data_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -603,6 +620,10 @@ def test_ask_dry_run_shows_plan_and_never_commits(
     assert "consumption" in result.output
     assert "jam" in result.output
     assert fake_cls.plans == []  # propose() was called, revise()/commit() were not
+    # A prior run showed no visible difference between --dry-run and a
+    # normal invocation for a read-only request, making the flag look like
+    # it did nothing; an explicit line now confirms it was honored.
+    assert "--dry-run" in result.output
 
 
 def test_ask_accept_commits_and_prints_summary(
