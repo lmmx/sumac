@@ -80,27 +80,45 @@ class ToolCallFormat(StrEnum):
 
 # --- Configuration -----------------------------------------------------------
 # Not empirically checked against every tool schema below for every model —
-# pick a different GGUF repo/file here if this one doesn't call tools
-# reliably. id/filename/format travel together as one block (comment/
-# uncomment as a unit) so switching models can't leave TOOL_CALL_FORMAT
-# pointing at the wrong wire syntax.
+# switching is meant to be cheap precisely because reliability varies
+# request to request (see the design journal's real-run comparisons); a
+# `ModelPreset` bundles a GGUF repo/file with the wire format its chat
+# template expects, so picking one can't leave `ToolCallFormat` pointing
+# at the wrong syntax the way the old comment/uncomment blocks could.
 
-# QUANTIZED_MODEL_ID = "LiquidAI/LFM2.5-2.6B-GGUF"
-# QUANTIZED_FILENAME = "LFM2.5-2.6B-Q4_K_M.gguf"
-# TOOL_CALL_FORMAT = ToolCallFormat.LFM
-QUANTIZED_MODEL_ID = "unsloth/Qwen3-4B-Instruct-2507-GGUF"
-QUANTIZED_FILENAME = "Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
-TOOL_CALL_FORMAT = ToolCallFormat.QWEN
 
-# QUANTIZED_MODEL_ID = "unsloth/LFM2.5-1.2B-Instruct-GGUF"
-# QUANTIZED_FILENAME = "LFM2.5-1.2B-Instruct-Q4_K_M.gguf"
-# TOOL_CALL_FORMAT = ToolCallFormat.LFM
-# QUANTIZED_MODEL_ID = "unsloth/Qwen3-1.7B-GGUF"
-# QUANTIZED_FILENAME = "Qwen3-1.7B-Q4_K_M.gguf"
-# TOOL_CALL_FORMAT = ToolCallFormat.QWEN
-# QUANTIZED_MODEL_ID = "unsloth/Qwen3-0.6B-GGUF"
-# QUANTIZED_FILENAME = "Qwen3-0.6B-Q4_K_M.gguf"
-# TOOL_CALL_FORMAT = ToolCallFormat.QWEN
+@dataclass(frozen=True, slots=True)
+class ModelPreset:
+    name: str
+    quantized_model_id: str
+    quantized_filename: str
+    tool_call_format: ToolCallFormat
+
+
+MODEL_PRESETS: tuple[ModelPreset, ...] = (
+    ModelPreset("qwen3-4b", "unsloth/Qwen3-4B-Instruct-2507-GGUF",
+                "Qwen3-4B-Instruct-2507-Q4_K_M.gguf", ToolCallFormat.QWEN),
+    ModelPreset("lfm2.5-2.6b", "LiquidAI/LFM2.5-2.6B-GGUF",
+                "LFM2.5-2.6B-Q4_K_M.gguf", ToolCallFormat.LFM),
+    ModelPreset("lfm2.5-1.2b", "unsloth/LFM2.5-1.2B-Instruct-GGUF",
+                "LFM2.5-1.2B-Instruct-Q4_K_M.gguf", ToolCallFormat.LFM),
+    ModelPreset("qwen3-1.7b", "unsloth/Qwen3-1.7B-GGUF",
+                "Qwen3-1.7B-Q4_K_M.gguf", ToolCallFormat.QWEN),
+    ModelPreset("qwen3-0.6b", "unsloth/Qwen3-0.6B-GGUF",
+                "Qwen3-0.6B-Q4_K_M.gguf", ToolCallFormat.QWEN),
+)  # fmt: skip
+
+_MODEL_PRESETS_BY_NAME: dict[str, ModelPreset] = {p.name: p for p in MODEL_PRESETS}
+
+
+def model_preset(name: str) -> ModelPreset:
+    """Raises `KeyError` for an unknown name — callers taking a name from a
+    person (a CLI retry prompt) should catch it and show `MODEL_PRESETS`'
+    own names back, not let a typo surface as a raw traceback."""
+    return _MODEL_PRESETS_BY_NAME[name]
+
+
+DEFAULT_MODEL_PRESET = MODEL_PRESETS[0]
 
 # A termination guarantee sized for "one write per round" (every sequential
 # search-then-act step a compound request could produce), not a cap on how
@@ -109,11 +127,6 @@ MAX_TOOL_ROUNDS = 20
 
 # One self-check pass by default; 0 disables it.
 SELF_REVIEW_ROUNDS = 1
-
-# Passed as ChatCompletionRequest.model — unconfirmed whether this needs to
-# match the loaded model's own id, kept equal to it since nothing has shown
-# otherwise.
-MODEL_ID = QUANTIZED_MODEL_ID
 
 
 # --- Query classification ----------------------------------------------------
@@ -446,14 +459,17 @@ def _lfm_literal(value: object) -> str:
     return f'"{escaped}"'
 
 
-def _render_tool_call(name: str, arguments: dict, raw_arguments: str) -> str:
+def _render_tool_call(
+    name: str, arguments: dict, raw_arguments: str, tool_call_format: ToolCallFormat
+) -> str:
     """Hand-renders exactly what the loaded model's own GGUF chat template
     would produce for a completed tool call — see `ToolCallFormat`'s
     docstring for why this can't just pass a real `tool_calls` field
-    through. `TOOL_CALL_FORMAT` selects which template convention to
-    target; `raw_arguments` (the model's own emitted JSON string) is only
-    used by the Qwen branch, `arguments` (already parsed) only by LFM's."""
-    if TOOL_CALL_FORMAT is ToolCallFormat.LFM:
+    through. `tool_call_format` (the active `AgentRunner`'s `ModelPreset`)
+    selects which template convention to target; `raw_arguments` (the
+    model's own emitted JSON string) is only used by the Qwen branch,
+    `arguments` (already parsed) only by LFM's."""
+    if tool_call_format is ToolCallFormat.LFM:
         # LFM2.5's own documented Pythonic syntax:
         # <|tool_call_start|>[name(key="value", ...)]<|tool_call_end|>
         args_text = ", ".join(f"{key}={_lfm_literal(value)}" for key, value in arguments.items())
@@ -513,15 +529,16 @@ def _print_usage(response: mistralrs.ChatCompletionResponse, round_num: int) -> 
     )
 
 
-def _build_runner() -> mistralrs.Runner:
+def _build_runner(model: ModelPreset) -> mistralrs.Runner:
     # No `tool_callbacks` here — see the module docstring for why:
     # `AgentRunner` dispatches tool calls itself instead (`_run_loop`).
     render.console.print(
-        f"[dim]Loading {QUANTIZED_MODEL_ID} (first run downloads it; may take a while)...[/dim]"
+        f"[dim]Loading {model.quantized_model_id} "
+        "(first run downloads it; may take a while)...[/dim]"
     )
     which = mistralrs.Which.GGUF(
-        quantized_model_id=QUANTIZED_MODEL_ID,
-        quantized_filename=QUANTIZED_FILENAME,
+        quantized_model_id=model.quantized_model_id,
+        quantized_filename=model.quantized_filename,
     )
     # `Which.GGUF` is a nested dataclass, not a `Which` subclass, in the
     # installed 0.9.2 stub — the mismatch below is a stub-modeling gap, not a
@@ -542,11 +559,13 @@ class AgentRunner:
         data_dir: Path,
         key: bytes,
         *,
+        model: ModelPreset = DEFAULT_MODEL_PRESET,
         runner: SendsCompletions | None = None,
         debug: bool = False,
     ) -> None:
         self._data_dir = data_dir
         self._key = key
+        self._model = model
         self._debug = debug
         self._messages: list[dict[str, str]] | None = None
         self._kind: QueryKind | None = None
@@ -567,7 +586,7 @@ class AgentRunner:
             # iterator when `stream=True`; `_build_request` never sets it, so
             # narrowing to the non-streaming `SendsCompletions` shape here is
             # safe for every request this class actually sends.
-            else cast(SendsCompletions, _build_runner())
+            else cast(SendsCompletions, _build_runner(model))
         )
 
     # -- tool callbacks -------------------------------------------------------
