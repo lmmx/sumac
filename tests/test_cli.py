@@ -13,7 +13,7 @@ from typer.testing import CliRunner
 
 from sumac import ledger, llm, paths, queue, store
 from sumac import vault as sumac_vault
-from sumac.cli import app
+from sumac.cli import _decision_options, app
 from sumac.errors import RetireNonemptyError, VaultExistsError
 from sumac.models import ChangeKind
 
@@ -589,7 +589,7 @@ def test_another_user_cannot_write_into_alices_log(
 # a real model or GGUF download.
 
 
-def _consumption_plan(amount: str = "1") -> llm.AgentPlan:
+def _consumption_plan(amount: str = "1", current_amount: str | None = None) -> llm.AgentPlan:
     return llm.AgentPlan(
         reply_text=f"consumed {amount} jar of jam",
         writes=(
@@ -600,6 +600,7 @@ def _consumption_plan(amount: str = "1") -> llm.AgentPlan:
                 unit="jar",
                 from_location="pantry",
                 to_location=None,
+                current_amount=Decimal(current_amount) if current_amount is not None else None,
             ),
         ),
     )
@@ -620,11 +621,21 @@ class _FakeAgentRunner:
     plans: ClassVar[list[llm.AgentPlan | Exception]] = []
     commits: ClassVar[list[llm.AgentPlan]] = []
     prompts: ClassVar[list[str]] = []
+    models_used: ClassVar[list[llm.ModelPreset]] = []
 
-    def __init__(self, data_dir: Path, key: bytes, *, debug: bool = False) -> None:
+    def __init__(
+        self,
+        data_dir: Path,
+        key: bytes,
+        *,
+        model: llm.ModelPreset = llm.DEFAULT_MODEL_PRESET,
+        debug: bool = False,
+    ) -> None:
         self.data_dir = data_dir
         self.key = key
+        self.model = model
         self.debug = debug
+        self.models_used.append(model)
 
     def _next(self) -> llm.AgentPlan:
         item = self.plans.pop(0)
@@ -656,7 +667,9 @@ def _patch_agent_runner(
     mode may construct more than one instance per test), and monkeypatches
     `sumac.llm.AgentRunner` to it."""
     fake_cls = type(
-        "_ScriptedAgentRunner", (_FakeAgentRunner,), {"plans": plans, "commits": [], "prompts": []}
+        "_ScriptedAgentRunner",
+        (_FakeAgentRunner,),
+        {"plans": plans, "commits": [], "prompts": [], "models_used": []},
     )
     monkeypatch.setattr(llm, "AgentRunner", fake_cls)
     return fake_cls
@@ -764,6 +777,22 @@ def test_ask_reject_does_not_commit(data_dir: Path, monkeypatch: pytest.MonkeyPa
     assert fake_cls.plans == []
 
 
+def test_ask_quit_at_decision_prompt_rejects_without_a_model_call(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "quit" (unlike any other free text) must not fall through to
+    feedback — that would spend a real model round just to arrive where
+    "reject" gets to for free."""
+    _run(data_dir, "init")
+    fake_cls = _patch_agent_runner(monkeypatch, [_consumption_plan()])
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam", input="quit\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Recorded" not in result.output
+    assert fake_cls.plans == []
+
+
 def test_ask_feedback_revises_then_accept_commits_the_revised_plan(
     data_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -774,6 +803,109 @@ def test_ask_feedback_revises_then_accept_commits_the_revised_plan(
 
     assert result.exit_code == 0, result.output
     assert "Recorded consumption of 2 jar jam" in result.output
+
+
+def test_ask_regenerate_reuses_the_prompt_with_a_different_model(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run(data_dir, "init")
+    other = next(p for p in llm.MODEL_PRESETS if p != llm.DEFAULT_MODEL_PRESET)
+    fake_cls = _patch_agent_runner(
+        monkeypatch, [_consumption_plan(amount="1"), _consumption_plan(amount="1")]
+    )
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam", input=f"g\n{other.name}\na\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Recorded consumption of 1 jar jam" in result.output
+    # Same prompt both times — regenerate doesn't touch the request text —
+    # but a fresh AgentRunner (second entry) with the newly chosen model.
+    assert fake_cls.prompts == ["consume 1 jar of jam", "consume 1 jar of jam"]
+    assert [m.name for m in fake_cls.models_used] == [llm.DEFAULT_MODEL_PRESET.name, other.name]
+
+
+def test_ask_start_over_reuses_the_model_with_a_new_prompt(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run(data_dir, "init")
+    fake_cls = _patch_agent_runner(
+        monkeypatch, [_consumption_plan(amount="1"), _consumption_plan(amount="1")]
+    )
+
+    result = _run(
+        data_dir, "ask", "consume 1 jar of jam", input="s\nconsume 1 jar of jam please\na\n"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Recorded consumption of 1 jar jam" in result.output
+    assert fake_cls.prompts == ["consume 1 jar of jam", "consume 1 jar of jam please"]
+    # Same model both times — start-over doesn't touch the model choice.
+    assert len({m.name for m in fake_cls.models_used}) == 1
+
+
+def test_ask_edit_corrects_a_field_before_accepting(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fastest fix for something the model got mostly right — directly
+    correct a proposed write's field with no model call at all. Uses a
+    real vault (unlike the fake-`commit` tests above) because the edit is
+    re-validated through the real `decide_change` gate, not the fake's
+    `commit`."""
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "add", "purchase", "jam", "3", "jar", "--to", "pantry")
+    _patch_agent_runner(monkeypatch, [_consumption_plan(amount="1")])
+
+    # product_id and unit accepted as-is (blank), amount corrected to 2,
+    # from_location accepted as-is (blank) — then accept the edited plan.
+    result = _run(data_dir, "ask", "consume 1 jar of jam", input="e\n\n\n2\n\na\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Edit applied" in result.output
+    assert "Recorded consumption of 2 jar jam" in result.output
+
+
+def test_ask_edit_with_an_invalid_amount_leaves_the_plan_unchanged(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "add", "purchase", "jam", "3", "jar", "--to", "pantry")
+    fake_cls = _patch_agent_runner(monkeypatch, [_consumption_plan(amount="1")])
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam", input="e\n\n\nnot-a-number\n\nr\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Not a valid amount" in result.output
+    assert fake_cls.commits == []
+
+
+def test_ask_plan_preview_shows_what_is_already_there(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`current_amount`, captured at propose time, renders as descriptive
+    context — not a computed "after" total, since `decide_change`'s own
+    shortfall reconciliation at commit time can differ from a naive
+    subtraction."""
+    _run(data_dir, "init")
+    _patch_agent_runner(monkeypatch, [_consumption_plan(amount="1", current_amount="3")])
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam", input="r\n")
+
+    assert result.exit_code == 0, result.output
+    assert "3 jar already there" in result.output
+
+
+def test_decision_options_include_every_choice() -> None:
+    non_defer = dict(_decision_options(dry_run=False))
+    assert set(non_defer) == {"a", "r", "e", "g", "s", "(anything else)"}
+    assert "d" not in non_defer
+
+    with_defer = dict(_decision_options(dry_run=False, defer=True))
+    assert "d" in with_defer
+
+    dry_run_options = dict(_decision_options(dry_run=True))
+    assert "--dry-run" in dry_run_options["a"]
 
 
 # --- ask --loop / queue ----------------------------------------------------

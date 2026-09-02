@@ -74,10 +74,14 @@ class FakeRunner:
 
 
 def _make_agent(
-    responses: list[ScriptedResponse], data_dir: Path, key: bytes
+    responses: list[ScriptedResponse],
+    data_dir: Path,
+    key: bytes,
+    *,
+    model: llm.ModelPreset = llm.DEFAULT_MODEL_PRESET,
 ) -> tuple[llm.AgentRunner, FakeRunner]:
     fake = FakeRunner(responses)
-    agent = llm.AgentRunner(data_dir, key, runner=fake)
+    agent = llm.AgentRunner(data_dir, key, model=model, runner=fake)
     return agent, fake
 
 
@@ -287,7 +291,13 @@ def test_add_request_scopes_tool_schemas_to_find_and_discover(
 def test_remove_request_scopes_tool_schemas_to_find_consume_move(
     data_dir: Path, key: bytes, osuser: str
 ) -> None:
-    responses = [_classify_round("remove"), _final_round("nothing to remove")]
+    responses = [
+        _classify_round("remove"),
+        _final_round("nothing to remove"),
+        # `_maybe_force_action` forces one more round when a mutating
+        # request ends with no writes.
+        _final_round("still nothing to remove"),
+    ]
     agent, _fake = _make_agent(responses, data_dir, key)
 
     agent.propose("throw away the old jam")
@@ -411,6 +421,9 @@ def test_rejected_tool_call_is_reported_and_not_added_to_pending(
             },
         ),
         _final_round("that location doesn't exist"),
+        # `_maybe_force_action` forces one more round when a mutating
+        # request ends with no writes.
+        _final_round("still nothing recorded"),
     ]
     agent, _fake = _make_agent(responses, data_dir, key)
 
@@ -430,6 +443,56 @@ def test_rejected_tool_call_is_reported_and_not_added_to_pending(
 
     plan = agent.propose("consume 1 jar of jam from nowhere")
     assert plan.writes == ()
+
+
+def test_add_request_with_no_writes_forces_one_more_round(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    """A real LFM2.5 run classified as "add" narrated the change it would
+    make in plain text without ever calling `sumac_discover_inventory` —
+    the classifier already decided a change was needed, so ending with no
+    writes is not the normal "nothing to do" outcome `find` has; it's a
+    miss. One forced follow-up round, and this one actually acts."""
+    config.add_location(data_dir, key, osuser, Location(id="pantry", name="Pantry"))
+    responses = [
+        _classify_round("add"),
+        _final_round("I would add 1 box of Widgets to the pantry."),
+        _tool_round(
+            "sumac_discover_inventory",
+            {"product_id": "Widgets", "amount": "1", "unit": "box", "to_location": "pantry"},
+        ),
+        _final_round("Added."),
+        # Writes are non-empty now, so self-review runs too.
+        _final_round("Looks correct."),
+    ]
+    agent, fake = _make_agent(responses, data_dir, key)
+
+    plan = agent.propose("add 1 box of widgets to the pantry")
+
+    assert len(plan.writes) == 1
+    assert plan.writes[0].product_id == "Widgets"
+    # classify + narrated-no-op round + forced round's two rounds + self-review.
+    assert len(fake.requests) == 5
+
+
+def test_add_request_still_producing_no_writes_after_the_forced_round_gives_up(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    """The forced round is not unbounded — if the model still doesn't act,
+    that becomes the human's call (feedback/regenerate/start over), not
+    another automatic retry."""
+    responses = [
+        _classify_round("add"),
+        _final_round("I would add it, but I won't."),
+        _final_round("Still not adding it."),
+    ]
+    agent, fake = _make_agent(responses, data_dir, key)
+
+    plan = agent.propose("add 1 box of widgets to the pantry")
+
+    assert plan.writes == ()
+    assert plan.reply_text == "Still not adding it."
+    assert len(fake.requests) == 3
 
 
 def test_missing_required_argument_names_what_was_missing_and_received(
@@ -766,15 +829,14 @@ def test_rejected_hint_travels_with_the_rejection_not_the_prompt() -> None:
 # --- per-model tool-call rendering ------------------------------------
 
 
-def test_render_tool_call_qwen_splices_raw_arguments_verbatim(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_render_tool_call_qwen_splices_raw_arguments_verbatim() -> None:
     """`raw_arguments` (the model's own emitted JSON string) must be spliced
     in as-is, not re-serialized from `arguments` — re-dumping could reorder
     keys or change whitespace relative to what Qwen3's own chat template
     would have produced from a real `tool_calls` field."""
-    monkeypatch.setattr(llm, "TOOL_CALL_FORMAT", llm.ToolCallFormat.QWEN)
-    result = llm._render_tool_call("sumac_find_inventory", {"query": "jam"}, '{"query":   "jam"}')
+    result = llm._render_tool_call(
+        "sumac_find_inventory", {"query": "jam"}, '{"query":   "jam"}', llm.ToolCallFormat.QWEN
+    )
     expected = (
         '<tool_call>\n{"name": "sumac_find_inventory", "arguments": '
         '{"query":   "jam"}}\n</tool_call>'
@@ -782,13 +844,12 @@ def test_render_tool_call_qwen_splices_raw_arguments_verbatim(
     assert result == expected
 
 
-def test_render_tool_call_lfm_uses_pythonic_syntax(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(llm, "TOOL_CALL_FORMAT", llm.ToolCallFormat.LFM)
-
+def test_render_tool_call_lfm_uses_pythonic_syntax() -> None:
     result = llm._render_tool_call(
         "sumac_consume_inventory",
         {"product_id": "jam", "amount": "1", "unit": "jar", "from_location": "pantry"},
         "unused for LFM",
+        llm.ToolCallFormat.LFM,
     )
 
     assert result == (
@@ -797,10 +858,10 @@ def test_render_tool_call_lfm_uses_pythonic_syntax(monkeypatch: pytest.MonkeyPat
     )
 
 
-def test_render_tool_call_lfm_escapes_embedded_quotes(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(llm, "TOOL_CALL_FORMAT", llm.ToolCallFormat.LFM)
-
-    result = llm._render_tool_call("sumac_find_inventory", {"query": 'jam "special"'}, "unused")
+def test_render_tool_call_lfm_escapes_embedded_quotes() -> None:
+    result = llm._render_tool_call(
+        "sumac_find_inventory", {"query": 'jam "special"'}, "unused", llm.ToolCallFormat.LFM
+    )
 
     assert (
         result
@@ -809,21 +870,21 @@ def test_render_tool_call_lfm_escapes_embedded_quotes(monkeypatch: pytest.Monkey
 
 
 def test_run_loop_appends_lfm_formatted_assistant_message_when_configured(
-    monkeypatch: pytest.MonkeyPatch, data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, osuser: str
 ) -> None:
-    """Confirms `TOOL_CALL_FORMAT` actually reaches `_run_loop`'s message
-    history, not just that `_render_tool_call` produces the right string
-    in isolation — `mistralrs.ChatCompletionRequest` is an opaque Rust
-    object with no readable `.messages` attribute, so this checks
-    `AgentRunner`'s own accumulated `self._messages` instead."""
-    monkeypatch.setattr(llm, "TOOL_CALL_FORMAT", llm.ToolCallFormat.LFM)
+    """Confirms the active `ModelPreset`'s `tool_call_format` actually
+    reaches `_run_loop`'s message history, not just that `_render_tool_call`
+    produces the right string in isolation — `mistralrs.ChatCompletionRequest`
+    is an opaque Rust object with no readable `.messages` attribute, so this
+    checks `AgentRunner`'s own accumulated `self._messages` instead."""
+    lfm_preset = llm.model_preset("lfm2.5-2.6b")
     _seed_pantry_with_jam(data_dir, key, osuser)
     responses = [
         _classify_round("find"),
         _tool_round("sumac_find_inventory", {"query": "jam"}),
         _final_round("the jam is in the pantry"),
     ]
-    agent, _fake = _make_agent(responses, data_dir, key)
+    agent, _fake = _make_agent(responses, data_dir, key, model=lfm_preset)
 
     agent.propose("where is the jam?")
 

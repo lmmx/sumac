@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace as dataclass_replace
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -27,10 +28,16 @@ from sumac import (
     store,
 )
 from sumac import vault as sumac_vault
-from sumac.errors import RetireNonemptyError, SumacError, VaultExistsError, VaultNotFoundError
+from sumac.errors import (
+    Rejected,
+    RetireNonemptyError,
+    SumacError,
+    VaultExistsError,
+    VaultNotFoundError,
+)
 
 if TYPE_CHECKING:
-    from sumac.llm import AgentPlan
+    from sumac.llm import AgentPlan, ModelPreset
 from sumac.models import ChangeKind
 from sumac.passphrase import get_key, resolve_passphrase
 
@@ -450,10 +457,20 @@ def ask(
     _ask_one(data_dir, key, llm, prompt, dry_run=dry_run, debug=debug)
 
 
-def _decision_prompt_label(dry_run: bool, *, defer: bool = False) -> str:
-    accept = "[a]ccept (dry-run)" if dry_run else "[a]ccept"
-    middle = " / [d]efer" if defer else ""
-    return f"{accept} / [r]eject{middle} / or type feedback"
+def _decision_options(dry_run: bool, *, defer: bool = False) -> list[tuple[str, str]]:
+    options = [
+        ("a", "Accept" + (" — nothing will actually be written (--dry-run)" if dry_run else "")),
+        ("r", 'Reject (or "quit"/"exit") — discard this proposal'),
+        ("e", "Edit — manually correct a field, no model call"),
+    ]
+    if defer:
+        options.append(("d", "Defer — queue this for later, ask something else now"))
+    options += [
+        ("g", "Regenerate — same request, a different model, no memory of this attempt"),
+        ("s", "Start over — reword the request, same model, no memory of this attempt"),
+        ("(anything else)", "Feedback — the model revises this same plan with your note"),
+    ]
+    return options
 
 
 def _print_dry_run_preview(plan: AgentPlan) -> None:
@@ -467,12 +484,106 @@ def _print_dry_run_preview(plan: AgentPlan) -> None:
         )
 
 
+def _prompt_regenerate(llm, current_model: ModelPreset) -> ModelPreset:
+    """Same prompt, a fresh `propose()` (no trace or message history
+    carried over — the model got a fair, independent attempt), a
+    different model — for when the request was fine but this model's
+    answer wasn't. Defaults to the model just used, so hitting Enter just
+    re-rolls the identical request against the same one."""
+    names = ", ".join(p.name for p in llm.MODEL_PRESETS)
+    while True:
+        model_name = typer.prompt(f"Model ({names})", default=current_model.name)
+        try:
+            return llm.model_preset(model_name)
+        except KeyError:
+            render.print_error(f"Unknown model {model_name!r}. Choose from: {names}")
+
+
+def _prompt_start_over(current_prompt: str) -> str:
+    """A new prompt, a fresh `propose()`, the same model — for when the
+    request itself needs rewording, not just a different model's attempt
+    at the same one."""
+    return typer.prompt("Prompt", default=current_prompt)
+
+
+def _prompt_edit(data_dir: Path, key: bytes, plan: AgentPlan) -> AgentPlan:
+    """Manually corrects one proposed write's fields directly — no model
+    call at all, and the fastest fix for something the model got mostly
+    right (a mistyped product name it had spelled correctly moments
+    earlier in a tool result, a location one digit off). Re-validated
+    through the same `decide_change` gate every model-proposed write
+    already goes through, so a typo in the correction itself can't reach
+    `commit` unchecked — "regenerate"/"start over" are the tools for a
+    model reasoning past correcting, this is only for its typing."""
+    writes = list(plan.writes)
+    if len(writes) > 1:
+        for i, w in enumerate(writes):
+            render.console.print(
+                f"  [{i}] {w.kind.value} {w.amount} {w.unit} {w.product_id} "
+                f"(from {w.from_location} to {w.to_location})"
+            )
+        try:
+            index = int(typer.prompt("Edit which one? (number)", default="0"))
+            w = writes[index]
+        except (ValueError, IndexError):
+            render.print_error("Not a valid index — nothing edited.")
+            return plan
+    else:
+        index, w = 0, writes[0]
+
+    product_id = typer.prompt("product_id", default=w.product_id)
+    unit = typer.prompt("unit", default=w.unit)
+    amount_text = typer.prompt("amount", default=str(w.amount))
+    from_location = w.from_location
+    if from_location is not None:
+        from_location = typer.prompt("from_location", default=from_location)
+    to_location = w.to_location
+    if to_location is not None:
+        to_location = typer.prompt("to_location", default=to_location)
+
+    try:
+        amount = Decimal(amount_text)
+    except InvalidOperation:
+        render.print_error(f"Not a valid amount: {amount_text!r} — nothing edited.")
+        return plan
+
+    try:
+        _writes, messages = decide.decide_change(
+            kind=w.kind,
+            product_id=product_id,
+            amount=amount,
+            unit=unit,
+            from_location=from_location,
+            to_location=to_location,
+            actor=paths.current_user(),
+            occurred_at=datetime.now(UTC),
+            inventory=ledger.build_inventory(data_dir, key),
+            cfg=config.build_config(data_dir, key),
+        )
+    except Rejected as e:
+        render.print_error(f"Edit rejected: {e}")
+        return plan
+
+    writes[index] = dataclass_replace(
+        w,
+        product_id=product_id,
+        amount=amount,
+        unit=unit,
+        from_location=from_location,
+        to_location=to_location,
+        warnings=tuple(messages),
+    )
+    render.print_success("Edit applied — nothing written yet, decide again below.")
+    return dataclass_replace(plan, writes=tuple(writes))
+
+
 def _ask_one(data_dir: Path, key: bytes, llm, prompt: str, *, dry_run: bool, debug: bool) -> None:
     """The original one-shot flow: exits the process on error or once the
     single request is resolved, since there is nothing else this
     invocation would do afterward."""
+    model = llm.DEFAULT_MODEL_PRESET
     try:
-        agent = llm.AgentRunner(data_dir, key, debug=debug)
+        agent = llm.AgentRunner(data_dir, key, model=model, debug=debug)
         plan = agent.propose(prompt)
     except FileNotFoundError as e:
         render.print_error(str(e))
@@ -491,9 +602,8 @@ def _ask_one(data_dir: Path, key: bytes, llm, prompt: str, *, dry_run: bool, deb
             return
 
         render.print_plan(plan)
-        if dry_run:
-            render.console.print("[dim](--dry-run: nothing will be written)[/dim]")
-        answer = typer.prompt(_decision_prompt_label(dry_run), default="a").strip()
+        render.print_decision_options(_decision_options(dry_run))
+        answer = typer.prompt("Choice", default="a").strip()
         choice = answer.lower()
         if choice in ("a", "accept"):
             if dry_run:
@@ -507,8 +617,29 @@ def _ask_one(data_dir: Path, key: bytes, llm, prompt: str, *, dry_run: bool, deb
                 for summary in agent.commit(plan):
                     render.print_success(summary)
             return
-        if choice in ("r", "reject"):
+        if choice in ("r", "reject", "quit", "exit"):
             return
+        if choice in ("e", "edit"):
+            plan = _prompt_edit(data_dir, key, plan)
+            continue
+        if choice in ("g", "generate", "regenerate"):
+            model = _prompt_regenerate(llm, agent.model)
+            try:
+                agent = llm.AgentRunner(data_dir, key, model=model, debug=debug)
+                plan = agent.propose(prompt)
+            except Exception as e:
+                render.print_error(f"Agent error: {e}")
+                raise typer.Exit(code=1) from e
+            continue
+        if choice in ("s", "start", "start over"):
+            prompt = _prompt_start_over(prompt)
+            try:
+                agent = llm.AgentRunner(data_dir, key, model=model, debug=debug)
+                plan = agent.propose(prompt)
+            except Exception as e:
+                render.print_error(f"Agent error: {e}")
+                raise typer.Exit(code=1) from e
+            continue
 
         try:
             plan = agent.revise(answer)
@@ -541,7 +672,9 @@ def _ask_loop(
                 f'[dim]{len(pending)} request(s) pending — type "queue" to review.[/dim]'
             )
         try:
-            answer = typer.prompt("ask", default="", show_default=False).strip()
+            answer = typer.prompt(
+                'Request (or "queue" / "retry N" / "quit")', default="", show_default=False
+            ).strip()
         except (EOFError, KeyboardInterrupt):
             render.console.print()
             return
@@ -591,13 +724,14 @@ def _ask_loop_request(
     also fails, so the queue listing shows how many times something has
     already been tried, not just that it's pending."""
     next_attempts = retrying.attempts + 1 if retrying is not None else 0
+    model = llm.DEFAULT_MODEL_PRESET
 
     def _fail(e: Exception) -> None:
         render.print_error(f"Agent error: {e} — queued for later.")
         queue.enqueue(data_dir, prompt, reason=f"error: {e}", attempts=next_attempts)
 
     try:
-        agent = llm.AgentRunner(data_dir, key, debug=debug)
+        agent = llm.AgentRunner(data_dir, key, model=model, debug=debug)
         plan = agent.propose(prompt)
     except Exception as e:
         _fail(e)
@@ -611,10 +745,8 @@ def _ask_loop_request(
             return
 
         render.print_plan(plan)
-        if dry_run:
-            render.console.print("[dim](--dry-run: nothing will be written)[/dim]")
-
-        answer = typer.prompt(_decision_prompt_label(dry_run, defer=True), default="a").strip()
+        render.print_decision_options(_decision_options(dry_run, defer=True))
+        answer = typer.prompt("Choice", default="a").strip()
         choice = answer.lower()
         if choice in ("a", "accept"):
             if dry_run:
@@ -623,12 +755,37 @@ def _ask_loop_request(
                 for summary in agent.commit(plan):
                     render.print_success(summary)
             return
-        if choice in ("r", "reject"):
+        if choice in ("r", "reject", "quit", "exit"):
             return
         if choice in ("d", "defer"):
             queue.enqueue(data_dir, prompt, reason="deferred", attempts=next_attempts)
             render.console.print("[dim](queued for later)[/dim]")
             return
+        if choice in ("e", "edit"):
+            plan = _prompt_edit(data_dir, key, plan)
+            continue
+        # `prompt` and `model` are reassigned in these two branches, not
+        # shadowed — `_fail` closes over the same names, so a later failure
+        # or defer on this new attempt enqueues what it actually ran, not
+        # the original request.
+        if choice in ("g", "generate", "regenerate"):
+            model = _prompt_regenerate(llm, agent.model)
+            try:
+                agent = llm.AgentRunner(data_dir, key, model=model, debug=debug)
+                plan = agent.propose(prompt)
+            except Exception as e:
+                _fail(e)
+                return
+            continue
+        if choice in ("s", "start", "start over"):
+            prompt = _prompt_start_over(prompt)
+            try:
+                agent = llm.AgentRunner(data_dir, key, model=model, debug=debug)
+                plan = agent.propose(prompt)
+            except Exception as e:
+                _fail(e)
+                return
+            continue
 
         try:
             plan = agent.revise(answer)

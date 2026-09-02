@@ -404,6 +404,12 @@ _SELF_REVIEW_MESSAGE = (
     "say so with no further tool calls. If not, revise it."
 )
 
+_EMPTY_PLAN_NUDGE = (
+    "This request needs a change to inventory, but no tool call was made — "
+    "describing what you would do is not the same as doing it. Call the "
+    "matching tool now."
+)
+
 
 # --- Orchestration types ------------------------------------------------------
 
@@ -417,6 +423,12 @@ class ProposedWrite:
     from_location: str | None
     to_location: str | None
     warnings: tuple[str, ...] = ()
+    # What was already at the relevant location (`to_location` for a
+    # discovery, `from_location` otherwise) before this write, captured at
+    # propose time — lets the human review a before/after quantity rather
+    # than just the delta, without a second inventory query at render time
+    # that could reflect a different moment than the one actually decided.
+    current_amount: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -589,6 +601,13 @@ class AgentRunner:
             else cast(SendsCompletions, _build_runner(model))
         )
 
+    @property
+    def model(self) -> ModelPreset:
+        """Which `ModelPreset` this instance is running — read by a CLI
+        retry prompt to default to "same model as last time" rather than
+        forcing a choice on every retry."""
+        return self._model
+
     # -- tool callbacks -------------------------------------------------------
 
     def _sumac_find_inventory(self, _name: str, args: dict) -> str:
@@ -673,6 +692,16 @@ class AgentRunner:
         except Rejected as e:
             return _rejected(e.reason, {k: str(v) for k, v in e.detail.items()})
 
+        # Before/after context for the human reviewing this, not domain
+        # logic: a discovery's "current" location is where the product
+        # would land (already-there stock this adds to); everything else's
+        # is where it's coming from. `None` when nothing is there yet — a
+        # genuinely new discovery, not "0 and rising."
+        current_location = to_location if kind is ChangeKind.DISCOVERY else from_location
+        current_quantity = (
+            inventory.at(current_location).get(product_id) if current_location else None
+        )
+
         candidate = ProposedWrite(
             kind=kind,
             product_id=product_id,
@@ -681,6 +710,7 @@ class AgentRunner:
             from_location=from_location,
             to_location=to_location,
             warnings=tuple(messages),
+            current_amount=current_quantity.amount if current_quantity else None,
         )
         if candidate in self._pending:
             # A real LFM2.5 run repeated an already-successful discover call
@@ -731,7 +761,7 @@ class AgentRunner:
     ) -> mistralrs.ChatCompletionRequest:
         return mistralrs.ChatCompletionRequest(
             messages=messages,
-            model=MODEL_ID,
+            model=self._model.quantized_model_id,
             tool_schemas=schemas,
             tool_choice=mistralrs.ToolChoice.Auto,
             enable_thinking=False,
@@ -768,7 +798,7 @@ class AgentRunner:
     def _run_loop(self) -> AgentPlan:
         """Client-side tool-calling loop — see the module docstring. The
         assistant message for a dispatched call is rendered by
-        `_render_tool_call`, per `TOOL_CALL_FORMAT` — hand-built because the
+        `_render_tool_call`, per `self._model.tool_call_format` — hand-built because the
         Python bindings drop a real `tool_calls` field but pass `content`
         through unchanged, so this has to be byte-for-byte what the loaded
         model's own chat template would have produced from a real
@@ -814,7 +844,9 @@ class AgentRunner:
             self._messages.append(
                 {
                     "role": "assistant",
-                    "content": _render_tool_call(call.name, args, call.arguments),
+                    "content": _render_tool_call(
+                        call.name, args, call.arguments, self._model.tool_call_format
+                    ),
                 }
             )
             self._messages.append({"role": "tool", "content": result})
@@ -825,6 +857,24 @@ class AgentRunner:
         # any) is still returned rather than raised, since the cap is a
         # termination guarantee, not a success condition.
         return AgentPlan(reply_text="", writes=tuple(self._pending))
+
+    def _maybe_force_action(self, plan: AgentPlan) -> AgentPlan:
+        """A `find`-classified request producing no writes is the normal,
+        correct outcome — a plain question, nothing needs to change. An
+        `add`/`remove`-classified request producing no writes is not: the
+        classifier already decided something needs to change, so a model
+        that stops without ever calling the matching tool described an
+        action in place of taking one (the same class of miss the design
+        journal's real-run comparisons record for read-only queries,
+        happening here on a mutating one instead). One forced follow-up
+        round, not unbounded — if the model still doesn't act after this,
+        that's the human's call via feedback/regenerate/start over, not
+        another retry this method adds on its own."""
+        if plan.writes or self._kind not in (QueryKind.ADD, QueryKind.REMOVE):
+            return plan
+        assert self._messages is not None
+        self._messages.append({"role": "user", "content": _EMPTY_PLAN_NUDGE})
+        return self._run_loop()
 
     def _maybe_self_review(self, plan: AgentPlan) -> AgentPlan:
         """The model checks its own plan against the original request. A
@@ -858,7 +908,7 @@ class AgentRunner:
             {"role": "system", "content": _PROMPT_BY_KIND[kind]},
             {"role": "user", "content": prompt},
         ]
-        plan = self._maybe_self_review(self._run_loop())
+        plan = self._maybe_self_review(self._maybe_force_action(self._run_loop()))
         return replace(plan, trace=tuple(self._trace))
 
     def revise(self, feedback: str) -> AgentPlan:
@@ -868,7 +918,7 @@ class AgentRunner:
             )
         self._messages.append({"role": "user", "content": feedback})
         self._trace = []
-        plan = self._maybe_self_review(self._run_loop())
+        plan = self._maybe_self_review(self._maybe_force_action(self._run_loop()))
         return replace(plan, trace=tuple(self._trace))
 
     def commit(self, plan: AgentPlan) -> list[str]:
