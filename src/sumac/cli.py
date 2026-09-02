@@ -7,7 +7,7 @@ import re
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 from uuid import uuid4
 
 import typer
@@ -22,11 +22,15 @@ from sumac import (
     ledger,
     models,
     paths,
+    queue,
     render,
     store,
 )
 from sumac import vault as sumac_vault
 from sumac.errors import RetireNonemptyError, SumacError, VaultExistsError, VaultNotFoundError
+
+if TYPE_CHECKING:
+    from sumac.llm import AgentPlan
 from sumac.models import ChangeKind
 from sumac.passphrase import get_key, resolve_passphrase
 
@@ -394,7 +398,11 @@ def doctor(data_dir: DataDirOption = Path("data")) -> None:
 
 @app.command()
 def ask(
-    prompt: str,
+    prompt: Annotated[str | None, typer.Argument()] = None,
+    loop: Annotated[
+        bool,
+        typer.Option("--loop", help="Keep prompting for new requests instead of taking just one."),
+    ] = False,
     dry_run: Annotated[
         bool,
         typer.Option("--dry-run", help="Compute and show the plan; write nothing."),
@@ -416,6 +424,15 @@ def ask(
         sumac ask "where is the jam?"
         sumac ask "consume 1 jar of jam"
         sumac ask "move the ragu to the fridge"
+        sumac ask --loop
+
+    With no PROMPT, or with --loop, repeatedly prompts for a new request
+    instead of taking one from argv and exiting — see
+    docs/journal/2026-09-02-query-classifier.md for why (a request can crash
+    the process outright, and shouldn't take the rest of the session with
+    it). A request that fails, or that you type "d" to defer, goes into a
+    local cache (queue.py) instead of being lost; "queue" lists what's
+    pending and "retry N" revisits one.
     """
     key = _key(data_dir)
 
@@ -426,6 +443,34 @@ def ask(
         render.print_error(f"Agent requires mistralrs. Install with: pip install mistralrs\n{e}")
         raise typer.Exit(code=1) from e
 
+    if prompt is None or loop:
+        _ask_loop(data_dir, key, llm, first_prompt=prompt, dry_run=dry_run, debug=debug)
+        return
+
+    _ask_one(data_dir, key, llm, prompt, dry_run=dry_run, debug=debug)
+
+
+def _decision_prompt_label(dry_run: bool, *, defer: bool = False) -> str:
+    accept = "[a]ccept (dry-run)" if dry_run else "[a]ccept"
+    middle = " / [d]efer" if defer else ""
+    return f"{accept} / [r]eject{middle} / or type feedback"
+
+
+def _print_dry_run_preview(plan: AgentPlan) -> None:
+    """`--dry-run` withholds the write, not the accept/reject/feedback
+    interface itself — the person still makes and sees a decision, just
+    one that never reaches `agent.commit`/`store.append`."""
+    for w in plan.writes:
+        render.console.print(
+            f"[dim](--dry-run) would record {w.kind.value} of {w.amount} {w.unit} "
+            f"{w.product_id}[/dim]"
+        )
+
+
+def _ask_one(data_dir: Path, key: bytes, llm, prompt: str, *, dry_run: bool, debug: bool) -> None:
+    """The original one-shot flow: exits the process on error or once the
+    single request is resolved, since there is nothing else this
+    invocation would do afterward."""
     try:
         agent = llm.AgentRunner(data_dir, key, debug=debug)
         plan = agent.propose(prompt)
@@ -447,18 +492,20 @@ def ask(
 
         render.print_plan(plan)
         if dry_run:
-            render.console.print("[dim](--dry-run: plan shown above, nothing written)[/dim]")
-            return
-
-        answer = typer.prompt("[a]ccept / [r]eject / or type feedback", default="a").strip()
+            render.console.print("[dim](--dry-run: nothing will be written)[/dim]")
+        answer = typer.prompt(_decision_prompt_label(dry_run), default="a").strip()
         choice = answer.lower()
         if choice in ("a", "accept"):
-            # Not caught here: a Rejected raised while committing is not a
-            # modeled outcome the model can react to (the human already
-            # accepted the plan) and should propagate exactly the way `add`
-            # already lets `decide_change`'s Rejected reach `main`'s handler.
-            for summary in agent.commit(plan):
-                render.print_success(summary)
+            if dry_run:
+                _print_dry_run_preview(plan)
+            else:
+                # Not caught here: a Rejected raised while committing is not
+                # a modeled outcome the model can react to (the human
+                # already accepted the plan) and should propagate exactly
+                # the way `add` already lets `decide_change`'s Rejected
+                # reach `main`'s handler.
+                for summary in agent.commit(plan):
+                    render.print_success(summary)
             return
         if choice in ("r", "reject"):
             return
@@ -468,6 +515,126 @@ def ask(
         except Exception as e:
             render.print_error(f"Agent error: {e}")
             raise typer.Exit(code=1) from e
+
+
+def _ask_loop(
+    data_dir: Path, key: bytes, llm, *, first_prompt: str | None, dry_run: bool, debug: bool
+) -> None:
+    """Repeatedly prompts for a new request rather than exiting after one.
+    Unlike `_ask_one`, a failure here is caught and queued (queue.py)
+    instead of ending the session — the specific crash this was built to
+    survive is mistral.rs's max-seq-len KV-cache exhaustion, which takes
+    the whole process down uncaught (see the design journal), losing
+    everything about the request that triggered it if there's nothing
+    outside the process remembering it existed."""
+    render.console.print(
+        '[dim]Type a request, "queue" to list pending ones, "retry N" to revisit '
+        'one, or "quit" to exit.[/dim]'
+    )
+    if first_prompt is not None:
+        _ask_loop_request(data_dir, key, llm, first_prompt, dry_run=dry_run, debug=debug)
+
+    while True:
+        pending = queue.load(data_dir)
+        if pending:
+            render.console.print(
+                f'[dim]{len(pending)} request(s) pending — type "queue" to review.[/dim]'
+            )
+        try:
+            answer = typer.prompt("ask", default="", show_default=False).strip()
+        except (EOFError, KeyboardInterrupt):
+            render.console.print()
+            return
+
+        if not answer:
+            continue
+        lowered = answer.lower()
+        if lowered in ("quit", "exit"):
+            return
+
+        if lowered == "queue":
+            if not pending:
+                render.console.print("[dim](queue is empty)[/dim]")
+            for i, item in enumerate(pending):
+                render.console.print(
+                    f"  [{i}] {item.prompt}  [dim]({item.reason}, {item.attempts} attempt(s))[/dim]"
+                )
+            continue
+
+        if lowered.startswith("retry "):
+            index_text = answer.split(maxsplit=1)[1]
+            try:
+                item = queue.dequeue(data_dir, int(index_text))
+            except (ValueError, IndexError):
+                render.print_error(f"No queued request at index {index_text!r}.")
+                continue
+            _ask_loop_request(
+                data_dir, key, llm, item.prompt, dry_run=dry_run, debug=debug, retrying=item
+            )
+            continue
+
+        _ask_loop_request(data_dir, key, llm, answer, dry_run=dry_run, debug=debug)
+
+
+def _ask_loop_request(
+    data_dir: Path,
+    key: bytes,
+    llm,
+    prompt: str,
+    *,
+    dry_run: bool,
+    debug: bool,
+    retrying: queue.QueuedRequest | None = None,
+) -> None:
+    """One request within `_ask_loop`. `retrying` is the queue entry this
+    came from, if any — its `attempts` count carries forward if the retry
+    also fails, so the queue listing shows how many times something has
+    already been tried, not just that it's pending."""
+    next_attempts = retrying.attempts + 1 if retrying is not None else 0
+
+    def _fail(e: Exception) -> None:
+        render.print_error(f"Agent error: {e} — queued for later.")
+        queue.enqueue(data_dir, prompt, reason=f"error: {e}", attempts=next_attempts)
+
+    try:
+        agent = llm.AgentRunner(data_dir, key, debug=debug)
+        plan = agent.propose(prompt)
+    except Exception as e:
+        _fail(e)
+        return
+
+    while True:
+        render.print_trace(plan.trace)
+        if not plan.writes:
+            if plan.reply_text:
+                render.console.print(plan.reply_text)
+            return
+
+        render.print_plan(plan)
+        if dry_run:
+            render.console.print("[dim](--dry-run: nothing will be written)[/dim]")
+
+        answer = typer.prompt(_decision_prompt_label(dry_run, defer=True), default="a").strip()
+        choice = answer.lower()
+        if choice in ("a", "accept"):
+            if dry_run:
+                _print_dry_run_preview(plan)
+            else:
+                for summary in agent.commit(plan):
+                    render.print_success(summary)
+            return
+        if choice in ("r", "reject"):
+            return
+        if choice in ("d", "defer"):
+            queue.enqueue(data_dir, prompt, reason="deferred", attempts=next_attempts)
+            render.console.print("[dim](queued for later)[/dim]")
+            return
+
+        try:
+            plan = agent.revise(answer)
+        except Exception as e:
+            _fail(e)
+            return
 
 
 def main() -> None:

@@ -11,7 +11,7 @@ from sealedlog import Vault
 from sealedlog.errors import WrongPassphraseError
 from typer.testing import CliRunner
 
-from sumac import ledger, llm, paths, store
+from sumac import ledger, llm, paths, queue, store
 from sumac import vault as sumac_vault
 from sumac.cli import app
 from sumac.errors import RetireNonemptyError, VaultExistsError
@@ -612,19 +612,32 @@ class _FakeAgentRunner:
     `plans` is set per-test by `_patch_agent_runner` as a class attribute on
     a dynamically built subclass — declared here so its type is known."""
 
-    plans: ClassVar[list[llm.AgentPlan]] = []
+    # All three are ClassVars, not per-instance: `cli.py`'s loop mode
+    # constructs a fresh `AgentRunner` per request, and tests have no
+    # handle to those instances — only to `fake_cls`, the dynamically
+    # built subclass `_patch_agent_runner` returns. Each test gets fresh
+    # empty lists there, so this sharing doesn't leak across tests.
+    plans: ClassVar[list[llm.AgentPlan | Exception]] = []
+    commits: ClassVar[list[llm.AgentPlan]] = []
+    prompts: ClassVar[list[str]] = []
 
     def __init__(self, data_dir: Path, key: bytes, *, debug: bool = False) -> None:
         self.data_dir = data_dir
         self.key = key
         self.debug = debug
-        self.commits: list[llm.AgentPlan] = []
+
+    def _next(self) -> llm.AgentPlan:
+        item = self.plans.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
 
     def propose(self, prompt: str) -> llm.AgentPlan:
-        return self.plans.pop(0)
+        self.prompts.append(prompt)
+        return self._next()
 
     def revise(self, feedback: str) -> llm.AgentPlan:
-        return self.plans.pop(0)
+        return self._next()
 
     def commit(self, plan: llm.AgentPlan) -> list[str]:
         self.commits.append(plan)
@@ -634,13 +647,17 @@ class _FakeAgentRunner:
 
 
 def _patch_agent_runner(
-    monkeypatch: pytest.MonkeyPatch, plans: list[llm.AgentPlan]
+    monkeypatch: pytest.MonkeyPatch, plans: list[llm.AgentPlan | Exception]
 ) -> type[_FakeAgentRunner]:
     """Builds a fresh `_FakeAgentRunner` subclass carrying its own `plans`
-    queue (a class attribute, since `cli.py` constructs the instance itself —
-    there's no seam to pass a queue through `AgentRunner(data_dir, key)`) and
-    monkeypatches `sumac.llm.AgentRunner` to it."""
-    fake_cls = type("_ScriptedAgentRunner", (_FakeAgentRunner,), {"plans": plans})
+    queue, and fresh `commits`/`prompts` accumulators (all class
+    attributes, since `cli.py` constructs the instance itself — there's no
+    seam to pass a queue through `AgentRunner(data_dir, key)`, and loop
+    mode may construct more than one instance per test), and monkeypatches
+    `sumac.llm.AgentRunner` to it."""
+    fake_cls = type(
+        "_ScriptedAgentRunner", (_FakeAgentRunner,), {"plans": plans, "commits": [], "prompts": []}
+    )
     monkeypatch.setattr(llm, "AgentRunner", fake_cls)
     return fake_cls
 
@@ -702,15 +719,22 @@ def test_ask_shows_tool_call_trace_before_reply(
 def test_ask_dry_run_shows_plan_and_never_commits(
     data_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """`--dry-run` withholds the write, not the accept/reject/feedback
+    interface — the decision prompt still appears (labeled to make clear
+    accepting won't write anything), and "accept" prints a preview instead
+    of calling `agent.commit`."""
     _run(data_dir, "init")
     fake_cls = _patch_agent_runner(monkeypatch, [_consumption_plan()])
 
-    result = _run(data_dir, "ask", "consume 1 jar of jam", "--dry-run")
+    result = _run(data_dir, "ask", "consume 1 jar of jam", "--dry-run", input="a\n")
 
     assert result.exit_code == 0, result.output
     assert "consumption" in result.output
     assert "jam" in result.output
+    assert "would record" in result.output
+    assert "Recorded" not in result.output
     assert fake_cls.plans == []  # propose() was called, revise()/commit() were not
+    assert fake_cls.commits == []
     # A prior run showed no visible difference between --dry-run and a
     # normal invocation for a read-only request, making the flag look like
     # it did nothing; an explicit line now confirms it was honored.
@@ -750,3 +774,145 @@ def test_ask_feedback_revises_then_accept_commits_the_revised_plan(
 
     assert result.exit_code == 0, result.output
     assert "Recorded consumption of 2 jar jam" in result.output
+
+
+# --- ask --loop / queue ----------------------------------------------------
+
+
+def test_ask_loop_with_no_prompt_enters_loop_mode(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run(data_dir, "init")
+    _patch_agent_runner(monkeypatch, [_consumption_plan()])
+
+    result = _run(data_dir, "ask", input="consume 1 jar of jam\na\nquit\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Recorded consumption of 1 jar jam" in result.output
+
+
+def test_ask_loop_flag_runs_a_given_prompt_first_then_keeps_prompting(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run(data_dir, "init")
+    fake_cls = _patch_agent_runner(monkeypatch, [_consumption_plan()])
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam", "--loop", input="a\nquit\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Recorded consumption of 1 jar jam" in result.output
+    assert fake_cls.prompts == ["consume 1 jar of jam"]
+
+
+def test_ask_loop_failure_is_queued_not_fatal(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The specific failure this exists for: a request that raises (e.g.
+    mistral.rs's max-seq-len KV-cache exhaustion) must not end the loop —
+    it goes on the local queue and the session keeps going."""
+    _run(data_dir, "init")
+    _patch_agent_runner(monkeypatch, [RuntimeError("boom")])
+
+    result = _run(data_dir, "ask", input="add something\nquit\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Agent error: boom" in result.output
+    assert "queued for later" in result.output
+    items = queue.load(data_dir)
+    assert len(items) == 1
+    assert items[0].prompt == "add something"
+    assert items[0].reason == "error: boom"
+    assert items[0].attempts == 0
+
+
+def test_ask_loop_defer_queues_without_committing(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run(data_dir, "init")
+    fake_cls = _patch_agent_runner(monkeypatch, [_consumption_plan()])
+
+    result = _run(data_dir, "ask", input="consume 1 jar of jam\nd\nquit\n")
+
+    assert result.exit_code == 0, result.output
+    assert "queued for later" in result.output
+    assert fake_cls.commits == []
+    items = queue.load(data_dir)
+    assert len(items) == 1
+    assert items[0].prompt == "consume 1 jar of jam"
+    assert items[0].reason == "deferred"
+
+
+def test_ask_loop_dry_run_still_prompts_but_never_commits(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """As with `_ask_one`, `--dry-run` in loop mode withholds the write,
+    not the decision itself — accepting still prints a preview rather than
+    silently doing nothing, which previously made the flag look broken."""
+    _run(data_dir, "init")
+    fake_cls = _patch_agent_runner(monkeypatch, [_consumption_plan()])
+
+    result = _run(data_dir, "ask", "--dry-run", input="consume 1 jar of jam\na\nquit\n")
+
+    assert result.exit_code == 0, result.output
+    assert "would record" in result.output
+    assert "Recorded" not in result.output
+    assert fake_cls.commits == []
+
+
+def test_ask_loop_queue_command_lists_pending_requests(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run(data_dir, "init")
+    queue.enqueue(data_dir, "add 6 cartons of milk", "deferred")
+    queue.enqueue(data_dir, "consume 1 jar of jam", "error: boom", attempts=1)
+    _patch_agent_runner(monkeypatch, [])
+
+    result = _run(data_dir, "ask", input="queue\nquit\n")
+
+    assert result.exit_code == 0, result.output
+    assert "[0] add 6 cartons of milk" in result.output
+    assert "[1] consume 1 jar of jam" in result.output
+    assert "1 attempt(s)" in result.output
+
+
+def test_ask_loop_retry_dequeues_and_reuses_the_queued_prompt(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run(data_dir, "init")
+    queue.enqueue(data_dir, "consume 1 jar of jam", "error: boom")
+    fake_cls = _patch_agent_runner(monkeypatch, [_consumption_plan()])
+
+    result = _run(data_dir, "ask", input="retry 0\na\nquit\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Recorded consumption of 1 jar jam" in result.output
+    assert fake_cls.prompts == ["consume 1 jar of jam"]
+    assert queue.load(data_dir) == []
+
+
+def test_ask_loop_retry_failing_again_requeues_with_incremented_attempts(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run(data_dir, "init")
+    queue.enqueue(data_dir, "consume 1 jar of jam", "error: boom", attempts=1)
+    _patch_agent_runner(monkeypatch, [RuntimeError("boom again")])
+
+    result = _run(data_dir, "ask", input="retry 0\nquit\n")
+
+    assert result.exit_code == 0, result.output
+    items = queue.load(data_dir)
+    assert len(items) == 1
+    assert items[0].attempts == 2
+    assert items[0].reason == "error: boom again"
+
+
+def test_ask_loop_retry_with_invalid_index_reports_error_and_continues(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run(data_dir, "init")
+    _patch_agent_runner(monkeypatch, [])
+
+    result = _run(data_dir, "ask", input="retry 5\nquit\n")
+
+    assert result.exit_code == 0, result.output
+    assert "No queued request at index" in result.output

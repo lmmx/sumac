@@ -85,12 +85,12 @@ class ToolCallFormat(StrEnum):
 # uncomment as a unit) so switching models can't leave TOOL_CALL_FORMAT
 # pointing at the wrong wire syntax.
 
-QUANTIZED_MODEL_ID = "LiquidAI/LFM2.5-2.6B-GGUF"
-QUANTIZED_FILENAME = "LFM2.5-2.6B-Q4_K_M.gguf"
-TOOL_CALL_FORMAT = ToolCallFormat.LFM
-# QUANTIZED_MODEL_ID = "unsloth/Qwen3-4B-Instruct-2507-GGUF"
-# QUANTIZED_FILENAME = "Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
-# TOOL_CALL_FORMAT = ToolCallFormat.QWEN
+# QUANTIZED_MODEL_ID = "LiquidAI/LFM2.5-2.6B-GGUF"
+# QUANTIZED_FILENAME = "LFM2.5-2.6B-Q4_K_M.gguf"
+# TOOL_CALL_FORMAT = ToolCallFormat.LFM
+QUANTIZED_MODEL_ID = "unsloth/Qwen3-4B-Instruct-2507-GGUF"
+QUANTIZED_FILENAME = "Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
+TOOL_CALL_FORMAT = ToolCallFormat.QWEN
 
 # QUANTIZED_MODEL_ID = "unsloth/LFM2.5-1.2B-Instruct-GGUF"
 # QUANTIZED_FILENAME = "LFM2.5-1.2B-Instruct-Q4_K_M.gguf"
