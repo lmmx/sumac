@@ -322,10 +322,12 @@ sumac_find_inventory and sumac_discover_inventory.
 
 Use sumac_discover_inventory to record the new or additional stock — a
 sumac_find_inventory search turning up no match for the product is
-expected, not a reason to stop: use a new product_id describing it. Call
-sumac_find_inventory first only if you need to resolve a location the
-person referred to indirectly (e.g. "with the other tins of it") rather
-than named directly.
+expected, not a reason to stop: use a new product_id describing it, in
+this catalog's own style — Title Case, brand name if the person gave one,
+no underscores (e.g. "Heinz Baked Beans", "Yeo Valley Natural Yogurt", not
+"heinz_baked_beans"). Call sumac_find_inventory first only if you need to
+resolve a location the person referred to indirectly (e.g. "with the
+other tins of it") rather than named directly.
 
 Call one tool at a time; when nothing more is needed, answer in plain text
 with no further tool call.
