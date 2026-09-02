@@ -321,11 +321,10 @@ def test_tool_call_outside_current_kind_is_rejected_not_dispatched(
 
     assert plan.writes == ()
     rejected = json.loads(plan.trace[-1].result)
-    assert rejected == {
-        "status": "rejected",
-        "reason": "tool_not_available",
-        "detail": {"name": "sumac_consume_inventory"},
-    }
+    assert rejected["status"] == "rejected"
+    assert rejected["reason"] == "tool_not_available"
+    assert rejected["detail"] == {"name": "sumac_consume_inventory"}
+    assert rejected["hint"] == llm._REJECTION_HINT
     # Not committed and not queued — the shelf is untouched.
     assert ledger.build_inventory(data_dir, key).at("pantry")["jam"].amount == Decimal(3)
 
@@ -455,14 +454,49 @@ def test_missing_required_argument_names_what_was_missing_and_received(
         )
     )
 
-    assert result == {
-        "status": "rejected",
-        "reason": "missing_required_argument",
-        "detail": {
-            "missing": ["amount"],
-            "received": ["_amount", "from_location", "product_id", "unit"],
-        },
+    assert result["status"] == "rejected"
+    assert result["reason"] == "missing_required_argument"
+    assert result["detail"] == {
+        "missing": ["amount"],
+        "received": ["_amount", "from_location", "product_id", "unit"],
     }
+    assert result["hint"] == llm._REJECTION_HINT
+
+
+def test_repeating_an_identical_successful_write_is_not_queued_twice(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    """A real LFM2.5 run repeated an already-successful `sumac_discover_
+    inventory` call three more times, byte-for-byte — each repeat silently
+    became a second, third, fourth full write, so accepting the resulting
+    plan would have recorded four times the requested quantity. The second
+    (and third, fourth, ...) identical call must not add another write."""
+    config.add_location(data_dir, key, osuser, Location(id="pantry", name="Pantry"))
+    agent, _fake = _make_agent([], data_dir, key)
+    call_args = {
+        "product_id": "Moma Pistachio Milk",
+        "amount": "6",
+        "unit": "carton",
+        "to_location": "pantry",
+    }
+
+    first = json.loads(
+        agent.tool_callbacks["sumac_discover_inventory"]("sumac_discover_inventory", call_args)
+    )
+    second = json.loads(
+        agent.tool_callbacks["sumac_discover_inventory"]("sumac_discover_inventory", call_args)
+    )
+
+    assert first["status"] == "proposed"
+    assert second == {
+        "status": "already_proposed",
+        "product_id": "Moma Pistachio Milk",
+        "amount": "6",
+        "unit": "carton",
+        "from_location": None,
+        "to_location": "pantry",
+    }
+    assert len(agent._pending) == 1
 
 
 # --- self-review -----------------------------------------------------------
@@ -681,6 +715,52 @@ def test_prompts_and_schemas_do_not_worked_example_specific_products() -> None:
     lowered = text.lower()
     for word in ("butter", "peanut", "croissant", "milk", "chocolate"):
         assert word not in lowered, f"{word!r} found in prompt/schema text — worked example leaked"
+
+
+def test_add_prompt_directs_dropping_the_brand_not_the_product_name() -> None:
+    """A real LFM2.5 run searched "Moma pistachio milk" then "Moma" —
+    narrowing by keeping the one word guaranteed absent from the catalog
+    (the invented brand) and dropping the actual product description —
+    then invented a new product for something already in inventory under a
+    different name ("Pistachio Oat Milk"), fragmenting one product's stock
+    across two catalog entries. Guards against losing the fix: the prompt
+    must direct dropping the brand and keeping the product name, not
+    either instruction alone or the reverse pairing."""
+    text = " ".join(llm._ADD_PROMPT.split())
+    assert "brand dropped" in text
+    assert "product itself kept" in text
+    assert "not a new product" in text
+
+
+def test_add_prompt_directs_searching_for_context_before_guessing_a_location() -> None:
+    """Three separate real-model runs of "add 6 Moma pistachio milk cartons
+    to the same pantry cupboard as existing stock" (LFM2.5, Qwen3-1.7B,
+    Qwen3-4B) all skipped or under-executed searching for the referenced
+    "existing stock" and guessed a location string ("pantry cupboard")
+    from the person's own wording instead — rejected as unknown, then
+    handled reactively rather than avoided. Guards against losing the
+    proactive instruction: search first for wording tying the location to
+    something already in inventory, never guess in that case."""
+    text = " ".join(llm._ADD_PROMPT.split())
+    assert "existing stock" in text
+    assert "never guess a location" in text
+
+
+def test_rejected_hint_travels_with_the_rejection_not_the_prompt() -> None:
+    """The original single-prompt design told the model how to react to a
+    "rejected" tool result unconditionally, on every request — a real
+    Qwen3 run showed the cost of dropping that instruction (it narrated an
+    intention to retry, "Let me try again", without making one, then
+    stopped), but restating it in every static prompt means every request
+    pays for it whether or not a rejection ever happens. Instead the hint
+    travels inside the rejected result itself (`_rejected`), so it only
+    ever reaches the model at the moment it's relevant — the static
+    prompts should carry none of this instruction."""
+    for prompt in (llm._FIND_PROMPT, llm._ADD_PROMPT, llm._REMOVE_PROMPT):
+        assert "rejected" not in prompt.lower()
+
+    result = json.loads(llm._rejected("some_reason", {"detail": "value"}))
+    assert result["hint"] == llm._REJECTION_HINT
 
 
 # --- per-model tool-call rendering ------------------------------------

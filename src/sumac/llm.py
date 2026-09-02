@@ -85,12 +85,16 @@ class ToolCallFormat(StrEnum):
 # uncomment as a unit) so switching models can't leave TOOL_CALL_FORMAT
 # pointing at the wrong wire syntax.
 
-# QUANTIZED_MODEL_ID = "unsloth/LFM2.5-1.2B-Instruct-GGUF"
-# QUANTIZED_FILENAME = "LFM2.5-1.2B-Instruct-Q4_K_M.gguf"
-# TOOL_CALL_FORMAT = ToolCallFormat.LFM
 QUANTIZED_MODEL_ID = "LiquidAI/LFM2.5-2.6B-GGUF"
 QUANTIZED_FILENAME = "LFM2.5-2.6B-Q4_K_M.gguf"
 TOOL_CALL_FORMAT = ToolCallFormat.LFM
+# QUANTIZED_MODEL_ID = "unsloth/Qwen3-4B-Instruct-2507-GGUF"
+# QUANTIZED_FILENAME = "Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
+# TOOL_CALL_FORMAT = ToolCallFormat.QWEN
+
+# QUANTIZED_MODEL_ID = "unsloth/LFM2.5-1.2B-Instruct-GGUF"
+# QUANTIZED_FILENAME = "LFM2.5-1.2B-Instruct-Q4_K_M.gguf"
+# TOOL_CALL_FORMAT = ToolCallFormat.LFM
 # QUANTIZED_MODEL_ID = "unsloth/Qwen3-1.7B-GGUF"
 # QUANTIZED_FILENAME = "Qwen3-1.7B-Q4_K_M.gguf"
 # TOOL_CALL_FORMAT = ToolCallFormat.QWEN
@@ -320,14 +324,22 @@ _ADD_PROMPT = """\
 You are a household grocery inventory assistant. You have two tools,
 sumac_find_inventory and sumac_discover_inventory.
 
-Use sumac_discover_inventory to record the new or additional stock — a
-sumac_find_inventory search turning up no match for the product is
-expected, not a reason to stop: use a new product_id describing it, in
-this catalog's own style — Title Case, brand name if the person gave one,
-no underscores (e.g. "Heinz Baked Beans", "Yeo Valley Natural Yogurt", not
-"heinz_baked_beans"). Call sumac_find_inventory first only if you need to
-resolve a location the person referred to indirectly (e.g. "with the
-other tins of it") rather than named directly.
+If the person's wording ties the location to something already in
+inventory — "the same place as", "with the other X", "existing stock",
+"the usual spot" — call sumac_find_inventory for that other product
+first and use its location; never guess a location string from their
+own wording in this case.
+
+Before assuming a product is new, search for it twice if the first search
+finds nothing: once with the full name, then with the brand dropped and
+only the product itself kept — not the other way round (after "Heinz
+Baked Beans" finds nothing, search "Baked Beans", not "Heinz"). A
+different brand of the same basic product is stock to add to, not a new
+product. Use sumac_discover_inventory to record the new or additional
+stock once that broader search also finds nothing plausible, using a new
+product_id in this catalog's own style — Title Case, brand name if the
+person gave one, no underscores (e.g. "Heinz Baked Beans", not
+"heinz_baked_beans").
 
 Call one tool at a time; when nothing more is needed, answer in plain text
 with no further tool call.
@@ -452,6 +464,26 @@ def _render_tool_call(name: str, arguments: dict, raw_arguments: str) -> str:
     # `arguments is string` — rather than re-serializing `arguments`, which
     # could reorder keys or whitespace differently.
     return f'<tool_call>\n{{"name": "{name}", "arguments": {raw_arguments}}}\n</tool_call>'
+
+
+_REJECTION_HINT = (
+    "If a fix is obvious from this, retry with the correction — actually "
+    "make the retry, don't just describe one and stop. Otherwise explain "
+    "why in plain text."
+)
+
+
+def _rejected(reason: str, detail: dict) -> str:
+    """Every rejected tool result carries its own retry guidance, rather
+    than a prompt stating it unconditionally on every request regardless
+    of whether a rejection ever happens. A Qwen3 run that hit `rejected`
+    with no such instruction anywhere narrated an intention to retry
+    ("Let me try again") without making one, then stopped — putting the
+    instruction here means it only ever reaches the model at the exact
+    moment it's relevant, never spent on a request that succeeds outright."""
+    return json.dumps(
+        {"status": "rejected", "reason": reason, "detail": detail, "hint": _REJECTION_HINT}
+    )
 
 
 def _round_preview(message: mistralrs.ResponseMessage, limit: int = 100) -> str:
@@ -585,12 +617,9 @@ class AgentRunner:
         # malformed call.
         missing = [k for k in _REQUIRED_ARGS_BY_TOOL[name] if k not in args]
         if missing:
-            return json.dumps(
-                {
-                    "status": "rejected",
-                    "reason": "missing_required_argument",
-                    "detail": {"missing": missing, "received": sorted(args.keys())},
-                }
+            return _rejected(
+                "missing_required_argument",
+                {"missing": missing, "received": sorted(args.keys())},
             )
 
         kind = _KIND_BY_TOOL[name]
@@ -605,13 +634,7 @@ class AgentRunner:
             # Not one of decide.py's own rejection-catalogue reasons — this
             # is the tool-callback equivalent of cli.py's `_parse_decimal`
             # rejecting before a value ever reaches `decide_change` at all.
-            return json.dumps(
-                {
-                    "status": "rejected",
-                    "reason": "invalid_amount",
-                    "detail": {"value": args["amount"]},
-                }
-            )
+            return _rejected("invalid_amount", {"value": args["amount"]})
 
         cfg = config.build_config(self._data_dir, self._key)
         inventory = ledger.build_inventory(self._data_dir, self._key)
@@ -629,25 +652,38 @@ class AgentRunner:
                 cfg=cfg,
             )
         except Rejected as e:
+            return _rejected(e.reason, {k: str(v) for k, v in e.detail.items()})
+
+        candidate = ProposedWrite(
+            kind=kind,
+            product_id=product_id,
+            amount=amount,
+            unit=unit,
+            from_location=from_location,
+            to_location=to_location,
+            warnings=tuple(messages),
+        )
+        if candidate in self._pending:
+            # A real LFM2.5 run repeated an already-successful discover call
+            # three more times, byte-for-byte — `decide_change` has no
+            # memory of what this same `propose`/`revise` call already
+            # queued, so each repeat silently became a second, third,
+            # fourth full write. Naming the exact quantity already proposed
+            # is both the guard against that (never appended twice) and a
+            # clearer signal back to the model than repeating "proposed"
+            # unchanged, which plausibly reads as "still not done."
             return json.dumps(
                 {
-                    "status": "rejected",
-                    "reason": e.reason,
-                    "detail": {k: str(v) for k, v in e.detail.items()},
+                    "status": "already_proposed",
+                    "product_id": product_id,
+                    "amount": str(amount),
+                    "unit": unit,
+                    "from_location": from_location,
+                    "to_location": to_location,
                 }
             )
 
-        self._pending.append(
-            ProposedWrite(
-                kind=kind,
-                product_id=product_id,
-                amount=amount,
-                unit=unit,
-                from_location=from_location,
-                to_location=to_location,
-                warnings=tuple(messages),
-            )
-        )
+        self._pending.append(candidate)
         return json.dumps(
             {
                 "status": "proposed",
@@ -754,13 +790,7 @@ class AgentRunner:
                 # small model can still emit a name it wasn't given; fail
                 # this one call rather than crash or silently dispatch the
                 # wrong domain action.
-                result = json.dumps(
-                    {
-                        "status": "rejected",
-                        "reason": "tool_not_available",
-                        "detail": {"name": call.name},
-                    }
-                )
+                result = _rejected("tool_not_available", {"name": call.name})
             self._trace.append(ToolCallRecord(name=call.name, arguments=args, result=result))
             self._messages.append(
                 {
