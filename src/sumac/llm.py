@@ -1,75 +1,46 @@
 """In-process agent for `sumac ask`: mistral.rs `Runner` wrapping the domain
 layer's existing `ledger`/`decide` entry points.
 
-Implements docs/journal/2026-09-01-ask-agent-design.md — section numbers in
-comments below refer to that document. This is the `sumac/llm.py` §16
-describes as not-yet-existing, with one load-bearing deviation from §9/§12's
-recommended mechanism — see "Client-side, not server-side" below.
+Background on the mistral.rs SDK and the client-side tool-calling loop this
+module uses instead of the server-side one is in
+docs/journal/2026-09-01-ask-agent-design.md. The query-classifier design this
+module currently implements — routing a request to a small, task-specific
+prompt instead of one prompt covering every tool — is in
+docs/journal/2026-09-02-query-classifier.md.
 
-Two phases per invocation, matching §12/§14:
-
-- **Propose/revise** (`AgentRunner.propose`/`.revise`): runs the agentic
-  tool-calling loop against the real, current inventory, but every mutating
-  tool callback stops short of `store.append` — it calls `decide.decide_change`
-  to validate the resolved call and records it in `self._pending`, never
-  writing anything. This is what makes dry-run and preview-then-accept the
-  same mechanism (§11, §12).
-- **Commit** (`AgentRunner.commit`): only reachable after a human has reviewed
-  an `AgentPlan` and accepted it. Re-decides each `ProposedWrite` against
-  freshly reloaded state (§14's "shelf is authoritative, not the log, even
-  between preview and accept" reasoning) and actually appends.
+`AgentRunner.propose` first classifies the request into a `QueryKind`
+(`FIND`/`ADD`/`REMOVE`/`REJECT`) with a small, single-purpose call, then runs
+the agentic tool-calling loop against a system prompt and tool schema scoped
+to that one kind — a `find`-classified request never sees the
+consume/move/discover schemas, and vice versa. Every mutating tool callback
+stops short of `store.append`; it calls `decide.decide_change` to validate
+the resolved call and records it in `self._pending`, which is what makes
+dry-run and preview-then-accept the same mechanism. `AgentRunner.commit` is
+only reachable after a human has reviewed an `AgentPlan` and accepted it —
+it re-decides each `ProposedWrite` against freshly reloaded state rather
+than replaying what `propose`/`revise` resolved, since real time may have
+passed since the preview was shown.
 
 `Rejected` raised inside a tool callback during propose/revise is expected
-and is converted to a `{"status": "rejected", ...}` tool result (§18) — it
-never escapes `propose`/`revise`. `Rejected` raised during `commit` is not a
-modeled outcome (the human is no longer in the loop) and propagates normally,
-the same way `cli.py`'s `add` command already lets it reach `cli.main`'s
-top-level handler (§23).
+and is converted to a `{"status": "rejected", ...}` tool result — it never
+escapes `propose`/`revise`. `Rejected` raised during `commit` is not a
+modeled outcome (the human is no longer in the loop) and propagates
+normally, the same way `cli.py`'s `add` command already lets it reach
+`cli.main`'s top-level handler.
 
-**Client-side, not server-side (deviation from §9/§12, found empirically).**
-§9/§12 recommended registering `tool_callbacks` on `Runner` and letting
-mistral.rs's server-side loop dispatch them (`max_tool_rounds`,
-`agent_permission`, per-invocation `session_id`). Running that against a real
-model surfaced a bug in the installed 0.9.2 Python SDK: `Runner(tool_callbacks=
-{...})` registers each callback through the Rust builder's schema-less
-`with_tool_callback(name, callback)` (confirmed against
-`EricLBuehler/mistral.rs`'s `mistralrs/src/builder_macros.rs` and
-`mistralrs-pyo3/src/lib.rs` on `master`) — every registered tool gets an empty
-`Tool` (`parameters: None`, `description: None`, `strict: None`), not the
-schema this module defines below. The richer `with_tool_callback_and_tool(name,
-callback, tool)` that would attach a real schema exists in Rust but is not
-exposed through the Python bindings. Supplying the real schema the only way
-left — via `ChatCompletionRequest.tool_schemas` on the request, alongside the
-same-named `tool_callbacks` registration — hits a separate check in
-`mistralrs-core/src/engine/agentic_loop.rs` that rejects any request tool
-whose name already exists in `tool_callbacks`, with exactly the error this
-module's tools were seen tripping: `"Tool '<name>' conflicts with a registered
-internal tool. Internal tool names cannot be overridden."` ("internal" there
-means "already in `tool_callbacks`", not "hardcoded engine builtin" — sumac's
-own tools trip it against themselves). This affects the SDK's own
-`examples/python/agentic_tools.py`, not just sumac's usage — it registers
-`tool_callbacks` and passes matching `tool_schemas` in the same shape this
-module used to. Filed upstream as inconsistent with `with_tool_callback`'s
-empty-schema behavior; not something a different tool name or a request-field
-change on sumac's side can work around while still using the server-side loop.
-
-The fix is the *other* documented loop shape (§7's "client-side loop",
-`examples/python/tool_call.py`): `Runner` is built with no `tool_callbacks` at
-all, `tool_schemas` carries the real schemas on every request as before, and
-this module drives the round-trip itself — inspect
-`response.choices[0].message.tool_calls`, dispatch the matching Python
-function directly, append the result as a new message, and re-send. This
-also simplifies session handling: `self._messages` is sumac's own accumulated
-history for one `propose`/`revise` invocation, so there is no need for
-mistral.rs's `session_id` continuity mechanism (§13's original reason for
-minting one) — §10's open question about whether `remember_for_session` has
-anything to scope to is moot along with it, along with `agent_permission` and
-`max_tool_rounds` as request fields (the round cap is enforced in this
-module's own loop instead, as `MAX_TOOL_ROUNDS` below). Per mistral.rs's own
-docs (`agentic-runtime.md`, "the standard OpenAI-compatible flow"), only the
-*first* tool call in a multi-call response is executed and the rest are
-dropped — matching the server-side loop's own documented one-call-per-round
-behavior (§7), so behavior here is the same shape either way.
+**Client-side, not server-side tool-calling loop.** mistral.rs's Python SDK
+offers two loop shapes; this module uses the client-side one deliberately,
+not by default. Registering `tool_callbacks` on `Runner` and letting
+mistral.rs's server-side loop dispatch them is the documented alternative,
+but the installed 0.9.2 Python bindings register each callback with an empty
+schema and separately reject a request that also declares a real
+`tool_schemas` entry for the same name — there is no way to give a
+server-side-dispatched tool a real, `strict`-mode schema through this SDK
+version. `Runner` is therefore built with no `tool_callbacks` at all;
+`tool_schemas` carries the real schemas on every request, and `AgentRunner`
+inspects `response.choices[0].message.tool_calls` itself, dispatches the
+matching Python function, appends the result as a new message, and re-sends.
+Full traces and upstream references are in the design journal above.
 """
 
 from __future__ import annotations
@@ -95,27 +66,24 @@ class ToolCallFormat(StrEnum):
     tool call replayed in, as the assistant's own prior turn — see
     `_render_tool_call`. Not one universal format: mistralrs-pyo3 0.9.2
     drops the structured `tool_calls` field when building a message from a
-    plain dict (module docstring, "Client-side, not server-side") and
-    passes only `content` through, so this module has to hand-render
-    exactly what each model's own chat template would have produced from a
-    real `tool_calls` field — and that rendering is template-specific, not
-    generic. §28 worked this out for Qwen3's `<tool_call>` JSON block by
-    reading its GGUF-embedded Jinja template line by line; LFM2.5 uses an
-    entirely different, Pythonic `<|tool_call_start|>[name(...)]
-    <|tool_call_end|>` syntax (§40) — unconfirmed against a real LFM2.5 run
-    in this environment, same as every other real-model claim in this
-    module (§21, §24)."""
+    plain dict (module docstring) and passes only `content` through, so this
+    module has to hand-render exactly what each model's own chat template
+    would have produced from a real `tool_calls` field — and that rendering
+    is template-specific, not generic. Qwen3 uses a `<tool_call>` JSON
+    block; LFM2.5 uses a different, Pythonic `<|tool_call_start|>[name(...)]
+    <|tool_call_end|>` syntax. See the design journal for how each was
+    worked out against a real GGUF-embedded chat template."""
 
     QWEN = "qwen"
     LFM = "lfm"
 
 
-# --- Configuration (§21) ----------------------------------------------------
-# Not empirically checked against the tool schemas below (§21, §24) — pick a
-# different GGUF repo/file here if this one doesn't call tools reliably.
-# id/filename/format travel together as one block (comment/uncomment as a
-# unit) so switching models can't leave TOOL_CALL_FORMAT pointing at the
-# wrong wire syntax (§40).
+# --- Configuration -----------------------------------------------------------
+# Not empirically checked against every tool schema below for every model —
+# pick a different GGUF repo/file here if this one doesn't call tools
+# reliably. id/filename/format travel together as one block (comment/
+# uncomment as a unit) so switching models can't leave TOOL_CALL_FORMAT
+# pointing at the wrong wire syntax.
 
 # QUANTIZED_MODEL_ID = "unsloth/LFM2.5-1.2B-Instruct-GGUF"
 # QUANTIZED_FILENAME = "LFM2.5-1.2B-Instruct-Q4_K_M.gguf"
@@ -130,69 +98,72 @@ TOOL_CALL_FORMAT = ToolCallFormat.LFM
 # QUANTIZED_FILENAME = "Qwen3-0.6B-Q4_K_M.gguf"
 # TOOL_CALL_FORMAT = ToolCallFormat.QWEN
 
-# §13: a termination guarantee sized for "one write per round" (every
-# sequential search-then-act step a compound request could produce), not a
-# cap on how compound a single request may be.
+# A termination guarantee sized for "one write per round" (every sequential
+# search-then-act step a compound request could produce), not a cap on how
+# compound a single request may be.
 MAX_TOOL_ROUNDS = 20
 
-# §13: one self-check pass by default; 0 disables it.
+# One self-check pass by default; 0 disables it.
 SELF_REVIEW_ROUNDS = 1
 
-# Passed as ChatCompletionRequest.model — unconfirmed against a worked
-# example whether this needs to match the loaded model's own id (§21, §24).
+# Passed as ChatCompletionRequest.model — unconfirmed whether this needs to
+# match the loaded model's own id, kept equal to it since nothing has shown
+# otherwise.
 MODEL_ID = QUANTIZED_MODEL_ID
 
-# --- System prompt (§20) ----------------------------------------------------
-# A draft, not tuned against a real model's behavior (§20, §24).
 
-SYSTEM_PROMPT = """\
-You are a household grocery inventory assistant.
+# --- Query classification ----------------------------------------------------
+# The first step of handling any request: decide which of a small, fixed set
+# of task shapes it is, before the model sees any domain tool at all. See the
+# design journal for why — in short, one system prompt trying to cover
+# search-relevance judgment, add-vs-already-exists reasoning, and
+# consume-vs-move disambiguation all at once degraded on all three.
 
-You have four tools:
-- sumac_find_inventory
-- sumac_consume_inventory
-- sumac_move_inventory
-- sumac_discover_inventory
 
-Use the tools to answer the person's request.
+class QueryKind(StrEnum):
+    FIND = "find"
+    ADD = "add"
+    REMOVE = "remove"
+    REJECT = "reject"
 
-When the person asks where an item is, call sumac_find_inventory with the
-item name as the query. For example, if they ask "where is the jam?",
-call sumac_find_inventory with {"query": "jam"}.
 
-For consume, move, or discover actions, first use sumac_find_inventory to
-find the relevant product and its current location and quantity. Only use
-product_id, location_id, amount, and unit exactly as returned by a tool.
-Never invent identifiers or quantities.
+_CLASSIFY_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "classify_request",
+        "description": "Classify the person's request. Call this exactly once, with no other text.",
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "enum": ["find", "add", "remove", "reject"],
+                    "description": (
+                        "find: locate or ask about something already in inventory, "
+                        "nothing changes. add: record new or additional stock of a "
+                        "product. remove: record that stock was used, thrown away, "
+                        "or moved elsewhere. reject: anything else, or too vague to "
+                        "act on."
+                    ),
+                }
+            },
+            "required": ["kind"],
+            "additionalProperties": False,
+        },
+    },
+}
+_CLASSIFY_SCHEMA_JSON = json.dumps(_CLASSIFY_SCHEMA)
 
-When interpreting search results, distinguish between products that are
-actually the requested food and products that merely contain the search
-term.
-
-Include:
-- an exact match for the requested food;
-- named varieties, preparations, or forms of that food.
-
-Exclude:
-- prepared dishes that merely contain the food as an ingredient;
-- products where the search term is only part of an unrelated product name;
-- otherwise unrelated search results.
-
-Use the relevant included products to answer the person's request. Do not
-simply repeat every search result.
-
-Call one tool at a time. Wait for its result before deciding what to do next.
-
-When no more tool calls are needed, answer the person directly in plain text.
+CLASSIFIER_PROMPT = """\
+You classify one household inventory request. Call classify_request exactly
+once with the single best-fitting kind. Do not answer the request itself.
 """
 
+_REJECT_REPLY = "This doesn't look like a request to find, add, or remove something from inventory."
 
-_SELF_REVIEW_MESSAGE = (
-    "Check the plan above against the original request. If it is correct, "
-    "say so with no further tool calls. If not, revise it."
-)
 
-# --- Tool schemas (§17) -----------------------------------------------------
+# --- Tool schemas -------------------------------------------------------------
 # `amount` is `"string"`, not `"number"` — matches `cli.py`'s own `add`
 # command, which parses `amount: str` through `Decimal` rather than trusting
 # JSON's number type to carry an exact decimal string.
@@ -216,8 +187,7 @@ _FIND_INVENTORY_SCHEMA = {
             "reading the name would. product_id and location_id are "
             "internal identifiers — use them, verbatim, only in a later "
             "consume/move/discover call; never invent one and never "
-            "mention one in a reply to the person. Call this before "
-            "consuming, moving, or discovering any product."
+            "mention one in a reply to the person."
         ),
         "strict": True,
         "parameters": {
@@ -296,12 +266,11 @@ _DISCOVER_INVENTORY_SCHEMA = {
         "name": "sumac_discover_inventory",
         "description": (
             "Propose recording that some quantity of a product now exists at a "
-            "location, with no claim about where it came from. Use this for a "
-            "product whose identity, container, or unit changed since it was taken "
-            "from inventory — a cooked dish, a decanted portion, a repackaged "
-            "remainder — where the result cannot be expressed as a move. product_id "
-            "may be a new name distinct from any product consumed earlier in this "
-            "request."
+            "location. Covers both a genuinely new or additional product (a search "
+            "finding no match is expected, not a blocker) and one whose identity, "
+            "container, or unit changed since it was taken from inventory — a cooked "
+            "dish, a decanted portion, a repackaged remainder. product_id may be a "
+            "new name distinct from anything currently in inventory."
         ),
         "strict": True,
         "parameters": {
@@ -318,16 +287,6 @@ _DISCOVER_INVENTORY_SCHEMA = {
     },
 }
 
-TOOL_SCHEMAS = [
-    json.dumps(s)
-    for s in (
-        _FIND_INVENTORY_SCHEMA,
-        _CONSUME_INVENTORY_SCHEMA,
-        _MOVE_INVENTORY_SCHEMA,
-        _DISCOVER_INVENTORY_SCHEMA,
-    )
-]
-
 _KIND_BY_TOOL = {
     "sumac_consume_inventory": ChangeKind.CONSUMPTION,
     "sumac_move_inventory": ChangeKind.MOVEMENT,
@@ -335,7 +294,91 @@ _KIND_BY_TOOL = {
 }
 
 
-# --- Orchestration types (§19) ----------------------------------------------
+# --- Per-kind prompts and tool scoping ---------------------------------------
+# Each prompt below covers exactly the reasoning its own kind needs, and no
+# other kind's tools are on the request at all — a `find` request never sees
+# the consume/move/discover schemas, so there's nothing for it to reason
+# about wanting to use them, and vice versa.
+
+_FIND_PROMPT = """\
+You are a household grocery inventory assistant. You have one tool,
+sumac_find_inventory. Use it to answer the request.
+
+"is_exact_match": true is strong evidence for what the person means, but
+does not rule out the other, non-exact matches — a modifier on the search
+word (a flavor, variant, or preparation) is often still the same basic
+product; a name where the search word is only part of a different,
+established product's name usually isn't. Judge each match the way a
+person reading a shopping list would.
+
+Name only the products that actually answer the request — don't just list
+every search result. Call one tool at a time; when nothing more is needed,
+answer in plain text with no further tool call.
+"""
+
+_ADD_PROMPT = """\
+You are a household grocery inventory assistant. You have two tools,
+sumac_find_inventory and sumac_discover_inventory.
+
+Use sumac_discover_inventory to record the new or additional stock — a
+sumac_find_inventory search turning up no match for the product is
+expected, not a reason to stop: use a new product_id describing it. Call
+sumac_find_inventory first only if you need to resolve a location the
+person referred to indirectly (e.g. "with the other tins of it") rather
+than named directly.
+
+Call one tool at a time; when nothing more is needed, answer in plain text
+with no further tool call.
+"""
+
+_REMOVE_PROMPT = """\
+You are a household grocery inventory assistant. You have three tools:
+sumac_find_inventory, sumac_consume_inventory, and sumac_move_inventory.
+
+First call sumac_find_inventory to get the product's exact product_id,
+location_id, amount, and unit — never invent these. Then, if the person
+names a destination for it, call sumac_move_inventory; otherwise call
+sumac_consume_inventory.
+
+Call one tool at a time; when nothing more is needed, answer in plain text
+with no further tool call.
+"""
+
+_SCHEMA_DICTS_BY_KIND: dict[QueryKind, tuple[dict, ...]] = {
+    QueryKind.FIND: (_FIND_INVENTORY_SCHEMA,),
+    QueryKind.ADD: (_FIND_INVENTORY_SCHEMA, _DISCOVER_INVENTORY_SCHEMA),
+    QueryKind.REMOVE: (_FIND_INVENTORY_SCHEMA, _CONSUME_INVENTORY_SCHEMA, _MOVE_INVENTORY_SCHEMA),
+}
+
+_PROMPT_BY_KIND: dict[QueryKind, str] = {
+    QueryKind.FIND: _FIND_PROMPT,
+    QueryKind.ADD: _ADD_PROMPT,
+    QueryKind.REMOVE: _REMOVE_PROMPT,
+}
+
+_SCHEMAS_BY_KIND: dict[QueryKind, list[str]] = {
+    kind: [json.dumps(s) for s in schemas] for kind, schemas in _SCHEMA_DICTS_BY_KIND.items()
+}
+
+_TOOL_NAMES_BY_KIND: dict[QueryKind, frozenset[str]] = {
+    kind: frozenset(s["function"]["name"] for s in schemas)
+    for kind, schemas in _SCHEMA_DICTS_BY_KIND.items()
+}
+
+_REQUIRED_ARGS_BY_TOOL: dict[str, tuple[str, ...]] = {
+    s["function"]["name"]: tuple(s["function"]["parameters"]["required"])
+    for schemas in _SCHEMA_DICTS_BY_KIND.values()
+    for s in schemas
+}
+
+
+_SELF_REVIEW_MESSAGE = (
+    "Check the plan above against the original request. If it is correct, "
+    "say so with no further tool calls. If not, revise it."
+)
+
+
+# --- Orchestration types ------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -351,12 +394,12 @@ class ProposedWrite:
 
 @dataclass(frozen=True, slots=True)
 class ToolCallRecord:
-    """One tool call `AgentRunner._run_loop` dispatched and its raw JSON
-    result — not part of §19's original `ProposedWrite`/`AgentPlan` pair,
-    added once real usage showed a plain final reply (e.g. "the jam is in
-    the fridge") hides the exact `sumac_find_inventory` query and match data
-    that produced it, with no way for a human to tell a vague answer from a
-    genuinely empty result without seeing the underlying call."""
+    """One tool call `AgentRunner._run_loop` (or the classifier step)
+    dispatched, and its raw JSON result — a plain final reply like "the jam
+    is in the fridge" otherwise hides the exact `sumac_find_inventory` query
+    and match data that produced it, with no way for a human to tell a
+    vague answer from a genuinely empty result without seeing the
+    underlying call."""
 
     name: str
     arguments: dict
@@ -371,9 +414,9 @@ class AgentPlan:
 
 
 class SendsCompletions(Protocol):
-    """The one `mistralrs.Runner` method `AgentRunner` actually calls (§22) —
-    a real `Runner` satisfies this structurally; tests pass a hand-built
-    fake instead, with no real model or GGUF download involved."""
+    """The one `mistralrs.Runner` method `AgentRunner` actually calls — a
+    real `Runner` satisfies this structurally; tests pass a hand-built fake
+    instead, with no real model or GGUF download involved."""
 
     def send_chat_completion_request(
         self, request: mistralrs.ChatCompletionRequest, model_id: str | None = None
@@ -382,9 +425,8 @@ class SendsCompletions(Protocol):
 
 def _lfm_literal(value: object) -> str:
     """A double-quoted, escaped string literal for LFM2.5's Pythonic
-    tool-call syntax, e.g. `query="butter"`. Every argument this module's
-    tool schemas define is string-typed (§17's comment on why `amount` is
-    `"string"`, not `"number"`, applies here too), so this only ever needs
+    tool-call syntax, e.g. `query="butter"`. Every argument every tool
+    schema in this module defines is string-typed, so this only ever needs
     to quote and escape a plain string, not represent other JSON types."""
     escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
@@ -402,18 +444,17 @@ def _render_tool_call(name: str, arguments: dict, raw_arguments: str) -> str:
         # <|tool_call_start|>[name(key="value", ...)]<|tool_call_end|>
         args_text = ", ".join(f"{key}={_lfm_literal(value)}" for key, value in arguments.items())
         return f"<|tool_call_start|>[{name}({args_text})]<|tool_call_end|>"
-    # QWEN (§28): byte-for-byte what the `{%- if message.tool_calls %}`
-    # branch renders from a real `tool_calls` field. `raw_arguments` is
-    # spliced in verbatim — already what `{{- tool_call.arguments }}`
-    # inserts when `arguments is string` — rather than re-serializing
-    # `arguments`, which could reorder keys or whitespace differently.
+    # QWEN: byte-for-byte what the `{%- if message.tool_calls %}` branch
+    # renders from a real `tool_calls` field. `raw_arguments` is spliced in
+    # verbatim — already what `{{- tool_call.arguments }}` inserts when
+    # `arguments is string` — rather than re-serializing `arguments`, which
+    # could reorder keys or whitespace differently.
     return f'<tool_call>\n{{"name": "{name}", "arguments": {raw_arguments}}}\n</tool_call>'
 
 
 def _round_preview(message: mistralrs.ResponseMessage, limit: int = 100) -> str:
     """What the model actually did this round, truncated — a tool call's
-    name and arguments, or its plain-text reply. §31: the trace table alone
-    didn't say which round was which without cross-referencing by hand."""
+    name and arguments, or its plain-text reply."""
     if message.tool_calls:
         call = message.tool_calls[0].function
         text = f"tool call: {call.name}({call.arguments})"
@@ -424,10 +465,9 @@ def _round_preview(message: mistralrs.ResponseMessage, limit: int = 100) -> str:
 
 def _print_usage(response: mistralrs.ChatCompletionResponse, round_num: int) -> None:
     """Per-round token/timing numbers from mistral.rs's own `Usage`, labeled
-    with `round_num` and a preview of what the round actually produced
-    (§30/§31 — unlabeled, content-free rounds made this "impossible to
-    trace"). No-op for a fake `SendsCompletions` in tests, which has no
-    real `.usage`."""
+    with `round_num` and a preview of what the round actually produced. A
+    no-op for a fake `SendsCompletions` in tests, which has no real
+    `.usage`."""
     usage = getattr(response, "usage", None)
     if usage is None:
         return
@@ -440,10 +480,7 @@ def _print_usage(response: mistralrs.ChatCompletionResponse, round_num: int) -> 
 
 
 def _build_runner() -> mistralrs.Runner:
-    # No `tool_callbacks` here — see the module docstring's "Client-side, not
-    # server-side" section for why: the Python SDK can only register a
-    # callback with an empty schema, and supplying the real schema via
-    # `tool_schemas` on the request then collides with that registration.
+    # No `tool_callbacks` here — see the module docstring for why:
     # `AgentRunner` dispatches tool calls itself instead (`_run_loop`).
     render.console.print(
         f"[dim]Loading {QUANTIZED_MODEL_ID} (first run downloads it; may take a while)...[/dim]"
@@ -459,12 +496,12 @@ def _build_runner() -> mistralrs.Runner:
 
 
 class AgentRunner:
-    """§19. `data_dir`/`key` are closed over by the tool callbacks below,
-    matching `cli.py`'s existing `AgentRunner(data_dir, key)` construction
-    (§16). Pass `runner` to substitute a fake `SendsCompletions` in tests
-    (§22) instead of building a real `mistralrs.Runner`. `tool_callbacks` is
-    dispatched by this class itself, client-side — see the module docstring —
-    rather than registered on the `Runner`."""
+    """`data_dir`/`key` are closed over by the tool callbacks below,
+    matching `cli.py`'s existing `AgentRunner(data_dir, key)` construction.
+    Pass `runner` to substitute a fake `SendsCompletions` in tests instead
+    of building a real `mistralrs.Runner`. Tool calls are dispatched by
+    this class itself, client-side — see the module docstring — rather
+    than registered on the `Runner`."""
 
     def __init__(
         self,
@@ -478,6 +515,9 @@ class AgentRunner:
         self._key = key
         self._debug = debug
         self._messages: list[dict[str, str]] | None = None
+        self._kind: QueryKind | None = None
+        self._schemas: list[str] = []
+        self._allowed: frozenset[str] = frozenset()
         self._pending: list[ProposedWrite] = []
         self._trace: list[ToolCallRecord] = []
         self.tool_callbacks: dict[str, Callable[[str, dict], str]] = {
@@ -496,22 +536,19 @@ class AgentRunner:
             else cast(SendsCompletions, _build_runner())
         )
 
-    # -- tool callbacks (§18) ------------------------------------------------
+    # -- tool callbacks -------------------------------------------------------
 
     def _sumac_find_inventory(self, _name: str, args: dict) -> str:
-        """§36: grouped by product, not by `ledger.MatchKind` tier (§34) and
-        not a flat per-location list (pre-§34) — every location holding a
-        given product_id is collected under that product's one entry, so
-        "two rows, same product_id, different location_id" is no longer
-        bookkeeping the model has to notice itself (§35's real trace: it
-        was still doing that bookkeeping wrong). `ledger.search_inventory`'s
-        classification is still the only matching logic — this only
-        reshapes its already-computed, already-ordered output; nothing
-        about what counts as a match changes here. `is_exact_match` is
-        `True` only for a product whose match_kind is `MatchKind.EXACT`;
-        entries stay in `search_inventory`'s tier order (exact, then
-        whole-word, then substring) without naming the tiers themselves —
-        §36 also dropped that jargon from the model-facing contract."""
+        """Groups results by product, not by match tier and not as a flat
+        per-location list — every location holding a given product_id is
+        collected under that product's one entry, so "two rows, same
+        product_id, different location_id" is not bookkeeping the model has
+        to notice itself. `ledger.search_inventory`'s classification is the
+        only matching logic; this only reshapes its already-computed,
+        already-ordered output. `is_exact_match` is `True` only for a
+        product whose match_kind is `MatchKind.EXACT`; entries stay in
+        `search_inventory`'s tier order (exact, then whole-word, then
+        substring) without naming the tiers themselves."""
         query = str(args.get("query", ""))
         inventory = ledger.build_inventory(self._data_dir, self._key)
         locations = ledger.load_locations_or_empty(self._data_dir, self._key)
@@ -536,6 +573,24 @@ class AgentRunner:
         return json.dumps({"products": list(products.values())})
 
     def _propose_write(self, name: str, args: dict) -> str:
+        # A real LFM2.5 run produced `_amount` instead of `amount` — the
+        # model's own Pythonic tool-call syntax isn't key-constrained the
+        # way strict JSON-schema decoding is, so a wrong or missing key
+        # reaches here as a plain absence rather than a schema violation
+        # caught before generation. Naming exactly what's missing and what
+        # was received (rather than a bare "invalid_amount") gives a retry
+        # something concrete to correct, instead of repeating the same
+        # malformed call.
+        missing = [k for k in _REQUIRED_ARGS_BY_TOOL[name] if k not in args]
+        if missing:
+            return json.dumps(
+                {
+                    "status": "rejected",
+                    "reason": "missing_required_argument",
+                    "detail": {"missing": missing, "received": sorted(args.keys())},
+                }
+            )
+
         kind = _KIND_BY_TOOL[name]
         product_id = str(args.get("product_id", ""))
         unit = str(args.get("unit", ""))
@@ -543,16 +598,16 @@ class AgentRunner:
         to_location = args.get("to_location")
 
         try:
-            amount = Decimal(str(args.get("amount", "")))
+            amount = Decimal(str(args["amount"]))
         except InvalidOperation:
-            # Not one of decide.py's own rejection-catalogue reasons (§4) —
-            # this is the tool-callback equivalent of cli.py's `_parse_decimal`
+            # Not one of decide.py's own rejection-catalogue reasons — this
+            # is the tool-callback equivalent of cli.py's `_parse_decimal`
             # rejecting before a value ever reaches `decide_change` at all.
             return json.dumps(
                 {
                     "status": "rejected",
                     "reason": "invalid_amount",
-                    "detail": {"value": args.get("amount")},
+                    "detail": {"value": args["amount"]},
                 }
             )
 
@@ -614,30 +669,58 @@ class AgentRunner:
 
     # -- request plumbing (client-side loop — see module docstring) ---------
 
-    def _build_request(self) -> mistralrs.ChatCompletionRequest:
-        assert self._messages is not None
+    def _build_request(
+        self, messages: list[dict[str, str]], schemas: list[str]
+    ) -> mistralrs.ChatCompletionRequest:
         return mistralrs.ChatCompletionRequest(
-            messages=self._messages,
+            messages=messages,
             model=MODEL_ID,
-            tool_schemas=TOOL_SCHEMAS,
+            tool_schemas=schemas,
             tool_choice=mistralrs.ToolChoice.Auto,
             enable_thinking=False,
         )
 
+    def _classify(self, prompt: str) -> QueryKind:
+        """One single-purpose call, made before the model sees any domain
+        tool: which of find/add/remove this request is, or reject. See the
+        design journal for why this is a separate step rather than folded
+        into one prompt covering every tool."""
+        messages = [
+            {"role": "system", "content": CLASSIFIER_PROMPT},
+            {"role": "user", "content": prompt},
+        ]
+        request = self._build_request(messages, [_CLASSIFY_SCHEMA_JSON])
+        response = self._runner.send_chat_completion_request(request)
+        _print_usage(response, 0)
+        message = response.choices[0].message
+        if not message.tool_calls:
+            self._trace.append(
+                ToolCallRecord(name="classify_request", arguments={}, result=message.content or "")
+            )
+            return QueryKind.REJECT
+        call = message.tool_calls[0].function
+        args = json.loads(call.arguments)
+        self._trace.append(
+            ToolCallRecord(name="classify_request", arguments=args, result=json.dumps(args))
+        )
+        try:
+            return QueryKind(args.get("kind"))
+        except ValueError:
+            return QueryKind.REJECT
+
     def _run_loop(self) -> AgentPlan:
-        """Client-side tool-calling loop (§25/§26/§27/§28/§40 — see the
-        journal for why). The assistant message for a dispatched call is
-        rendered by `_render_tool_call`, per `TOOL_CALL_FORMAT` — hand-built
-        because the Python bindings drop a real `tool_calls` field but pass
-        `content` through unchanged, so this has to be byte-for-byte what
-        the loaded model's own chat template would have produced from a
-        real `tool_calls` field, and that rendering differs by model family
-        (§40). `MAX_TOOL_ROUNDS` is a termination guarantee, not a
-        plan-size cap (§13)."""
+        """Client-side tool-calling loop — see the module docstring. The
+        assistant message for a dispatched call is rendered by
+        `_render_tool_call`, per `TOOL_CALL_FORMAT` — hand-built because the
+        Python bindings drop a real `tool_calls` field but pass `content`
+        through unchanged, so this has to be byte-for-byte what the loaded
+        model's own chat template would have produced from a real
+        `tool_calls` field, and that rendering differs by model family.
+        `MAX_TOOL_ROUNDS` is a termination guarantee, not a plan-size cap."""
         assert self._messages is not None
         self._pending = []
         for round_num in range(1, MAX_TOOL_ROUNDS + 1):
-            request = self._build_request()
+            request = self._build_request(self._messages, self._schemas)
             if self._debug:
                 render.print_agent_messages(self._messages, f"MESSAGES · round {round_num}")
                 render.print_agent_request(request, round_num)
@@ -661,7 +744,21 @@ class AgentRunner:
 
             call = message.tool_calls[0].function
             args = json.loads(call.arguments)
-            result = self.tool_callbacks[call.name](call.name, args)
+            if call.name in self._allowed and call.name in self.tool_callbacks:
+                result = self.tool_callbacks[call.name](call.name, args)
+            else:
+                # A model calling a tool outside the schemas actually sent on
+                # this request — not expected under normal operation, but a
+                # small model can still emit a name it wasn't given; fail
+                # this one call rather than crash or silently dispatch the
+                # wrong domain action.
+                result = json.dumps(
+                    {
+                        "status": "rejected",
+                        "reason": "tool_not_available",
+                        "detail": {"name": call.name},
+                    }
+                )
             self._trace.append(ToolCallRecord(name=call.name, arguments=args, result=result))
             self._messages.append(
                 {
@@ -674,16 +771,16 @@ class AgentRunner:
                 render.print_agent_messages(self._messages, "MESSAGES FOR NEXT ROUND")
 
         # Round cap reached with no final reply — the accumulated plan (if
-        # any) is still returned rather than raised, matching §13's framing
-        # of this cap as a termination guarantee, not a success condition.
+        # any) is still returned rather than raised, since the cap is a
+        # termination guarantee, not a success condition.
         return AgentPlan(reply_text="", writes=tuple(self._pending))
 
     def _maybe_self_review(self, plan: AgentPlan) -> AgentPlan:
-        """§13/§14 step 3: the model checks its own plan against the original
-        request. A round that makes no new tool calls means the model is
-        satisfied with `plan` as it stands — stop and keep it. A round that
-        does make new tool calls replaces `plan` and, if rounds remain, is
-        itself reviewed again."""
+        """The model checks its own plan against the original request. A
+        round that makes no new tool calls means the model is satisfied
+        with `plan` as it stands — stop and keep it. A round that does make
+        new tool calls replaces `plan` and, if rounds remain, is itself
+        reviewed again."""
         assert self._messages is not None
         if not plan.writes:
             return plan
@@ -695,32 +792,41 @@ class AgentRunner:
             plan = reviewed
         return plan
 
-    # -- public interface (§19) ----------------------------------------------
+    # -- public interface -----------------------------------------------------
 
     def propose(self, prompt: str) -> AgentPlan:
+        self._trace = []
+        kind = self._classify(prompt)
+        self._kind = kind
+        if kind is QueryKind.REJECT:
+            self._messages = None
+            return AgentPlan(reply_text=_REJECT_REPLY, writes=(), trace=tuple(self._trace))
+        self._schemas = _SCHEMAS_BY_KIND[kind]
+        self._allowed = _TOOL_NAMES_BY_KIND[kind]
         self._messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": _PROMPT_BY_KIND[kind]},
             {"role": "user", "content": prompt},
         ]
-        self._trace = []
         plan = self._maybe_self_review(self._run_loop())
         return replace(plan, trace=tuple(self._trace))
 
     def revise(self, feedback: str) -> AgentPlan:
         if self._messages is None:
-            raise RuntimeError("AgentRunner.revise() called before propose()")
+            raise RuntimeError(
+                "AgentRunner.revise() called before propose(), or propose() rejected the request"
+            )
         self._messages.append({"role": "user", "content": feedback})
         self._trace = []
         plan = self._maybe_self_review(self._run_loop())
         return replace(plan, trace=tuple(self._trace))
 
     def commit(self, plan: AgentPlan) -> list[str]:
-        """§14 step 5 ("Accept"), §23: re-decides each write against freshly
-        reloaded state rather than replaying the dry run's resolution — real
-        time passed since `propose`/`revise` computed it. Errors here are not
-        caught: a `Rejected` at this point is not a modeled outcome the model
-        gets to react to, and should propagate the same way `cli.py`'s `add`
-        command already lets it (§23)."""
+        """Re-decides each write against freshly reloaded state rather than
+        replaying the dry run's resolution — real time passed since
+        `propose`/`revise` computed it. Errors here are not caught: a
+        `Rejected` at this point is not a modeled outcome the model gets to
+        react to, and should propagate the same way `cli.py`'s `add`
+        command already lets it."""
         summaries: list[str] = []
         for pw in plan.writes:
             cfg = config.build_config(self._data_dir, self._key)
