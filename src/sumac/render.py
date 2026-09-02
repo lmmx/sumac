@@ -354,28 +354,46 @@ def print_trace(trace: tuple[ToolCallRecord, ...]) -> None:
 
 
 def print_plan(plan: AgentPlan) -> None:
-    """`sumac ask`'s preview (docs/journal/2026-09-01-ask-agent-design.md §14
-    step 4): the accumulated, not-yet-committed writes an `AgentRunner.propose`/
-    `.revise` call resolved, in the structured-table style of `print_log`/
-    `print_doctor` rather than a single string."""
-    table = Table(title=f"Proposed plan ({len(plan.writes)} write(s))")
-    table.add_column("action")
-    table.add_column("detail")
+    """`sumac ask`'s preview: the accumulated, not-yet-committed writes an
+    `AgentRunner.propose`/`.revise` call resolved. One panel per write —
+    this is the one point in the CLI where the person is about to make a
+    real decision, so location, product, quantity, and "what's already
+    there" need to be readable at a glance, not abbreviated into a table
+    row. No computed "after" total: `decide_change`'s own shortfall
+    reconciliation at commit time can differ from a naive
+    current-minus-amount subtraction, and showing a number that turns out
+    wrong is worse than not showing one — "already there" is descriptive,
+    not a prediction."""
+    if len(plan.writes) > 1:
+        console.print(f"[bold]{len(plan.writes)} proposed changes:[/bold]")
     for w in plan.writes:
-        detail = f"{w.amount} {w.unit} {w.product_id}"
+        lines = [f"[bold]{w.kind.value}[/bold]: {w.amount} {w.unit} of {w.product_id}"]
         if w.from_location and w.to_location:
-            detail += f" {w.from_location} -> {w.to_location}"
+            lines.append(f"{w.from_location} → {w.to_location}")
         elif w.from_location:
-            detail += f" from {w.from_location}"
+            lines.append(f"from {w.from_location}")
         elif w.to_location:
-            detail += f" to {w.to_location}"
-        table.add_row(w.kind.value, detail)
-    console.print(table)
+            lines.append(f"to {w.to_location}")
+        if w.current_amount is not None:
+            lines.append(f"[dim]{w.current_amount} {w.unit} already there[/dim]")
+        for warning in w.warnings:
+            lines.append(f"[yellow]⚠ {warning}[/yellow]")
+        console.print(Panel("\n".join(lines), title="Proposed change", expand=False))
     if plan.reply_text:
         console.print(plan.reply_text)
-    for w in plan.writes:
-        for warning in w.warnings:
-            print_warning(warning)
+
+
+def print_decision_options(options: list[tuple[str, str]]) -> None:
+    """The available responses to a plan decision, one per row — key then
+    description — instead of cramming them into one dense prompt line the
+    person has to parse before they can even see what's on offer. `key` is
+    what to type; not every option needs a single-letter shortcut (e.g. the
+    free-text feedback fallback), so this takes whatever label the caller
+    already decided on rather than assuming one shape."""
+    table = Table(show_header=False, box=None, padding=(0, 1, 0, 0))
+    for key, description in options:
+        table.add_row(f"[bold cyan]{key}[/bold cyan]", description)
+    console.print(table)
 
 
 def print_verify(result: ledger.VerifyResult) -> None:
