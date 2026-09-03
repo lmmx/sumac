@@ -975,3 +975,114 @@ code-block formatting is a pre-existing cosmetic nit, unrelated), `ty check .` a
   here (yet)". `--eval-json` output is unconsumed until one is written.
 - `test_add.py::test_basmati_rice_in_different_unit` is still expected to fail for real — the
   `decide.py` gap it marks is unfixed, out of scope for this suite.
+
+---
+
+# 2026-09-03: First Real-Model Comparison, Registry Trim
+
+## Context
+
+First real-model runs of the scenario/evaluator suite (previous entries could only smoke-test
+against synthetic `EvalResult`s — no GPU/cached GGUF in-container). Run outside this container,
+across seven presets:
+
+```sh
+for model in qwen3.5-4b qwen3-4b lfm2.5-2.6b lfm2.5-1.2b qwen3.5-2b qwen3-1.7b qwen3-0.6b; do
+  uv run pytest evals --eval-json "runs/${model}.json" -v --eval-model "$model"
+done
+```
+
+Aggregated with:
+
+```sh
+jq -c -s '
+  map({
+    model,
+    scenarios: (.results | length),
+    passed: ([.results[] | select(.passed)] | length),
+    pass_rate: (([.results[] | select(.passed)] | length) / (.results | length) * 100),
+    checks: (
+      [.results[].checks | to_entries[]]
+      | group_by(.key)
+      | map({
+          check: .[0].key,
+          passed: ([.[] | select(.value == true)] | length),
+          total: length,
+          rate: (([.[] | select(.value == true)] | length) / length * 100)
+        })
+    )
+  })
+  | sort_by(-.pass_rate)
+' *.json
+```
+
+`--eval-model qwen3.5-2b` initially produced no `runs/qwen3.5-2b.json` at all — the loop above
+silently didn't write one (the fixture skips cleanly when the target GGUF isn't in the local HF
+cache, by design; nothing had downloaded qwen3.5-2b's weights yet). The first aggregation pass
+over `*.json` therefore only covered six of the seven presets, and dropped the missing one without
+flagging it rather than erroring — caught by counting files in `runs/`, not from the aggregation
+output itself. Separately, `--eval-model` alone doesn't fetch a preset's weights; getting
+qwen3.5-2b evaluated needed a `sumac ask --model qwen3.5-2b` run first to populate the HF cache, at
+which point the loop was rerun for that one preset and `runs/qwen3.5-2b.json` landed. All seven
+presets have a real run as of this entry.
+
+`DEFAULT_MODEL_PRESET` was also found pointing at `MODEL_PRESETS[4]` (`qwen3.5-2b`) on disk,
+uncommitted — a temporary edit made to work around the same cache-population problem (`sumac ask`
+had no other convenient way to target a specific preset's weights for download), left in place
+afterward. Reverted to index 0 in this pass.
+
+## Current State
+
+Verified directly from `runs/*.json` (not just the pasted interpretation of the aggregation
+above):
+
+| model | pass/22 | rate | classification | tool_scope | writes |
+|---|---|---|---|---|---|
+| qwen3.5-4b | 21 | 95% | 100% | 100% | 100% |
+| lfm2.5-2.6b | 18 | 82% | 91% | 100% | 95% |
+| qwen3.5-2b | 18 | 82% | 95% | 100% | 100% |
+| qwen3-1.7b | 11 | 50% | 77% | 100% | 85% |
+| qwen3-4b | 7 | 32% | 64% | 100% | 65% |
+| qwen3-0.6b | 1 | 5% | 50% | 100% | 50% |
+| lfm2.5-1.2b | 0 | 0% | 18% | 100% | 40% |
+
+`qwen3-4b`'s weak showing (32%, `outcome` check at 0%, `tool:sumac_find_inventory` at 60%) is
+suspected — not confirmed — to be an artifact of the specific quant used
+(`Qwen3-4B-Instruct-2507-Q4_K_M.gguf`; "2507" names an interim dated release, not qwen3.5's later
+one), rather than the 4B size class itself being weak — qwen3.5-4b, same size class, newer release,
+scores 95%. Not investigated further; the preset is dropped either way (see below), so
+distinguishing "bad quant" from "bad model" for qwen3-4b specifically wasn't pursued.
+
+`MODEL_PRESETS` in `src/sumac/llm.py` trimmed from seven presets to three, keeping every preset
+that scored at or above 82% and dropping every one at or below 50%:
+
+```python
+MODEL_PRESETS: tuple[ModelPreset, ...] = (
+    ModelPreset("qwen3.5-4b", ...),   # default — 95%
+    ModelPreset("qwen3.5-2b", ...),   # 82%
+    ModelPreset("lfm2.5-2.6b", ...),  # 82%
+)
+```
+
+Dropped: `qwen3-4b`, `qwen3-1.7b`, `qwen3-0.6b`, `lfm2.5-1.2b`. `DEFAULT_MODEL_PRESET` stays index 0
+(`qwen3.5-4b`, the top scorer). `evals/README.md`'s two example commands referencing the
+now-removed `qwen3-4b` preset updated to `qwen3.5-2b`.
+
+## Verified this session
+
+`ruff check src/sumac/llm.py evals/` and `ty check src/sumac/llm.py`: clean. `python -m py_compile`
+on the edited file: clean. Full `pytest` run not possible in this container (no GPU, no cached
+GGUFs, and this container's `.venv` points at a host-only interpreter path) — the registry trim
+itself needs no model to be structurally correct (`model_preset()` does a plain dict lookup), but
+hasn't been exercised against `evals/conftest.py`'s `--eval-model` option resolution for real here.
+
+## Missing
+
+- The registry trim and `DEFAULT_MODEL_PRESET` fix are unverified by an actual `pytest` run in any
+  environment this session — confirm with `uv run pytest evals -v --eval-model qwen3.5-4b` (or the
+  other two remaining presets) outside this container.
+- The qwen3-4b bad-quant hypothesis is untested — would need a different quant of the same
+  qwen3.5-generation 4B model run through the same suite to confirm, and isn't planned now that
+  the preset is dropped.
+- Local HF cache still holds weights for the four dropped presets — cleanup is manual, out of
+  scope here (the user's own).

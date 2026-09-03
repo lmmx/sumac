@@ -1,0 +1,320 @@
+{
+  "model": "lfm2.5-2.6b",
+  "seed": null,
+  "results": [
+    {
+      "scenario": "add.existing_item_explicit_location",
+      "category": "add",
+      "passed": true,
+      "checks": {
+        "classification": true,
+        "writes": true,
+        "kind": true,
+        "product": true,
+        "amount": true,
+        "unit": true,
+        "location": true
+      },
+      "failures": [],
+      "note": null
+    },
+    {
+      "scenario": "add.existing_item_indirect_location",
+      "category": "add",
+      "passed": true,
+      "checks": {
+        "classification": true,
+        "tool:sumac_find_inventory": true,
+        "writes": true,
+        "kind": true,
+        "product": true,
+        "amount": true,
+        "unit": true,
+        "location": true
+      },
+      "failures": [],
+      "note": null
+    },
+    {
+      "scenario": "add.missing_item_discovers_new_product",
+      "category": "add",
+      "passed": true,
+      "checks": {
+        "classification": true,
+        "tool:sumac_find_inventory": true,
+        "writes": true,
+        "kind": true,
+        "product": true,
+        "amount": true,
+        "unit": true,
+        "location": true
+      },
+      "failures": [],
+      "note": null
+    },
+    {
+      "scenario": "add.discriminator_variant_not_confused",
+      "category": "add",
+      "passed": true,
+      "checks": {
+        "classification": true,
+        "writes": true,
+        "kind": true,
+        "product": true,
+        "amount": true,
+        "unit": true,
+        "location": true
+      },
+      "failures": [],
+      "note": null
+    },
+    {
+      "scenario": "add.basmati_rice_in_different_unit",
+      "category": "add",
+      "passed": false,
+      "checks": {
+        "classification": true,
+        "writes": true,
+        "kind": true,
+        "product": true,
+        "amount": true,
+        "unit": false
+      },
+      "failures": [
+        "expected unit 'bag', got 'jug'"
+      ],
+      "note": null
+    },
+    {
+      "scenario": "add.odd_destination_respected",
+      "category": "add",
+      "passed": true,
+      "checks": {
+        "classification": true,
+        "writes": true,
+        "kind": true,
+        "product": true,
+        "amount": true,
+        "unit": true,
+        "location": true
+      },
+      "failures": [],
+      "note": null
+    },
+    {
+      "scenario": "add.duplicate_search_bounded",
+      "category": "add",
+      "passed": true,
+      "checks": {
+        "classification": true,
+        "tool:sumac_find_inventory:bound": true,
+        "writes": true,
+        "kind": true,
+        "product": true,
+        "amount": true,
+        "unit": true,
+        "location": true
+      },
+      "failures": [],
+      "note": null
+    },
+    {
+      "scenario": "add.product_with_omitted_amount",
+      "category": "add",
+      "passed": true,
+      "checks": {
+        "classification": true,
+        "writes": true,
+        "kind": true,
+        "product": true,
+        "amount": true,
+        "unit": true,
+        "location": true
+      },
+      "failures": [],
+      "note": null
+    },
+    {
+      "scenario": "add.multiple_products_with_omitted_amounts",
+      "category": "add",
+      "passed": false,
+      "checks": {
+        "classification": true,
+        "writes": false
+      },
+      "failures": [
+        "expected two writes (butter, jam), got (ProposedWrite(kind=<ChangeKind.DISCOVERY: 'discovery'>, product_id='Strawberry Jam', amount=Decimal('1'), unit='jar', from_location=None, to_location='pantry-white-unit-r1c2', warnings=(), current_amount=None),)"
+      ],
+      "note": null
+    },
+    {
+      "scenario": "add.ambiguous_product_asks_or_acts",
+      "category": "add",
+      "passed": true,
+      "checks": {
+        "classification": true,
+        "outcome": true
+      },
+      "failures": [],
+      "note": "branch=act"
+    },
+    {
+      "scenario": "find.existing_item",
+      "category": "find",
+      "passed": true,
+      "checks": {
+        "classification": true,
+        "tool:sumac_find_inventory": true,
+        "writes": true,
+        "reply": true
+      },
+      "failures": [],
+      "note": null
+    },
+    {
+      "scenario": "find.missing_item",
+      "category": "find",
+      "passed": true,
+      "checks": {
+        "classification": true,
+        "tool:sumac_find_inventory": true,
+        "writes": true
+      },
+      "failures": [],
+      "note": null
+    },
+    {
+      "scenario": "find.quantity",
+      "category": "find",
+      "passed": true,
+      "checks": {
+        "classification": true,
+        "tool:sumac_find_inventory": true,
+        "writes": true,
+        "reply": true
+      },
+      "failures": [],
+      "note": null
+    },
+    {
+      "scenario": "find.shared_word_picks_right_product",
+      "category": "find",
+      "passed": true,
+      "checks": {
+        "classification": true,
+        "writes": true,
+        "reply": true
+      },
+      "failures": [],
+      "note": null
+    },
+    {
+      "scenario": "find.uses_only_find_tool",
+      "category": "find",
+      "passed": true,
+      "checks": {
+        "classification": true,
+        "writes": true,
+        "tool_scope": true
+      },
+      "failures": [],
+      "note": null
+    },
+    {
+      "scenario": "reject.out_of_domain_weather",
+      "category": "reject",
+      "passed": false,
+      "checks": {
+        "classification": false,
+        "writes": true
+      },
+      "failures": [
+        "expected classified as 'reject', got 'find'"
+      ],
+      "note": null
+    },
+    {
+      "scenario": "reject.gibberish",
+      "category": "reject",
+      "passed": true,
+      "checks": {
+        "classification": true,
+        "writes": true
+      },
+      "failures": [],
+      "note": null
+    },
+    {
+      "scenario": "reject.joke_with_inventory_word",
+      "category": "reject",
+      "passed": true,
+      "checks": {
+        "classification": true,
+        "writes": true
+      },
+      "failures": [],
+      "note": null
+    },
+    {
+      "scenario": "remove.partial",
+      "category": "remove",
+      "passed": true,
+      "checks": {
+        "classification": true,
+        "writes": true,
+        "kind": true,
+        "product": true,
+        "amount": true,
+        "unit": true,
+        "location": true
+      },
+      "failures": [],
+      "note": null
+    },
+    {
+      "scenario": "remove.all",
+      "category": "remove",
+      "passed": true,
+      "checks": {
+        "classification": true,
+        "writes": true,
+        "kind": true,
+        "product": true,
+        "amount": true,
+        "unit": true,
+        "location": true
+      },
+      "failures": [],
+      "note": null
+    },
+    {
+      "scenario": "remove.move_explicit",
+      "category": "remove",
+      "passed": true,
+      "checks": {
+        "classification": true,
+        "writes": true,
+        "kind": true,
+        "product": true,
+        "amount": true,
+        "unit": true,
+        "location": true
+      },
+      "failures": [],
+      "note": null
+    },
+    {
+      "scenario": "remove.move_vague_asks_or_acts",
+      "category": "remove",
+      "passed": false,
+      "checks": {
+        "classification": false,
+        "outcome": true
+      },
+      "failures": [
+        "expected classified as 'remove', got 'add'"
+      ],
+      "note": "branch=act"
+    }
+  ]
+}

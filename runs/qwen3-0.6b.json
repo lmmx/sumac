@@ -1,0 +1,322 @@
+{
+  "model": "qwen3-0.6b",
+  "seed": null,
+  "results": [
+    {
+      "scenario": "add.existing_item_explicit_location",
+      "category": "add",
+      "passed": false,
+      "checks": {
+        "classification": true,
+        "writes": false
+      },
+      "failures": [
+        "expected exactly one write, got ()"
+      ],
+      "note": null
+    },
+    {
+      "scenario": "add.existing_item_indirect_location",
+      "category": "add",
+      "passed": false,
+      "checks": {
+        "classification": false,
+        "tool:sumac_find_inventory": false,
+        "writes": false
+      },
+      "failures": [
+        "expected classified as 'add', got 'Tomatoes'",
+        "expected 'sumac_find_inventory' to be called, wasn't",
+        "expected exactly one write, got ()"
+      ],
+      "note": null
+    },
+    {
+      "scenario": "add.missing_item_discovers_new_product",
+      "category": "add",
+      "passed": false,
+      "checks": {
+        "classification": true,
+        "tool:sumac_find_inventory": false,
+        "writes": false
+      },
+      "failures": [
+        "expected 'sumac_find_inventory' to be called, wasn't",
+        "expected exactly one write, got ()"
+      ],
+      "note": null
+    },
+    {
+      "scenario": "add.discriminator_variant_not_confused",
+      "category": "add",
+      "passed": false,
+      "checks": {
+        "classification": true,
+        "writes": false
+      },
+      "failures": [
+        "expected exactly one write, got ()"
+      ],
+      "note": null
+    },
+    {
+      "scenario": "add.basmati_rice_in_different_unit",
+      "category": "add",
+      "passed": false,
+      "checks": {
+        "classification": true,
+        "writes": false
+      },
+      "failures": [
+        "expected exactly one write, got ()"
+      ],
+      "note": null
+    },
+    {
+      "scenario": "add.odd_destination_respected",
+      "category": "add",
+      "passed": false,
+      "checks": {
+        "classification": true,
+        "writes": false
+      },
+      "failures": [
+        "expected exactly one write, got ()"
+      ],
+      "note": null
+    },
+    {
+      "scenario": "add.duplicate_search_bounded",
+      "category": "add",
+      "passed": true,
+      "checks": {
+        "classification": true,
+        "tool:sumac_find_inventory:bound": true,
+        "writes": true,
+        "kind": true,
+        "product": true,
+        "amount": true,
+        "unit": true,
+        "location": true
+      },
+      "failures": [],
+      "note": null
+    },
+    {
+      "scenario": "add.product_with_omitted_amount",
+      "category": "add",
+      "passed": false,
+      "checks": {
+        "classification": true,
+        "writes": true,
+        "kind": true,
+        "product": true,
+        "amount": true,
+        "unit": true,
+        "location": false
+      },
+      "failures": [
+        "expected to_location 'pantry-white-unit-r2c1', got 'pantry' (resolved: 'pantry')"
+      ],
+      "note": null
+    },
+    {
+      "scenario": "add.multiple_products_with_omitted_amounts",
+      "category": "add",
+      "passed": false,
+      "checks": {
+        "classification": true,
+        "writes": false
+      },
+      "failures": [
+        "expected two writes (butter, jam), got ()"
+      ],
+      "note": null
+    },
+    {
+      "scenario": "add.ambiguous_product_asks_or_acts",
+      "category": "add",
+      "passed": false,
+      "checks": {
+        "classification": true,
+        "outcome": false
+      },
+      "failures": [
+        "neither asked nor acted (branch=inaction)"
+      ],
+      "note": "branch=inaction"
+    },
+    {
+      "scenario": "find.existing_item",
+      "category": "find",
+      "passed": false,
+      "checks": {
+        "classification": false,
+        "tool:sumac_find_inventory": false,
+        "writes": true,
+        "reply": false
+      },
+      "failures": [
+        "expected classified as 'find', got ''",
+        "expected 'sumac_find_inventory' to be called, wasn't",
+        "reply doesn't mention 'white unit r3c1': \"This doesn't look like a request to find, add, or remove something from inventory.\""
+      ],
+      "note": null
+    },
+    {
+      "scenario": "find.missing_item",
+      "category": "find",
+      "passed": false,
+      "checks": {
+        "classification": false,
+        "tool:sumac_find_inventory": false,
+        "writes": true
+      },
+      "failures": [
+        "expected classified as 'find', got ''",
+        "expected 'sumac_find_inventory' to be called, wasn't"
+      ],
+      "note": null
+    },
+    {
+      "scenario": "find.quantity",
+      "category": "find",
+      "passed": false,
+      "checks": {
+        "classification": false,
+        "tool:sumac_find_inventory": false,
+        "writes": true,
+        "reply": false
+      },
+      "failures": [
+        "expected classified as 'find', got ''",
+        "expected 'sumac_find_inventory' to be called, wasn't",
+        "reply doesn't mention '1': \"This doesn't look like a request to find, add, or remove something from inventory.\"",
+        "reply doesn't mention 'jug': \"This doesn't look like a request to find, add, or remove something from inventory.\""
+      ],
+      "note": null
+    },
+    {
+      "scenario": "find.shared_word_picks_right_product",
+      "category": "find",
+      "passed": false,
+      "checks": {
+        "classification": true,
+        "writes": true,
+        "reply": false
+      },
+      "failures": [
+        "reply doesn't mention 'salted butter': 'Butter is available in the pantry at the white unit, in the freezer at the drawer 1, and in the freezer at the drawer 2.'"
+      ],
+      "note": null
+    },
+    {
+      "scenario": "find.uses_only_find_tool",
+      "category": "find",
+      "passed": false,
+      "checks": {
+        "classification": false,
+        "writes": true,
+        "tool_scope": true
+      },
+      "failures": [
+        "expected classified as 'find', got ''"
+      ],
+      "note": null
+    },
+    {
+      "scenario": "reject.out_of_domain_weather",
+      "category": "reject",
+      "passed": false,
+      "checks": {
+        "classification": false,
+        "writes": true
+      },
+      "failures": [
+        "expected classified as 'reject', got ''"
+      ],
+      "note": null
+    },
+    {
+      "scenario": "reject.gibberish",
+      "category": "reject",
+      "passed": false,
+      "checks": {
+        "classification": false,
+        "writes": true
+      },
+      "failures": [
+        "expected classified as 'reject', got ''"
+      ],
+      "note": null
+    },
+    {
+      "scenario": "reject.joke_with_inventory_word",
+      "category": "reject",
+      "passed": false,
+      "checks": {
+        "classification": false,
+        "writes": true
+      },
+      "failures": [
+        "expected classified as 'reject', got ''"
+      ],
+      "note": null
+    },
+    {
+      "scenario": "remove.partial",
+      "category": "remove",
+      "passed": false,
+      "checks": {
+        "classification": true,
+        "writes": false
+      },
+      "failures": [
+        "expected exactly one write, got ()"
+      ],
+      "note": null
+    },
+    {
+      "scenario": "remove.all",
+      "category": "remove",
+      "passed": false,
+      "checks": {
+        "classification": false,
+        "writes": false
+      },
+      "failures": [
+        "expected classified as 'remove', got ''",
+        "expected exactly one write, got ()"
+      ],
+      "note": null
+    },
+    {
+      "scenario": "remove.move_explicit",
+      "category": "remove",
+      "passed": false,
+      "checks": {
+        "classification": false,
+        "writes": false
+      },
+      "failures": [
+        "expected classified as 'remove', got ''",
+        "expected exactly one write, got ()"
+      ],
+      "note": null
+    },
+    {
+      "scenario": "remove.move_vague_asks_or_acts",
+      "category": "remove",
+      "passed": false,
+      "checks": {
+        "classification": false,
+        "outcome": false
+      },
+      "failures": [
+        "expected classified as 'remove', got ''",
+        "neither asked nor acted (branch=inaction)"
+      ],
+      "note": "branch=inaction"
+    }
+  ]
+}

@@ -98,18 +98,10 @@ class ModelPreset:
 MODEL_PRESETS: tuple[ModelPreset, ...] = (
     ModelPreset("qwen3.5-4b", "unsloth/Qwen3.5-4B-GGUF",
                 "Qwen3.5-4B-Q4_K_M.gguf", ToolCallFormat.QWEN),
-    ModelPreset("qwen3-4b", "unsloth/Qwen3-4B-Instruct-2507-GGUF",
-                "Qwen3-4B-Instruct-2507-Q4_K_M.gguf", ToolCallFormat.QWEN),
-    ModelPreset("lfm2.5-2.6b", "LiquidAI/LFM2.5-2.6B-GGUF",
-                "LFM2.5-2.6B-Q4_K_M.gguf", ToolCallFormat.LFM),
-    ModelPreset("lfm2.5-1.2b", "unsloth/LFM2.5-1.2B-Instruct-GGUF",
-                "LFM2.5-1.2B-Instruct-Q4_K_M.gguf", ToolCallFormat.LFM),
     ModelPreset("qwen3.5-2b", "unsloth/Qwen3.5-2B-GGUF",
                 "Qwen3.5-2B-Q4_K_M.gguf", ToolCallFormat.QWEN),
-    ModelPreset("qwen3-1.7b", "unsloth/Qwen3-1.7B-GGUF",
-                "Qwen3-1.7B-Q4_K_M.gguf", ToolCallFormat.QWEN),
-    ModelPreset("qwen3-0.6b", "unsloth/Qwen3-0.6B-GGUF",
-                "Qwen3-0.6B-Q4_K_M.gguf", ToolCallFormat.QWEN),
+    ModelPreset("lfm2.5-2.6b", "LiquidAI/LFM2.5-2.6B-GGUF",
+                "LFM2.5-2.6B-Q4_K_M.gguf", ToolCallFormat.LFM),
 )  # fmt: skip
 
 _MODEL_PRESETS_BY_NAME: dict[str, ModelPreset] = {p.name: p for p in MODEL_PRESETS}

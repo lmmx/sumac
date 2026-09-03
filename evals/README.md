@@ -22,8 +22,8 @@ uv sync --no-group ask --group ask-cuda --group evals    # or --group ask for CP
 ```sh
 uv run pytest evals/test_termination.py evals/test_fixtures.py -v   # no model, ~1s
 uv run pytest evals -v                                              # everything
-uv run pytest evals/test_add.py -v --eval-model qwen3-4b            # one category, one preset
-uv run pytest evals -v --eval-json runs/qwen3-4b.json               # also write results to JSON
+uv run pytest evals/test_add.py -v --eval-model qwen3.5-2b          # one category, one preset
+uv run pytest evals -v --eval-json runs/qwen3.5-2b.json             # also write results to JSON
 ```
 
 `test_add.py`/`test_find.py`/`test_remove.py`/`test_reject.py` skip cleanly — no network attempt,
