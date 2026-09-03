@@ -812,3 +812,85 @@ network attempt — confirmed by a ~1.2s total run time) rather than erroring. F
   retry an identical rejected call) is not implemented — see "Not fixed here" above.
 - Location-reference resolution (positional and emptied-location references) remains unaddressed
   and untested, as it was in the previous pass.
+
+---
+
+# 2026-09-03: Assertion Fixes, Location-Language Audit, and a Review Pass
+
+## Context
+
+Three rounds since the reduction pass, each requested separately: (1) two tests whose assertions
+required `NoWrites` for an omitted amount/unit were amended to accept the agent inferring a
+plausible default instead, since that's the desired behaviour, not the missing-amount case being
+tested; (2) a real-model run surfaced `test_add_unit_conflict_rejected_basmati_rice` failing
+(the user's own view: adding a bag alongside an existing jug of the same product should be
+accepted, not rejected — a `decide.py`/tool-calling design question, not an eval bug), and a
+separate audit of every ADD/MOVE prompt in `test_agent.py` for realism (natural spoken language,
+not the internal `X > Y` display-path syntax, and a concrete destination or legitimate
+existing-stock inference rather than a bare "the pantry"); (3) a review pass re-reading this
+entry's specification against the current suite.
+
+## Current State
+
+- `test_add_product_with_omitted_amount` (renamed from `test_missing_amount_does_not_invent_values`)
+  and `test_add_multiple_products_with_omitted_amounts` (renamed from
+  `test_multi_item_add_without_amounts_does_not_invent_values`) now assert a write happened —
+  positive amount, non-empty unit, correct product identity — rather than `NoWrites`. Butter is
+  checked only for containing "butter" and not "beans" (three plausible identities — a new
+  "Butter" registration, "Salted Butter", or "Unsalted Butter" — are all accepted; only landing on
+  "Butter Beans" fails it).
+- `test_add_basmati_rice_in_different_unit` (renamed from
+  `test_add_unit_conflict_rejected_basmati_rice`, by the user's own edit) now asserts the write is
+  accepted under the same product identity (`product_id == "basmati rice"`, `unit == "bag"`) rather
+  than rejected. This fails against a real model today — `decide._resolve_product` has no
+  registered bag-to-jug conversion for Basmati Rice, so `decide` rejects it — and is left failing
+  deliberately, as the marker of a real `decide.py`/`llm.py` gap (accept-with-confirmation, not
+  flat rejection) that's explicitly out of scope for the eval suite itself.
+- `test_add_existing_item_full_path` and `test_move_explicit` no longer put the internal
+  `X > Y` display-path syntax into a prompt — natural phrasing instead ("the second shelf of the
+  third white pantry cupboard", "the third drawer of the big freezer").
+- `test_add_missing_item_discovers_new_product`'s destination changed from bare "the pantry" (a
+  grouping node nothing is ever seeded on directly in this fixture) to the same natural-language
+  grid-cell phrasing.
+- `test_add_discriminator_variant_not_confused`'s prompt dropped its named destination entirely,
+  relying only on "with the existing stock" — forces the agent to search and resolve Unsalted
+  Butter's own location rather than being handed it, which a request naming the drawer outright
+  wouldn't test.
+- `test_add_product_with_omitted_amount`'s accepted resolved location was tightened from
+  `("pantry", "pantry-white-unit-r2c1")` to `"pantry-white-unit-r2c1"` only — `_ADD_PROMPT`
+  instructs using the found location over the person's literal wording in exactly this case, so
+  the "pantry" fallback was never actually correct, just left lenient.
+
+## Missing (found in the review pass, not yet fixed)
+
+- **`test_add_existing_item_full_path` and `test_add_missing_item_discovers_new_product` are
+  currently untestable.** Their natural-language phrasing ("the second shelf of the third white
+  pantry cupboard") depends on a row-means-shelf, column-means-cupboard convention that exists
+  nowhere in the system — not in `_ADD_PROMPT`, not in any tool schema, not in a location's own
+  `name` field (a search result would return "White Unit R2C3", not "second shelf, third
+  cupboard"). `grep -n 'shelf\|cupboard\|row\|column' src/sumac/llm.py` finds nothing. For the
+  new-product case there is additionally no existing stock to search and ground against at all.
+  This is the same "positional reference has no route to a location id" gap this entry's earlier
+  sections named `blocked` and deferred — reintroduced into two now-strictly-asserted tests by the
+  location-language audit round, not by design. Proposed fix (not applied): use locations whose
+  `name` field is itself the natural phrase (`fridge-door`, `fridge-bottle-rack`,
+  `freezer-drawer-N`) for tests needing an explicit, non-inferred destination; reserve grid cells
+  for cases where the destination is inferred via a prior search-and-match, which is the only path
+  by which a grid cell's canonical id ever reaches the model.
+- **Two small, cheap, deterministic checks from the pre-reduction suite were not carried
+  forward**, and would have caught the above before a real-model run: a check that no fixture
+  product/brand name collides with `_ADD_PROMPT`'s "Heinz"/"Baked Beans" worked example, and a
+  check that `fixtures.location_path()` (what every prompt is built from) matches what a real
+  seeded `Config` resolves. `fixtures.py:36` still cites `test_location_path_matches_config` in a
+  comment — that test does not exist in the current suite.
+- `evals/README.md`'s Blind Spots section states positional location references are "not covered
+  here", which the two tests above currently contradict.
+
+## Under consideration, not decided
+
+An external design outline (ChatGPT, pasted by the user) proposes restructuring the suite around
+named scenarios, a small typed `EvalResult`, evaluator functions replacing inline assertions, and
+a runner producing a version-comparison report — while explicitly keeping pytest as the execution
+mechanism and explicitly not reintroducing YAML scenario files, an LLM judge, or the deleted
+statistical machinery. Not acted on this session; the review above (untestable tests, two missing
+regression checks) was treated as the more urgent, concrete work. Revisit once those are fixed.
