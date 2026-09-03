@@ -869,6 +869,19 @@ def test_render_tool_call_lfm_escapes_embedded_quotes() -> None:
     )
 
 
+def test_render_tool_call_gemma_uses_call_colon_syntax() -> None:
+    """Pins down this module's own best-effort reconstruction of Gemma 4's
+    tool-call syntax (see `ToolCallFormat.GEMMA`'s docstring — it's not a
+    verified byte-exact match against a real chat template the way QWEN and
+    LFM are). This test only guards against a regression in what
+    `_render_tool_call` itself does, not that Gemma 4 actually expects it."""
+    result = llm._render_tool_call(
+        "sumac_find_inventory", {"query": "jam"}, "unused for Gemma", llm.ToolCallFormat.GEMMA
+    )
+
+    assert result == "<|tool_call>call:sumac_find_inventory{query:jam}<tool_call|>"
+
+
 def test_run_loop_appends_lfm_formatted_assistant_message_when_configured(
     data_dir: Path, key: bytes, osuser: str
 ) -> None:
@@ -877,7 +890,11 @@ def test_run_loop_appends_lfm_formatted_assistant_message_when_configured(
     produces the right string in isolation — `mistralrs.ChatCompletionRequest`
     is an opaque Rust object with no readable `.messages` attribute, so this
     checks `AgentRunner`'s own accumulated `self._messages` instead."""
-    lfm_preset = llm.model_preset("lfm2.5-2.6b")
+    # A throwaway preset, not a real registry lookup — this test only needs
+    # `tool_call_format=LFM` to reach `_run_loop`; it never touches a real
+    # GGUF, and the registry itself (`llm.MODEL_PRESETS`) may not carry an
+    # LFM-format entry at all (see docs/journal/2026-09-02-eval-suite.md).
+    lfm_preset = llm.ModelPreset("test-lfm", "unused/repo", "unused.gguf", llm.ToolCallFormat.LFM)
     _seed_pantry_with_jam(data_dir, key, osuser)
     responses = [
         _classify_round("find"),

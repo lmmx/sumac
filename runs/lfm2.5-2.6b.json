@@ -1,7 +1,7 @@
 {
-  "model": "qwen3.5-4b",
+  "model": "lfm2.5-2.6b",
   "seed": null,
-  "total_duration_s": 41.104283365028095,
+  "total_duration_s": 303.32386522997695,
   "results": [
     {
       "scenario": "add.existing_item_explicit_location",
@@ -18,7 +18,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.5776574240007903
+      "duration_s": 12.567518203009968
     },
     {
       "scenario": "add.existing_item_indirect_location",
@@ -36,7 +36,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.5213412209996022
+      "duration_s": 11.051590841001598
     },
     {
       "scenario": "add.missing_item_discovers_new_product",
@@ -54,7 +54,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 3.020889017992886
+      "duration_s": 16.388599143989268
     },
     {
       "scenario": "add.discriminator_variant_not_confused",
@@ -71,7 +71,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.0967596330010565
+      "duration_s": 11.346498779996182
     },
     {
       "scenario": "add.basmati_rice_in_different_unit",
@@ -89,7 +89,7 @@
         "expected unit 'bag', got 'jug'"
       ],
       "note": null,
-      "duration_s": 2.981942997997976
+      "duration_s": 25.604613453993807
     },
     {
       "scenario": "add.odd_destination_respected",
@@ -106,7 +106,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.9930914750002557
+      "duration_s": 20.76273927699367
     },
     {
       "scenario": "add.duplicate_search_bounded",
@@ -124,7 +124,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.7185051039996324
+      "duration_s": 13.708748292992823
     },
     {
       "scenario": "add.product_with_omitted_amount",
@@ -141,7 +141,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 1.9786217890068656
+      "duration_s": 28.193249932999606
     },
     {
       "scenario": "add.multiple_products_with_omitted_amounts",
@@ -150,19 +150,19 @@
       "checks": {
         "classification": true,
         "writes": true,
-        "kind:Butter": true,
-        "amount:Butter": true,
-        "unit:Butter": true,
-        "kind:Jam": true,
-        "amount:Jam": true,
-        "unit:Jam": true,
+        "kind:Salted Butter": true,
+        "amount:Salted Butter": true,
+        "unit:Salted Butter": true,
+        "kind:Strawberry Jam": true,
+        "amount:Strawberry Jam": true,
+        "unit:Strawberry Jam": true,
         "product:butter": true,
         "product:butter_not_beans": true,
         "product:jam": true
       },
       "failures": [],
       "note": null,
-      "duration_s": 3.279111168012605
+      "duration_s": 30.455387656998937
     },
     {
       "scenario": "add.ambiguous_product_asks_or_acts",
@@ -174,7 +174,7 @@
       },
       "failures": [],
       "note": "branch=act",
-      "duration_s": 3.482090514007723
+      "duration_s": 23.84987371301395
     },
     {
       "scenario": "find.existing_item",
@@ -188,7 +188,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 0.9106538880005246
+      "duration_s": 6.421915559010813
     },
     {
       "scenario": "find.missing_item",
@@ -201,7 +201,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 0.6398817320005037
+      "duration_s": 4.640911794995191
     },
     {
       "scenario": "find.quantity",
@@ -215,7 +215,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 0.9358075430063764
+      "duration_s": 5.819093679005164
     },
     {
       "scenario": "find.shared_word_picks_right_product",
@@ -228,7 +228,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 1.1496923130034702
+      "duration_s": 6.496933132992126
     },
     {
       "scenario": "find.uses_only_find_tool",
@@ -241,7 +241,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 0.6772765310015529
+      "duration_s": 4.8328977929922985
     },
     {
       "scenario": "reject.out_of_domain_weather",
@@ -253,7 +253,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 0.3273401360056596
+      "duration_s": 4.682117046992062
     },
     {
       "scenario": "reject.gibberish",
@@ -265,7 +265,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 0.32517260999884456
+      "duration_s": 2.6196401869965484
     },
     {
       "scenario": "reject.joke_with_inventory_word",
@@ -277,7 +277,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 0.32189294800627977
+      "duration_s": 3.7518092390091624
     },
     {
       "scenario": "remove.partial",
@@ -294,7 +294,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.046143569998094
+      "duration_s": 12.069024053998874
     },
     {
       "scenario": "remove.all",
@@ -311,7 +311,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 1.8475992719904752
+      "duration_s": 13.588870076986495
     },
     {
       "scenario": "remove.move_explicit",
@@ -328,19 +328,21 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.1388669529987965
+      "duration_s": 16.246820631000446
     },
     {
       "scenario": "remove.move_vague_asks_or_acts",
       "category": "remove",
-      "passed": true,
+      "passed": false,
       "checks": {
         "classification": true,
-        "outcome": true
+        "outcome": false
       },
-      "failures": [],
-      "note": "branch=act",
-      "duration_s": 2.1339455249981256
+      "failures": [
+        "neither asked nor acted (branch=inaction)"
+      ],
+      "note": "branch=inaction",
+      "duration_s": 28.22501274100796
     }
   ]
 }

@@ -22,8 +22,8 @@ uv sync --no-group ask --group ask-cuda --group evals    # or --group ask for CP
 ```sh
 uv run pytest evals/test_termination.py evals/test_fixtures.py -v   # no model, ~1s
 uv run pytest evals -v                                              # everything
-uv run pytest evals/test_add.py -v --eval-model qwen3.5-2b          # one category, one preset
-uv run pytest evals -v --eval-json runs/qwen3.5-2b.json             # also write results to JSON
+uv run pytest evals/test_add.py -v --eval-model qwen3.5-4b          # one category, one preset
+uv run pytest evals -v --eval-json runs/qwen3.5-4b.json             # also write results to JSON
 ```
 
 `test_add.py`/`test_find.py`/`test_remove.py`/`test_reject.py` skip cleanly — no network attempt,
@@ -33,10 +33,19 @@ then these actually run instead of skipping.
 
 ## Comparing models
 
+`DEFAULT_MODEL_PRESET` is `qwen3.5-4b` (`Qwen3.5-4B-Q4_K_M.gguf`), the winner of a real
+multi-model, multi-quant comparison — the full field it beat (qwen3.5-2b, lfm2.5-2.6b, both
+models' Q4_K_S quants) and why each was ruled out (accuracy, latency, or — for `UD-Q4_K_XL` and
+SmolLM3-3B — not loading under this `mistralrs` at all) is in
+`docs/journal/2026-09-02-eval-suite.md`'s 2026-09-03 entries. `MODEL_PRESETS` otherwise holds
+whatever's currently being tried against that default — see the journal's later entries for each
+addition's own compatibility notes before trusting its benchmark score. This tooling is what
+you'd reach for to run that comparison:
+
 ```sh
 sumac models list                    # every ModelPreset, and whether it's cached locally
 sumac models pull                    # download every preset's GGUF (skips ones already cached)
-sumac models pull qwen3.5-4b lfm2.5-2.6b   # or just specific ones
+sumac models pull qwen3.5-4b         # or just specific ones
 
 scripts/benchmark-models.sh          # pull what's missing, run the suite once per preset,
                                       # print a pass-rate/latency table (evals/report.jq)
@@ -47,8 +56,7 @@ per model just to prime the cache — it loads each uncached preset just long en
 `mistralrs`' own download-on-load, the same mechanism `sumac ask` already relies on, then drops it.
 `scripts/benchmark-models.sh` is `sumac models pull` plus a `pytest --eval-model NAME --eval-json
 runs/NAME.json` loop over every registry preset, finished with `jq -c -s -f evals/report.jq
-runs/*.json` — the aggregation query from a real multi-model comparison in
-`docs/journal/2026-09-02-eval-suite.md`'s 2026-09-03 entries, checked in instead of retyped by
+runs/*.json` — the aggregation query from that same comparison, checked in instead of retyped by
 hand each time.
 
 ## What's here

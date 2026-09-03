@@ -73,10 +73,17 @@ class ToolCallFormat(StrEnum):
     is template-specific, not generic. Qwen3 uses a `<tool_call>` JSON
     block; LFM2.5 uses a different, Pythonic `<|tool_call_start|>[name(...)]
     <|tool_call_end|>` syntax. See the design journal for how each was
-    worked out against a real GGUF-embedded chat template."""
+    worked out against a real GGUF-embedded chat template.
+
+    `GEMMA` (Gemma 4's `<|tool_call>call:name{...}<tool_call|>` syntax) is
+    the odd one out here — reconstructed from published research, not from
+    reading a real chat template byte-for-byte the way QWEN and LFM were
+    (see `_render_tool_call`). Treat any benchmark built on it as
+    unverified until checked against a real `--eval-debug` trace."""
 
     QWEN = "qwen"
     LFM = "lfm"
+    GEMMA = "gemma"
 
 
 # --- Configuration -----------------------------------------------------------
@@ -97,19 +104,46 @@ class ModelPreset:
 
 
 MODEL_PRESETS: tuple[ModelPreset, ...] = (
+    # The winner of a real multi-model/multi-quant comparison — see
+    # docs/journal/2026-09-02-eval-suite.md's 2026-09-03 entries for the
+    # rest of the field and why each alternative was ruled out (qwen3.5-2b
+    # and lfm2.5-2.6b: lower accuracy/much higher latency; Q4_K_S: no
+    # accuracy benefit; UD-Q4_K_XL/SmolLM3-3B: don't load under this
+    # mistralrs at all).
     ModelPreset("qwen3.5-4b", "unsloth/Qwen3.5-4B-GGUF",
                 "Qwen3.5-4B-Q4_K_M.gguf", ToolCallFormat.QWEN),
-    ModelPreset("qwen3.5-2b", "unsloth/Qwen3.5-2B-GGUF",
-                "Qwen3.5-2B-Q4_K_M.gguf", ToolCallFormat.QWEN),
-    ModelPreset("lfm2.5-2.6b", "LiquidAI/LFM2.5-2.6B-GGUF",
-                "LFM2.5-2.6B-Q4_K_M.gguf", ToolCallFormat.LFM),
-    # Alternate quant of the two presets above, same repo/tool_call_format —
-    # LiquidAI's own LFM2.5-2.6B-GGUF repo has no Q4_K_S/UD variant to add.
-    # `UD-Q4_K_XL` (either model) and SmolLM3-3B (any quant) are incompatible.
-    ModelPreset("qwen3.5-4b-Q4_K_S", "unsloth/Qwen3.5-4B-GGUF",
-                "Qwen3.5-4B-Q4_K_S.gguf", ToolCallFormat.QWEN),
-    ModelPreset("qwen3.5-2b-Q4_K_S", "unsloth/Qwen3.5-2B-GGUF",
-                "Qwen3.5-2B-Q4_K_S.gguf", ToolCallFormat.QWEN),
+    # A community full-parameter distillation of Alibaba's Qwen3.8-Max
+    # (2.4T-A95B) onto the same Qwen3.5-4B architecture as the preset above
+    # — tagged QWEN on that basis, not a confirmed chat-template match (the
+    # model card documents no tool-calling format of its own). Same
+    # architecture family this mistralrs already loads successfully
+    # (qwen3.5-4b, above), so a better compatibility bet than SmolLM3-3B or
+    # Granite were, but still unverified against a real run — see
+    # docs/journal/2026-09-02-eval-suite.md before trusting a benchmark
+    # built on it.
+    ModelPreset("qwen3.8-4b-distill", "empero-ai/Qwen3.8-4B-Distill-GGUF",
+                "Qwen3.8-4B-Q4_K_M.gguf", ToolCallFormat.QWEN),
+    # Google's Gemma 4 (E2B). Deliberately the *non*-QAT repo the user
+    # actually asked for (`unsloth/gemma-4-E2B-it-qat-GGUF`) only ships
+    # UD-Q2_K_XL/UD-Q4_K_XL — the exact IQ4_XS-tensor quant type already
+    # confirmed unloadable under this mistralrs (see the entry above this
+    # one); this sibling repo has a plain Q4_K_M that sidesteps that known
+    # failure. `ToolCallFormat.GEMMA` is new and best-effort — see its
+    # docstring; this is the least-verified preset in the registry.
+    ModelPreset("gemma-4-e2b", "unsloth/gemma-4-E2B-it-GGUF",
+                "gemma-4-E2B-it-Q4_K_M.gguf", ToolCallFormat.GEMMA),
+    # A 4B model from a much smaller/newer publisher (XHToken) than
+    # anything else here. Flagged, not just unverified: its own model card
+    # says inference needs a *fork* of llama.cpp (`XHToken/llama.cpp`) for
+    # its hybrid attention architecture — mainline llama.cpp/GGUF doesn't
+    # support it, which is real evidence (not just an untried guess) that
+    # mistralrs likely can't load it either. Also the only GGUF this repo
+    # ships is one unquantized 8.23GB file — no Q4_K_M exists to pick.
+    # `ToolCallFormat.QWEN` here is a low-confidence placeholder (the repo
+    # mentions Hermes-style tool use, never its own template) that mostly
+    # doesn't matter if the model never loads to begin with.
+    ModelPreset("spark-x2.5-4b", "XHToken/Spark-X2.5-4B-GGUF",
+                "Spark-X2.5-4B.gguf", ToolCallFormat.QWEN),
 )  # fmt: skip
 
 _MODEL_PRESETS_BY_NAME: dict[str, ModelPreset] = {p.name: p for p in MODEL_PRESETS}
@@ -513,12 +547,23 @@ def _render_tool_call(
     through. `tool_call_format` (the active `AgentRunner`'s `ModelPreset`)
     selects which template convention to target; `raw_arguments` (the
     model's own emitted JSON string) is only used by the Qwen branch,
-    `arguments` (already parsed) only by LFM's."""
+    `arguments` (already parsed) only by LFM's and Gemma's."""
     if tool_call_format is ToolCallFormat.LFM:
         # LFM2.5's own documented Pythonic syntax:
         # <|tool_call_start|>[name(key="value", ...)]<|tool_call_end|>
         args_text = ", ".join(f"{key}={_lfm_literal(value)}" for key, value in arguments.items())
         return f"<|tool_call_start|>[{name}({args_text})]<|tool_call_end|>"
+    if tool_call_format is ToolCallFormat.GEMMA:
+        # Best-effort, NOT a verified byte-exact match (see
+        # `ToolCallFormat.GEMMA`'s docstring) — reconstructed as
+        # <|tool_call>call:name{key:value,...}<tool_call|>, values passed
+        # through unquoted/unescaped. Every tool schema here is
+        # string-typed, so there's no other JSON type to represent — but a
+        # value containing ',', ':', '{', or '}' will still produce a
+        # malformed replay, since the exact escaping rule (if any) wasn't
+        # confirmed against a real chat template.
+        args_text = ",".join(f"{key}:{value}" for key, value in arguments.items())
+        return f"<|tool_call>call:{name}{{{args_text}}}<tool_call|>"
     # QWEN: byte-for-byte what the `{%- if message.tool_calls %}` branch
     # renders from a real `tool_calls` field. `raw_arguments` is spliced in
     # verbatim — already what `{{- tool_call.arguments }}` inserts when

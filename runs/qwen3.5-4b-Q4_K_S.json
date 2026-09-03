@@ -1,7 +1,7 @@
 {
-  "model": "qwen3.5-4b",
+  "model": "qwen3.5-4b-Q4_K_S",
   "seed": null,
-  "total_duration_s": 41.104283365028095,
+  "total_duration_s": 53.36713741897256,
   "results": [
     {
       "scenario": "add.existing_item_explicit_location",
@@ -18,7 +18,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.5776574240007903
+      "duration_s": 2.374529310996877
     },
     {
       "scenario": "add.existing_item_indirect_location",
@@ -36,7 +36,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.5213412209996022
+      "duration_s": 2.4868005349999294
     },
     {
       "scenario": "add.missing_item_discovers_new_product",
@@ -54,7 +54,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 3.020889017992886
+      "duration_s": 3.135123070998816
     },
     {
       "scenario": "add.discriminator_variant_not_confused",
@@ -71,7 +71,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.0967596330010565
+      "duration_s": 2.1101466929976596
     },
     {
       "scenario": "add.basmati_rice_in_different_unit",
@@ -81,15 +81,15 @@
         "classification": true,
         "writes": true,
         "kind": true,
-        "product": true,
+        "product": false,
         "amount": true,
-        "unit": false
+        "unit": true
       },
       "failures": [
-        "expected unit 'bag', got 'jug'"
+        "expected product 'Basmati Rice', got 'Basmati Rice Bag'"
       ],
       "note": null,
-      "duration_s": 2.981942997997976
+      "duration_s": 12.712042803992517
     },
     {
       "scenario": "add.odd_destination_respected",
@@ -106,7 +106,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.9930914750002557
+      "duration_s": 3.282838270009961
     },
     {
       "scenario": "add.duplicate_search_bounded",
@@ -124,7 +124,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.7185051039996324
+      "duration_s": 2.7709212829940952
     },
     {
       "scenario": "add.product_with_omitted_amount",
@@ -141,7 +141,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 1.9786217890068656
+      "duration_s": 2.1212768020050135
     },
     {
       "scenario": "add.multiple_products_with_omitted_amounts",
@@ -162,7 +162,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 3.279111168012605
+      "duration_s": 4.482942546994309
     },
     {
       "scenario": "add.ambiguous_product_asks_or_acts",
@@ -174,7 +174,7 @@
       },
       "failures": [],
       "note": "branch=act",
-      "duration_s": 3.482090514007723
+      "duration_s": 3.2377401900012046
     },
     {
       "scenario": "find.existing_item",
@@ -188,7 +188,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 0.9106538880005246
+      "duration_s": 0.9995365899958415
     },
     {
       "scenario": "find.missing_item",
@@ -201,7 +201,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 0.6398817320005037
+      "duration_s": 0.6812789280083962
     },
     {
       "scenario": "find.quantity",
@@ -215,7 +215,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 0.9358075430063764
+      "duration_s": 1.005362594005419
     },
     {
       "scenario": "find.shared_word_picks_right_product",
@@ -228,7 +228,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 1.1496923130034702
+      "duration_s": 1.2326487760001328
     },
     {
       "scenario": "find.uses_only_find_tool",
@@ -241,7 +241,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 0.6772765310015529
+      "duration_s": 0.7262919239874464
     },
     {
       "scenario": "reject.out_of_domain_weather",
@@ -253,7 +253,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 0.3273401360056596
+      "duration_s": 0.3530005369975697
     },
     {
       "scenario": "reject.gibberish",
@@ -265,7 +265,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 0.32517260999884456
+      "duration_s": 0.3586735669960035
     },
     {
       "scenario": "reject.joke_with_inventory_word",
@@ -277,7 +277,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 0.32189294800627977
+      "duration_s": 0.35440150600334164
     },
     {
       "scenario": "remove.partial",
@@ -294,7 +294,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.046143569998094
+      "duration_s": 2.4081563009967795
     },
     {
       "scenario": "remove.all",
@@ -311,7 +311,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 1.8475992719904752
+      "duration_s": 2.0502761690004263
     },
     {
       "scenario": "remove.move_explicit",
@@ -328,7 +328,7 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.1388669529987965
+      "duration_s": 2.1983162959950278
     },
     {
       "scenario": "remove.move_vague_asks_or_acts",
@@ -340,7 +340,7 @@
       },
       "failures": [],
       "note": "branch=act",
-      "duration_s": 2.1339455249981256
+      "duration_s": 2.2848327249957947
     }
   ]
 }

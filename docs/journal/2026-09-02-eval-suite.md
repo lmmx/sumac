@@ -1248,3 +1248,199 @@ being the already-documented `add.basmati_rice_in_different_unit`. `ruff check`/
   `Q4_K_M`/`Q4_K_S` files and only drop the `UD-Q4_K_XL` blob).
 - If `mistralrs` gains `IQ4_XS`/dynamic-quant support in a later version, or SmolLM3 GGUFs start
   shipping with a recognized pre-tokenizer profile, both are worth retrying — not planned now.
+
+---
+
+# 2026-09-03: Decision — qwen3.5-4b Q4_K_M, Registry Pruned to One
+
+## Context
+
+Final real run of the comparison, across the 5 working presets from the previous entry
+(`qwen3.5-4b`, `qwen3.5-4b-Q4_K_S`, `lfm2.5-2.6b`, `qwen3.5-2b`, `qwen3.5-2b-Q4_K_S`). Results
+(pass/22, `total_duration_s` — wall-clock sum of per-scenario latency, model load excluded):
+
+| model | pass | rate | time |
+|---|---|---|---|
+| qwen3.5-4b (Q4_K_M) | 21 | 95.5% | 41.1s |
+| qwen3.5-4b-Q4_K_S | 21 | 95.5% | 53.4s |
+| lfm2.5-2.6b | 20 | 90.9% | 303.3s |
+| qwen3.5-2b (Q4_K_M) | 17 | 77.3% | 60.0s |
+| qwen3.5-2b-Q4_K_S | 14 | 63.6% | 38.2s |
+
+Two things flagged as worth naming, neither chased further this session by the user's own choice
+(deliberately stopping model exploration here — see Decision below):
+- The 4B pair's timing (Q4_K_M faster than Q4_K_S, 41.1s vs 53.4s) runs opposite to what file-size
+  difference alone would predict (2.74GB vs 2.59GB, ~6%) and each model was only run once —
+  plausibly single-run noise rather than a real per-quant speed difference, unlike the 2B pair,
+  where Q4_K_S being both faster *and* less accurate is the physically expected direction and a
+  much larger, more trustworthy effect (77.3% → 63.6%).
+- lfm2.5-2.6b's 303s (5-8x every other preset here, despite being smaller than qwen3.5-4b) wasn't
+  root-caused — plausibly a GPU-fallback or kernel-support gap in this `mistralrs` version for
+  LFM2.5's architecture rather than an inherent property of the model, but not confirmed.
+
+## Decision
+
+**qwen3.5-4b (`Qwen3.5-4B-Q4_K_M.gguf`) is the model.** Accuracy is effectively tied with every
+alternative that could load, latency is second-best (within noise of the best), and its failure
+breakdown is a single known, already-documented edge case
+(`add.basmati_rice_in_different_unit` — a `decide.py` unit-conversion gap, not a tool-calling or
+classification problem). Model exploration is paused here, deliberately — the user is moving on to
+prompt/tool-schema work in `src/sumac/llm.py` next, not further model comparison.
+
+## Current State
+
+- `src/sumac/llm.py`: `MODEL_PRESETS` reduced to one entry — `qwen3.5-4b`
+  (`unsloth/Qwen3.5-4B-GGUF` / `Qwen3.5-4B-Q4_K_M.gguf`). `qwen3.5-2b`, `lfm2.5-2.6b`,
+  `qwen3.5-4b-Q4_K_S`, and `qwen3.5-2b-Q4_K_S` all removed, with a comment on the remaining entry
+  pointing back at this entry for why. The preset's own `name` was never quant-suffixed (it was
+  always `"qwen3.5-4b"`, distinct from its `quantized_filename`) — nothing to rename there.
+  `DEFAULT_MODEL_PRESET = MODEL_PRESETS[0]` still holds, now trivially the only entry.
+- **Two real unit tests (`tests/`, not `evals/`) depended on the registry having more than one
+  entry and would have broken silently on the next run** — caught and fixed in this pass, not
+  left as debris:
+  - `tests/test_llm.py::test_run_loop_appends_lfm_formatted_assistant_message_when_configured`
+    called `llm.model_preset("lfm2.5-2.6b")` to get an LFM-format preset for a fully-faked
+    `AgentRunner` run (no real GGUF ever touched). Changed to construct a throwaway
+    `ModelPreset("test-lfm", "unused/repo", "unused.gguf", ToolCallFormat.LFM)` directly — this
+    test exercises `_render_tool_call`'s LFM branch reaching `_run_loop`, not anything about the
+    real model registry, so it shouldn't have depended on the registry's contents in the first
+    place.
+  - `tests/test_cli.py::test_ask_regenerate_reuses_the_prompt_with_a_different_model` did
+    `next(p for p in llm.MODEL_PRESETS if p != llm.DEFAULT_MODEL_PRESET)` to drive the "g"
+    regenerate flow's "different model" case — `StopIteration` with only one preset registered.
+    Changed to `monkeypatch.setitem(llm._MODEL_PRESETS_BY_NAME, ...)` a throwaway second preset
+    for the duration of the test — `_prompt_regenerate` only needs `llm.model_preset(name)` to
+    resolve, and this test's `AgentRunner` is fully faked too.
+- `evals/README.md`'s two example commands (`--eval-model`, `--eval-json` path) updated from
+  `qwen3.5-2b` to `qwen3.5-4b`; the "Comparing models" section rewritten to state the current
+  one-preset state and decision directly, with `sumac models pull qwen3.5-4b lfm2.5-2.6b`'s
+  now-dead second name dropped from its example.
+- `scripts/benchmark-models.sh` and `evals/report.jq` untouched — both are name-agnostic (driven
+  by `sumac models list --names-only`), so they work unchanged for a one-preset registry and stay
+  ready if model comparison resumes later.
+- HF cache cleanup is the user's own action (standing preference — see the previous entry); not
+  done here. `LiquidAI/LFM2.5-2.6B-GGUF`, `unsloth/Qwen3.5-2B-GGUF`, and `unsloth/SmolLM3-3B-GGUF`
+  are entirely unused now and safe to remove wholesale (`hf cache rm model/<repo> -y`, or the
+  interactive `hf cache delete` picker). `unsloth/Qwen3.5-4B-GGUF` must stay (holds the winning
+  `Q4_K_M` file) — the `Q4_K_S`/`UD-Q4_K_XL` blobs inside that same repo are now unused too, but
+  `hf cache`'s delete tooling only operates at whole-revision granularity (no per-file delete —
+  see `huggingface/huggingface_hub` issue #2219), so removing just those two files means either
+  leaving them (harmless, ~5.6GB) or manually deleting the specific blobs by hand.
+
+## Verified this session
+
+`ruff check`/`ruff format --check`/`ty check` on every edited `.py` file (`llm.py`, `cli.py`,
+`tests/test_llm.py`, `tests/test_cli.py`, `evals/`): clean. No other `MODEL_PRESETS`-size
+assumption found repo-wide (`grep -rn "next(p for p in llm.MODEL_PRESETS\|len(llm.MODEL_PRESETS)"`
+— empty after the fix above). A real `pytest` run of the two fixed tests was not possible in this
+container (same limitation as every session so far — this container's Python doesn't match the
+`.venv`'s ABI, on top of no GPU); both fixes were verified by reading, not by running.
+
+## Missing
+
+- The two fixed tests (`test_run_loop_appends_lfm_formatted_assistant_message_when_configured`,
+  `test_ask_regenerate_reuses_the_prompt_with_a_different_model`) need a real `pytest` run outside
+  this container to confirm — they were unit tests with fully-faked completions before this pruning
+  ever touched them, so they *should* be unaffected by the model registry shrinking, but that's
+  reasoning, not a confirmed run.
+- The `lfm2.5-2.6b` 303s latency and the 4B Q4_K_M-vs-Q4_K_S timing anomaly are both left
+  unexplained, by choice — noted for whoever revisits model exploration later, not investigated
+  further now.
+
+---
+
+# 2026-09-03: Added qwen3.8-4b-distill (Untried Candidate)
+
+## Context
+
+User surfaced a community model via a tweet: `empero-ai/Qwen3.8-4B-Distill-GGUF`, a
+full-parameter distillation of Alibaba's Qwen3.8-Max (2.4T-A95B MoE, a real recent flagship
+release — confirmed via search, not assumed) onto the Qwen3.5-4B architecture. Claimed MMLU
++19.9pts / GSM8K -6.5pts vs. base Qwen3.5-4B per the tweet. Verified directly against the HF repo
+before adding anything (not taken from the tweet alone): `Qwen3.8-4B-Q4_K_M.gguf`, 2.783GB,
+labeled "Recommended" on the repo — matches the tweet exactly. No tool-calling documentation on
+the model card.
+
+## Current State
+
+- `src/sumac/llm.py`: `MODEL_PRESETS` gained `qwen3.8-4b-distill`
+  (`empero-ai/Qwen3.8-4B-Distill-GGUF` / `Qwen3.8-4B-Q4_K_M.gguf`, `ToolCallFormat.QWEN`).
+  `DEFAULT_MODEL_PRESET` unchanged (still `qwen3.5-4b`, index 0) — this is a candidate to
+  benchmark, not yet a replacement for the settled default from the previous entry.
+- Same architecture family as `qwen3.5-4b` (Qwen3.5's hybrid Gated DeltaNet/attention layers,
+  per the model card's own llama.cpp-build-version warning) — meaningfully better odds of loading
+  cleanly than SmolLM3-3B or Granite were, since this `mistralrs` already loads that architecture
+  successfully today. `ToolCallFormat.QWEN` is inherited from that architecture match, not
+  confirmed against this specific fine-tune's own chat template — same caveat pattern as the
+  SmolLM3 addition two entries back, and same required check before trusting a benchmark: run it
+  for real and inspect the tool-call round-trip (`--eval-debug`) before trusting the score.
+
+## Missing
+
+- Entirely unverified against a real run — no pull, no load, no benchmark attempted this session.
+  `sumac models pull qwen3.8-4b-distill` then `uv run pytest evals --eval-model
+  qwen3.8-4b-distill --eval-json runs/qwen3.8-4b-distill.json` is the next step, outside this
+  container.
+
+---
+
+# 2026-09-03: Added gemma-4-e2b and spark-x2.5-4b — Two Different Risk Levels
+
+## Context
+
+User named two more candidates from a tweet/browsing: `unsloth/gemma-4-E2B-it-qat-GGUF` and
+`XHToken/Spark-X2.5-4B`. Both researched against their actual HF repos before adding anything —
+neither was taken at face value.
+
+- **The QAT repo the user named only ships `UD-Q2_K_XL`/`UD-Q4_K_XL`** — no plain Q4_K_M/Q4_K_S at
+  all. `UD-Q4_K_XL` is the exact IQ4_XS-tensor quant type already confirmed unloadable under this
+  `mistralrs` two entries back (every `UD-*` preset tried failed the same way, across three
+  different model families). Rather than register a preset already known to hit that same wall,
+  used the sibling **non**-QAT repo, `unsloth/gemma-4-E2B-it-GGUF`, which does have a plain
+  `gemma-4-E2B-it-Q4_K_M.gguf` (3.11GB) — same model family, sidesteps a failure mode we already
+  have hard evidence for.
+- Gemma 4's tool-call syntax is genuinely different from Qwen/LFM —
+  `<|tool_call>call:name{key:value,...}<tool_call|>`, unquoted argument values, asymmetric
+  open/close tags. Reconstructed from published research (not a real chat template read
+  byte-for-byte, unlike QWEN/LFM/SmolLM3's QWEN-reuse) — search results also surfaced a confirmed
+  upstream bug (an LM Studio issue: Gemma 4's own official chat template calls a
+  `format_type_argument` macro it never defines), meaning even first-party tooling has had to patch
+  around this template. New `ToolCallFormat.GEMMA` added on that basis, explicitly flagged as the
+  least-confident format in the module — more uncertain than the SmolLM3 addition two entries back,
+  which was a verified-identical match to an existing format, not new code.
+- **Spark-X2.5-4B has real, not just absent, evidence against it loading here**: its own model
+  card instructs installing a *fork* of llama.cpp (`git clone
+  https://github.com/XHToken/llama.cpp.git`) for its hybrid attention architecture (one
+  full-attention layer per three sliding-window layers) — meaning mainline llama.cpp/GGUF doesn't
+  support its custom ops at all, and `mistralrs` (which implements standard GGUF architectures, not
+  community forks) has no more reason to support them than mainline llama.cpp does. Also: this
+  repo ships exactly one GGUF, unquantized, 8.23GB — no quantized variant exists to pick instead.
+
+## Current State
+
+- `src/sumac/llm.py`: `ToolCallFormat` gained `GEMMA`. `_render_tool_call` gained a `GEMMA` branch
+  (unquoted `key:value` pairs, no escaping — the real escaping rule was never confirmed, so none
+  was invented). A new unit test,
+  `test_llm.py::test_render_tool_call_gemma_uses_call_colon_syntax`, pins down what this module's
+  own function produces — it guards against a regression in *this* code, explicitly not a claim
+  that Gemma 4 actually expects that output.
+- `MODEL_PRESETS` gained two entries: `gemma-4-e2b` (`unsloth/gemma-4-E2B-it-GGUF` /
+  `gemma-4-E2B-it-Q4_K_M.gguf`, `ToolCallFormat.GEMMA`) and `spark-x2.5-4b`
+  (`XHToken/Spark-X2.5-4B-GGUF` / `Spark-X2.5-4B.gguf`, `ToolCallFormat.QWEN` as a low-confidence
+  placeholder — the repo mentions Hermes-style tool use but documents no template of its own, and
+  it mostly doesn't matter if the model can't load to begin with). `DEFAULT_MODEL_PRESET` unchanged
+  (still `qwen3.5-4b`). Registry is now 4 presets.
+- `ruff check`/`ruff format --check`/`ty check` on `llm.py` and `tests/test_llm.py`: clean. The new
+  `_render_tool_call` GEMMA branch's exact string output was also hand-verified against the new
+  test's expected value directly in a standalone snippet (this container can't run the real
+  `pytest` suite — see every prior entry).
+
+## Missing
+
+- Neither preset has been pulled or run for real. `spark-x2.5-4b` in particular is a real
+  candidate for simply refusing to load, given the fork requirement — worth trying only if the
+  8.23GB download is cheap enough to spend on confirming that.
+- `gemma-4-e2b`'s `ToolCallFormat.GEMMA` rendering is the most speculative piece of code in this
+  module right now. If it loads but behaves oddly on tool-heavy scenarios (garbled replies,
+  repeated identical tool calls, never settling), check the escaping gap first via `--eval-debug`
+  before concluding the model itself is weak.
