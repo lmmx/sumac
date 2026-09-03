@@ -52,9 +52,9 @@ def test_find_existing_item(agent, cfg) -> None:
     assert_classified(plan, QueryKind.FIND)
     assert_tool_called(plan, "sumac_find_inventory")
     assert_no_writes(plan)
-    assert (
-        "white unit r3c1" in plan.reply_text.lower()
-    ), f"reply doesn't name the jam's location: {plan.reply_text!r}"
+    assert "white unit r3c1" in plan.reply_text.lower(), (
+        f"reply doesn't name the jam's location: {plan.reply_text!r}"
+    )
 
 
 def test_find_missing_item(agent, cfg) -> None:
@@ -86,9 +86,9 @@ def test_find_shared_word_picks_right_product(agent, cfg) -> None:
     decoy_idx = reply.find("butter beans")
     intended_idx = reply.find("salted butter")
     if decoy_idx != -1:
-        assert (
-            decoy_idx > intended_idx
-        ), f"decoy named before the intended product: {plan.reply_text!r}"
+        assert decoy_idx > intended_idx, (
+            f"decoy named before the intended product: {plan.reply_text!r}"
+        )
 
 
 def test_find_uses_only_find_tool(agent, cfg) -> None:
@@ -103,7 +103,14 @@ def test_find_uses_only_find_tool(agent, cfg) -> None:
 
 
 def test_add_existing_item_full_path(agent, cfg) -> None:
-    plan = agent.propose("Add 1 can of Ocado Italian Chopped Tomatoes to Pantry > White Unit R2C3")
+    """ "Pantry > White Unit R2C3" is the internal display path, not how a
+    person would ask for it — the natural-language destination below is
+    what a real request looks like, and resolving it to that exact
+    canonical location is what's being tested."""
+    plan = agent.propose(
+        "Add 1 can of Ocado Italian Chopped Tomatoes to the second shelf "
+        "of the third white pantry cupboard"
+    )
     assert_classified(plan, QueryKind.ADD)
     assert_write(
         plan, cfg,
@@ -126,23 +133,32 @@ def test_add_existing_item_indirect_location(agent, cfg) -> None:
 
 
 def test_add_missing_item_discovers_new_product(agent, cfg) -> None:
-    plan = agent.propose("Add 2 bottles of Irn-Bru Zero to the pantry")
+    """A genuinely new product has no existing stock to infer a location
+    from — unlike the other add cases, this one must name a concrete
+    destination outright. "The pantry" alone would be underspecified: it's
+    a grouping node in this fixture (nothing is ever stocked on it
+    directly), not itself a storage location any product actually lives
+    on."""
+    plan = agent.propose(
+        "Add 2 bottles of Irn-Bru Zero to the first shelf of the fourth white pantry cupboard"
+    )
     assert_classified(plan, QueryKind.ADD)
     assert_tool_called(plan, "sumac_find_inventory")
     assert_write(
         plan, cfg,
         kind=ChangeKind.DISCOVERY, product_id="Irn-Bru Zero",
-        amount="2", unit="bottles", to_location="pantry",
+        amount="2", unit="bottles", to_location="pantry-white-unit-r1c4",
     )  # fmt: skip
 
 
 def test_add_discriminator_variant_not_confused(agent, cfg) -> None:
     """Salted Butter and Unsalted Butter are seeded at different locations
-    — a correct discovery must land on Unsalted Butter's own location, not
-    the one-word-different product's."""
-    plan = agent.propose(
-        "Add 2 packs of Unsalted Butter to Big Freezer > Drawer 2, with the existing stock"
-    )
+    — no destination is named here at all, only "the existing stock",
+    which forces the agent to search and resolve Unsalted Butter's own
+    location rather than being handed it (a request naming the drawer
+    outright wouldn't test whether it can tell the two products' locations
+    apart in the first place)."""
+    plan = agent.propose("Add 2 more packs of Unsalted Butter, with the existing stock")
     assert_classified(plan, QueryKind.ADD)
     assert_write(
         plan, cfg,
@@ -198,18 +214,21 @@ def test_add_product_with_omitted_amount(agent, cfg) -> None:
     (`src/sumac/llm.py`), and the request gives neither — the agent is
     expected to infer a plausible default (e.g. "1 box") rather than ask,
     so this checks the right product lands somewhere sensible, not which
-    exact quantity it picked. `_ADD_PROMPT` instructs searching for "the
-    other pasta" and using its location rather than guessing a location
-    string — Fusilli Pasta's own location and the literally-named "pantry"
-    are both accepted, since the request names both."""
+    exact quantity it picked. The request names "the pantry" *and* "the
+    other pasta" — `_ADD_PROMPT` instructs searching for the latter and
+    using its location rather than guessing from the person's own wording
+    in this case, so the only accepted resolution is Fusilli Pasta's own
+    location, not the literally-named "pantry"; this is the exact real
+    query from docs/journal/2026-09-01-ask-agent-design.md, kept verbatim
+    rather than trimmed to just the inference cue."""
     plan = agent.propose("Add Barilla Rigatoni to the pantry, with the other pasta")
     assert_classified(plan, QueryKind.ADD)
     assert len(plan.writes) == 1, f"expected exactly one write, got {plan.writes!r}"
     w = plan.writes[0]
     assert w.kind == ChangeKind.DISCOVERY, f"expected a discovery, got {w.kind}"
-    assert (
-        w.product_id.strip().lower() == "barilla rigatoni"
-    ), f"expected Barilla Rigatoni, got {w.product_id!r}"
+    assert w.product_id.strip().lower() == "barilla rigatoni", (
+        f"expected Barilla Rigatoni, got {w.product_id!r}"
+    )
     assert w.amount > 0, f"expected a positive amount, got {w.amount!r}"
     assert w.unit.strip(), "expected a non-empty unit"
 
@@ -219,9 +238,8 @@ def test_add_product_with_omitted_amount(agent, cfg) -> None:
             if sumac_config.location_path(cfg.known_locations, loc_id) == w.to_location:
                 resolved = loc_id
                 break
-    assert resolved in ("pantry", "pantry-white-unit-r2c1"), (
-        f"expected the pantry or Fusilli Pasta's own location, got {w.to_location!r} "
-        f"(resolved: {resolved!r})"
+    assert resolved == "pantry-white-unit-r2c1", (
+        f"expected Fusilli Pasta's own location, got {w.to_location!r} (resolved: {resolved!r})"
     )
 
 
@@ -245,9 +263,9 @@ def test_add_multiple_products_with_omitted_amounts(agent, cfg) -> None:
     butter_writes = [p for p in product_ids if "butter" in p]
     jam_writes = [p for p in product_ids if "jam" in p]
     assert len(butter_writes) == 1, f"expected exactly one butter-related write, got {product_ids}"
-    assert (
-        "beans" not in butter_writes[0]
-    ), f"registered against Butter Beans instead of butter: {butter_writes[0]!r}"
+    assert "beans" not in butter_writes[0], (
+        f"registered against Butter Beans instead of butter: {butter_writes[0]!r}"
+    )
     assert len(jam_writes) == 1, f"expected exactly one jam-related write, got {product_ids}"
 
 
@@ -276,7 +294,9 @@ def test_remove_all(agent, cfg) -> None:
 
 
 def test_move_explicit(agent, cfg) -> None:
-    plan = agent.propose("move 1 tub of Ragu from Big Freezer > Drawer 3 to Fridge > Door")
+    plan = agent.propose(
+        "move 1 tub of Ragu from the third drawer of the big freezer to the fridge door"
+    )
     assert_classified(plan, QueryKind.REMOVE)
     assert_write(
         plan, cfg,
