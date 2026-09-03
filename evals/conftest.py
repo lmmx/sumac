@@ -1,44 +1,25 @@
-"""Options, safety rails, and seeded fixtures for the eval suite — see
-docs/journal/2026-09-02-eval-suite.md, "Safety rails" and "Fixture
-families". The real household inventory lives outside this repository
-(`chez/sumac_data`, per docs/journal/2026-09-02-eval-suite.md) and `sumac`
-resolves its data directory from `SUMAC_DATA_DIR`, defaulting to `./data`
-— every fixture here exists to make it structurally impossible for this
-suite to read or write it, not merely unlikely."""
+"""Safety rails, the one seeded inventory fixture, and small assertion
+helpers for the eval suite — see docs/journal/2026-09-02-eval-suite.md.
+The real household inventory lives outside this repository
+(`chez/sumac_data`) and `sumac` resolves its data directory from
+`SUMAC_DATA_DIR`, defaulting to `./data` — every fixture here exists to
+make it structurally impossible for this suite to read or write it, not
+merely unlikely.
+"""
 
 from __future__ import annotations
 
-import hashlib
-import json
-import subprocess
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
-from evals import seed as eval_seed
-from evals.vocab import FAMILIES, FamilyVocab
+from evals import fixtures as eval_fixtures
+from sumac import config as sumac_config
 from sumac import store as sumac_store
-
-_EVAL_PASSPHRASE = eval_seed.EVAL_PASSPHRASE
-_EVAL_OSUSER = eval_seed.EVAL_OSUSER
-_REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
-    parser.addoption(
-        "--families",
-        action="store",
-        type=int,
-        default=len(FAMILIES),
-        help=f"Number of fixture families to build, from FAMILIES[:N] (default {len(FAMILIES)}).",
-    )
-    parser.addoption(
-        "--eval-seed",
-        action="store",
-        type=int,
-        default=None,
-        help="Sampling seed for this session's model Runner (model-gated tests only).",
-    )
     parser.addoption(
         "--eval-model",
         action="store",
@@ -47,18 +28,11 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="ModelPreset name (default: llm.DEFAULT_MODEL_PRESET).",
     )
     parser.addoption(
-        "--eval-json",
+        "--eval-seed",
         action="store",
-        type=str,
+        type=int,
         default=None,
-        help="Path to write this session's per-case results as JSON.",
-    )
-    parser.addoption(
-        "--eval-temperature",
-        action="store",
-        type=float,
-        default=0.7,
-        help="Sampling temperature for test_proposals.py (test_routing.py always uses 0.0).",
+        help="Optional seed for the model Runner, for reproducing one run.",
     )
     parser.addoption(
         "--eval-debug",
@@ -85,12 +59,12 @@ def eval_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
 def _eval_environment(eval_root: Path):
     """Rail 1: overrides `SUMAC_DATA_DIR`/`SUMAC_PASSPHRASE` for the whole
     session so an ambient value is never read. `getpass.getuser` is pinned
-    too, so every family's `log:<osuser>` stream (`docs/LAYOUT.md`) is
+    too, so the inventory's `log:<osuser>` stream (`docs/LAYOUT.md`) is
     consistent regardless of which OS user actually runs the suite."""
     mp = pytest.MonkeyPatch()
-    mp.setenv("SUMAC_PASSPHRASE", _EVAL_PASSPHRASE)
+    mp.setenv("SUMAC_PASSPHRASE", eval_fixtures.EVAL_PASSPHRASE)
     mp.setenv("SUMAC_DATA_DIR", str(eval_root / "must-not-be-used"))
-    mp.setattr("getpass.getuser", lambda: _EVAL_OSUSER)
+    mp.setattr("getpass.getuser", lambda: eval_fixtures.EVAL_OSUSER)
     yield
     mp.undo()
 
@@ -100,9 +74,7 @@ def _guard_store_append(eval_root: Path, _eval_environment: None):
     """Rail 3: `sumac.store.append` refuses to write outside `eval_root`,
     checked at the point of the write rather than the configuration that
     produced it — the rail that holds if rails 1 and 2 are ever edited
-    wrongly. Legitimately exercised by every seeding call below, not just
-    a defensive no-op: `test_seeding_writes_stay_inside_eval_root` in
-    `test_scoring.py` confirms it doesn't false-positive on those."""
+    wrongly."""
     original_append = sumac_store.append
 
     def guarded_append(data_dir: Path, key: bytes, stream_id: str, obj: dict) -> None:
@@ -119,41 +91,35 @@ def _guard_store_append(eval_root: Path, _eval_environment: None):
 
 
 @pytest.fixture(scope="session")
-def eval_families(request: pytest.FixtureRequest) -> tuple[FamilyVocab, ...]:
-    n = request.config.getoption("--families")
-    return FAMILIES[:n]
+def inventory(eval_root: Path, _guard_store_append: None) -> tuple[Path, bytes]:
+    """Rail 2: the data directory is asserted inside `eval_root` before any
+    test sees it."""
+    data_dir, key = eval_fixtures.build(eval_root)
+    if not _is_within(data_dir, eval_root):
+        raise pytest.UsageError(f"inventory data_dir escaped eval_root: {data_dir}")
+    return data_dir, key
 
 
 @pytest.fixture(scope="session")
-def family_fixtures(
-    eval_families: tuple[FamilyVocab, ...], eval_root: Path, _guard_store_append: None
-) -> dict[str, tuple[Path, bytes]]:
-    """Rail 2: every family's data directory is asserted inside `eval_root`
-    (itself under `tmp_path_factory`'s base) before it is handed to any
-    test — a family whose seeding somehow escaped that boundary fails here,
-    not silently later."""
-    built: dict[str, tuple[Path, bytes]] = {}
-    for family in eval_families:
-        data_dir, key = eval_seed.build_family(eval_root, family, passphrase=_EVAL_PASSPHRASE)
-        if not _is_within(data_dir, eval_root):
-            raise pytest.UsageError(f"family {family.id} data_dir escaped eval_root: {data_dir}")
-        built[family.id] = (data_dir, key)
-    return built
+def cfg(inventory: tuple[Path, bytes]) -> sumac_config.Config:
+    data_dir, key = inventory
+    return sumac_config.build_config(data_dir, key)
 
 
 def _gguf_cached_locally(model) -> bool:  # noqa: ANN001
     """Whether `model.quantized_filename` is already present in the local
-    Hugging Face Hub cache. Checked *before* ever constructing a real
-    `mistralrs.Runner` — a first run of `sumac ask` against an uncached
+    Hugging Face Hub cache, checked *before* ever constructing a real
+    `mistralrs.Runner`. A first run of `sumac ask` against an uncached
     preset downloads a multi-gigabyte GGUF file over the network
     (`llm._build_runner`'s own log line: "first run downloads it; may take
     a while"), and a try/except around that construction only catches an
-    immediate error, not a slow download that never raises at all. This
-    check is what makes `eval_runner` skip cleanly with no network attempt
-    in an environment with nothing cached, rather than hang or spend
-    bandwidth silently."""
+    immediate error, not a slow download that never raises. This check is
+    what makes `agent_runner` skip cleanly with no network attempt when
+    nothing is cached, rather than hang or spend bandwidth silently — an
+    earlier version of this fixture without it triggered a real ~2.5GB
+    download in this repo's own development, caught partway through; see
+    docs/journal/2026-09-02-eval-suite.md."""
     import os
-    from pathlib import Path
 
     hf_home = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface"))
     repo_dir = hf_home / "hub" / ("models--" + model.quantized_model_id.replace("/", "--"))
@@ -163,14 +129,16 @@ def _gguf_cached_locally(model) -> bool:  # noqa: ANN001
 
 
 @pytest.fixture(scope="session")
-def eval_runner(request: pytest.FixtureRequest):
-    """Model-gated tests only (`pytest.mark.model`). Skips — never errors,
-    and never attempts a network download — when the GGUF isn't already in
-    the local cache. See `_gguf_cached_locally`: this fixture is the one
-    place in the suite that may construct a real `mistralrs.Runner`, and it
-    must never be reached in an environment with no GPU and no cached
-    weights."""
+def agent_runner_factory(request: pytest.FixtureRequest, inventory: tuple[Path, bytes]):
+    """Model-gated tests only (`pytest.mark.model`). Returns a zero-arg
+    factory building a fresh `AgentRunner` over one shared real
+    `mistralrs.Runner` — a fresh wrapper per test (no leaked conversation
+    state) over one loaded model (expensive to reload). Skips — never
+    errors, never attempts a network download — when the GGUF isn't
+    already in the local cache; see `_gguf_cached_locally`."""
     pytest.importorskip("mistralrs")
+    from typing import cast
+
     from sumac import llm
 
     model_name = request.config.getoption("--eval-model") or llm.DEFAULT_MODEL_PRESET.name
@@ -182,81 +150,124 @@ def eval_runner(request: pytest.FixtureRequest):
         )
     seed_value = request.config.getoption("--eval-seed")
     try:
-        runner = llm._build_runner(model, seed=seed_value)
+        base_runner = llm._build_runner(model, seed=seed_value)
     except Exception as e:  # noqa: BLE001 - last-resort guard; the cache check above is primary
         pytest.skip(f"could not load {model.quantized_model_id}: {e}")
-    return runner, model
 
+    data_dir, key = inventory
+    debug = request.config.getoption("--eval-debug")
 
-# --- results collection: one JSON file per pytest session (one epoch) -------
-# `run.py` drives one pytest session per `--eval-seed`; `report.py` and
-# `compare.py` read the resulting files. A hook, not only a fixture,
-# because `pytest_sessionfinish` has no fixture access — `pytest_configure`
-# stashes a plain list on `config` that both the fixture and the hook can
-# reach (the documented pattern for hook/fixture-shared session state).
-
-
-def pytest_configure(config: pytest.Config) -> None:
-    config._eval_rows = []  # ty: ignore[unresolved-attribute]
-
-
-@pytest.fixture(scope="session")
-def eval_results_collector(request: pytest.FixtureRequest) -> list[dict]:
-    return request.config._eval_rows  # ty: ignore[unresolved-attribute]
-
-
-def _git_sha() -> str | None:
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=_REPO_ROOT,
-            capture_output=True,
-            text=True,
-            timeout=5,
+    def make() -> llm.AgentRunner:
+        # `_build_runner`'s own return type covers streaming too, which
+        # `AgentRunner` never requests — same narrowing `llm.py` itself
+        # does at its one `_build_runner` call site.
+        return llm.AgentRunner(
+            data_dir, key, model=model, runner=cast(llm.SendsCompletions, base_runner), debug=debug
         )
-    except OSError:
+
+    return make
+
+
+# --- assertion helpers ------------------------------------------------------
+# Deliberately plain functions, not a generic scorer class — each test
+# calls one or two of these directly and reads top-to-bottom.
+
+UNIT_SYNONYMS: dict[str, str] = {
+    "can": "can", "cans": "can",
+    "jar": "jar", "jars": "jar",
+    "carton": "carton", "cartons": "carton",
+    "pack": "pack", "packs": "pack",
+    "tub": "tub", "tubs": "tub",
+    "box": "box", "boxes": "box",
+    "bag": "bag", "bags": "bag",
+    "bottle": "bottle", "bottles": "bottle",
+    "jug": "jug", "jugs": "jug",
+    "g": "g", "kg": "kg",
+}  # fmt: skip
+
+
+def _canon_unit(unit: str) -> str:
+    return UNIT_SYNONYMS.get(unit.strip().lower(), unit.strip().lower())
+
+
+def _canon_location(cfg: sumac_config.Config, value: str | None) -> str | None:
+    if value is None:
         return None
-    return result.stdout.strip() if result.returncode == 0 else None
+    if value in cfg.known_locations:
+        return value
+    for loc_id in cfg.known_locations:
+        if sumac_config.location_path(cfg.known_locations, loc_id) == value:
+            return loc_id
+    return value
 
 
-def _provenance(config: pytest.Config) -> dict:
-    """Written into every `--eval-json` file's header.
-    `compare.py` hard-errors on a model or family-set mismatch between two
-    such files, and warns on a `prompt_constants_hash` mismatch — a prompt
-    change is usually the thing being measured, a different family set is
-    a different population. Does not hash the GGUF file on disk — locating
-    it depends on mistral.rs's own cache layout, which this suite doesn't
-    introspect; see docs/journal/2026-09-02-eval-suite.md, Missing."""
-    from sumac import llm
+def assert_no_writes(plan) -> None:  # noqa: ANN001
+    assert plan.writes == (), f"expected no writes, got {plan.writes!r}"
 
-    model_name = config.getoption("--eval-model") or llm.DEFAULT_MODEL_PRESET.name
-    model = llm.model_preset(model_name)
-    n_families = config.getoption("--families")
-    prompt_text = "".join(
-        [llm.CLASSIFIER_PROMPT, llm._FIND_PROMPT, llm._ADD_PROMPT, llm._REMOVE_PROMPT]
+
+def assert_write(
+    plan,  # noqa: ANN001
+    cfg: sumac_config.Config,
+    *,
+    kind,  # noqa: ANN001
+    product_id: str,
+    amount: str,
+    unit: str,
+    to_location: str | None = None,
+    from_location: str | None = None,
+) -> None:
+    """Exactly one write in `plan`, matching every field given — unit and
+    location are canonicalised (a plural unit and a display-path location
+    are accepted), product and amount are compared exactly."""
+    assert len(plan.writes) == 1, f"expected exactly one write, got {plan.writes!r}"
+    w = plan.writes[0]
+    assert w.kind == kind, f"expected kind={kind}, got {w.kind}"
+    assert w.product_id.strip().lower() == product_id.strip().lower(), (
+        f"expected product {product_id!r}, got {w.product_id!r}"
     )
-    return {
-        "git_sha": _git_sha(),
-        "model_preset": model.name,
-        "quantized_model_id": model.quantized_model_id,
-        "quantized_filename": model.quantized_filename,
-        "temperature_routing": 0.0,
-        "temperature_proposals": config.getoption("--eval-temperature"),
-        "top_p": llm.DEFAULT_TOP_P,
-        "max_tokens": llm.DEFAULT_MAX_TOKENS,
-        "eval_seed": config.getoption("--eval-seed"),
-        "families": [f.id for f in FAMILIES[:n_families]],
-        "prompt_constants_hash": hashlib.sha256(prompt_text.encode()).hexdigest()[:16],
-    }
+    assert w.amount == Decimal(amount), f"expected amount {amount!r}, got {w.amount!r}"
+    assert _canon_unit(w.unit) == _canon_unit(unit), f"expected unit {unit!r}, got {w.unit!r}"
+    if to_location is not None:
+        assert _canon_location(cfg, w.to_location) == to_location, (
+            f"expected to_location {to_location!r}, got {w.to_location!r} "
+            f"(canonicalised: {_canon_location(cfg, w.to_location)!r})"
+        )
+    if from_location is not None:
+        assert _canon_location(cfg, w.from_location) == from_location, (
+            f"expected from_location {from_location!r}, got {w.from_location!r} "
+            f"(canonicalised: {_canon_location(cfg, w.from_location)!r})"
+        )
 
 
-def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
-    config = session.config
-    json_path = config.getoption("--eval-json")
-    if not json_path:
-        return
-    rows = getattr(config, "_eval_rows", [])
-    payload = {"provenance": _provenance(config), "rows": rows}
-    out = Path(json_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(payload, indent=2, default=str))
+def assert_classified(plan, kind) -> None:  # noqa: ANN001
+    assert plan.trace, "expected a classify_request round in the trace, trace is empty"
+    first = plan.trace[0]
+    assert first.name == "classify_request", f"expected classify_request first, got {first.name}"
+    actual = first.arguments.get("kind")
+    assert actual == kind.value, f"expected classified as {kind.value!r}, got {actual!r}"
+
+
+def assert_tool_called(plan, name: str, *, at_most: int | None = None) -> None:  # noqa: ANN001
+    calls = [t.name for t in plan.trace if t.name == name]
+    trace_names = [t.name for t in plan.trace]
+    assert calls, f"expected {name!r} to be called at least once, trace: {trace_names}"
+    if at_most is not None:
+        assert len(calls) <= at_most, (
+            f"{name!r} called {len(calls)} times, expected at most {at_most}"
+        )
+
+
+def is_ask_or_act(plan, *, max_reply_len: int = 400) -> str:  # noqa: ANN001
+    """Returns `"act"` (wrote something), `"ask"` (empty writes, a
+    question, no tool call beyond find, a short reply), or `"inaction"`
+    (empty writes matching neither — the failure branch). A bare question
+    mark alone isn't enough: it conflates a genuine clarifying question
+    with a reply that rambles without acting."""
+    if plan.writes:
+        return "act"
+    reply = plan.reply_text or ""
+    domain_calls = [t.name for t in plan.trace if t.name != "classify_request"]
+    only_find = all(name == "sumac_find_inventory" for name in domain_calls)
+    if "?" in reply and only_find and len(reply) <= max_reply_len:
+        return "ask"
+    return "inaction"

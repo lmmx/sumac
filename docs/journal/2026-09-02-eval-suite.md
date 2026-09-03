@@ -693,3 +693,122 @@ constructor.
 
 - None found against `README.md`, which now names `evals/` and points to `evals/README.md`,
   matching what exists.
+
+---
+
+# 2026-09-03: Eval Suite Reduction Pass
+
+## Context
+
+A real run against a real model (`unsloth/Qwen3.5-4B-GGUF` or `Qwen3-4B-Instruct-2507-GGUF`,
+both `max_seq_len: 4096` per the logs in `docs/journal/2026-09-01-ask-agent-design.md`) against
+the request this entry's fixtures already encoded verbatim — "Add 1 bag of Basmati Rice (1kg)
+next to the existing jug of Basmati Rice" — produced a repeated `sumac_discover_inventory` loop
+that overflowed the model's context window. Separately, the 177-generated-case suite the previous
+implementation pass built was judged too large and too statistically elaborate to answer the
+question actually being asked at this stage: given one request, did the agent do the right thing.
+This entry records the diagnosis of that failure and the resulting cut of the suite from 177
+generated cases across ten fixture families down to 23 hand-picked ones across one.
+
+## Diagnosis: the Basmati Rice loop
+
+`AgentRunner._run_loop` (`src/sumac/llm.py:802-894`) bounds round *count* per call
+(`MAX_TOOL_ROUNDS = 20`), not accumulated *token* count. `self._messages` is never trimmed and is
+shared across every `_run_loop()` call a single `propose()` makes: the initial call,
+`_maybe_force_action`'s one extra call (triggered whenever an `add`/`remove`-classified request
+produces no writes), and up to `SELF_REVIEW_ROUNDS` more from `_maybe_self_review` — each
+appending onto the same growing list, with no check anywhere on total size.
+`decide._resolve_product` rejects a bag-vs-jug unit mismatch with `unit_unconvertible` on every
+attempt; a model that cannot resolve that just keeps retrying `sumac_discover_inventory`, and
+`_build_request` resends the full `tool_schemas` on every round of the client-side loop
+(`src/sumac/llm.py` module docstring). `evals/test_termination.py`'s
+`test_repeated_rejection_terminates_within_round_cap` reproduces the mechanism deterministically,
+with no real model: a fake runner that repeats the same rejected call forever drives exactly 41
+rounds (1 classify + 20 main loop + 20 from `_maybe_force_action`'s retry — `_maybe_self_review`
+never fires here, since it short-circuits on empty `plan.writes` before making a further round)
+before `propose()` returns cleanly with no write. 41 rounds of repeated tool-schema-plus-rejection
+payload is a plausible way to exceed a 4096-token context well before any round cap fires, which
+is consistent with what the real run hit.
+
+**Not fixed here.** The round cap is a real termination guarantee; it is not a context-size
+guarantee, and nothing else is one. A fix (a token-based bound, refusing to retry an identical
+rejected call twice, or trimming message history) is an `src/sumac/llm.py` behaviour change of
+the same weight as the sampling-pinning commit earlier in this entry, and wants an explicit
+decision rather than a silent edit alongside an eval-suite rewrite.
+
+## What was deleted
+
+`evals/generate.py` (the template engine), `evals/cases.py` (`EvalCase`/`WriteSpec`/expectation
+type system), `evals/vocab.py` (ten `FamilyVocab`s), `evals/scoring.py` (canonicalisation-as-a-
+framework, `TraceExpectation`, `CaseScore`), `evals/baselines.py` (null baselines),
+`evals/run.py` (epoch orchestrator), `evals/report.py`, `evals/compare.py` (McNemar/ICC/MDE/
+two-way cluster bootstrap), `evals/test_scoring.py`, `evals/test_routing.py`,
+`evals/test_proposals.py`, `evals/seed.py` (superseded by `evals/fixtures.py`, below). All of it
+existed to support 177 generated cases and cross-epoch aggregation; neither survived this pass.
+
+## What remains
+
+- `evals/fixtures.py` — one seeded inventory (the `docs/journal/2026-09-01-ask-agent-design.md`
+  vocabulary: Chopped Tomatoes / Ocado Italian Chopped Tomatoes, Salted / Unsalted Butter, Butter
+  Beans, Basmati Rice, Strawberry Jam, Ragu, Fusilli Pasta, plus the never-seeded Irn-Bru Zero),
+  built via real `sumac` CLI invocations against a trimmed location tree (fridge with a door, main
+  shelves, and a bottle rack; a pantry with one 3x4 grid; a freezer with three drawers — the
+  second grid and two standalone locations from the ten-family version dropped as unused).
+- `evals/conftest.py` — the same four safety rails as before, one `inventory` fixture, an
+  `agent_runner_factory` fixture (kept: the local-GGUF-cache check before ever constructing a real
+  `mistralrs.Runner`, added after the real near-download incident recorded in this entry's first
+  implementation pass), and five plain assertion functions
+  (`assert_write`/`assert_no_writes`/`assert_classified`/`assert_tool_called`/`is_ask_or_act`)
+  replacing the generic scorer.
+- `evals/test_agent.py` — 22 named tests against a real model, one `def test_*` per scenario,
+  covering: find (existing item, missing item, quantity, shared-word decoy, tool-use scoping),
+  add (explicit location, indirect location, new product, discriminator variant, the Basmati Rice
+  unit conflict, an unusual-but-valid destination, bounded duplicate search, two ways of not
+  inventing a missing amount), remove (partial, full), move (explicit, vague-but-answerable), and
+  reject (out-of-domain, gibberish, an inventory word inside an out-of-domain request).
+- `evals/test_termination.py` — the one deterministic, no-model test: the round-cap mechanism
+  proof described above.
+
+## Case matrix reduction
+
+| category (from the product-question list) | old (generated) | new (hand-picked) |
+| --- | --- | --- |
+| successful / failed find | 60 across 10 families | `test_find_existing_item`, `test_find_missing_item` |
+| find quantity / shared-word decoy | 60 across 10 families | `test_find_quantity`, `test_find_shared_word_picks_right_product` |
+| successful add (explicit / indirect location) | 20 | `test_add_existing_item_full_path`, `test_add_existing_item_indirect_location` |
+| missing item -> discover | 10 | `test_add_missing_item_discovers_new_product` |
+| add without confusing near-miss/discriminator products | 20 | `test_add_discriminator_variant_not_confused`, `test_duplicate_search_bounded` |
+| unit-conflict rejection (Basmati Rice) | 10 (`add.unit_collision`) | `test_add_unit_conflict_rejected_basmati_rice` |
+| successful remove (partial / full) | 20 | `test_remove_partial`, `test_remove_all` |
+| move (explicit / vague) | 20 | `test_move_explicit`, `test_move_vague_asks_or_acts` |
+| reject / clarify | 32 + 2 hard | `test_reject_out_of_domain_weather`, `test_reject_gibberish`, `test_reject_joke_with_inventory_word`, `test_ambiguous_product_asks_or_acts` |
+| don't invent a missing required field | 10 (`add.missing_amount`) | `test_missing_amount_does_not_invent_values`, `test_multi_item_add_without_amounts_does_not_invent_values` |
+| unusual destination respected | 1 (hard) | `test_odd_destination_respected` |
+| positional/emptied-location reference | 20 (`blocked`, excluded from headline) | dropped — recorded under Blind spots in `evals/README.md`, not tested until `llm.py` gains a way to resolve one |
+| termination under pathological retry | none | `test_repeated_rejection_terminates_within_round_cap` |
+
+"consumption vs waste vs purchase/discovery" is not a separate row: `AgentRunner.tool_callbacks`
+only ever emits `ChangeKind.DISCOVERY`, `CONSUMPTION`, or `MOVEMENT`
+(`src/sumac/llm.py:311-315`) — `PURCHASE` and `WASTE` have no route through the agent at all, only
+through `sumac add` directly. Every add case is structurally a discovery and every "remove without
+a named destination" case is structurally a consumption; nothing here tests a distinction the
+agent is unable to make, and `evals/README.md` records this under Blind spots rather than a case
+that would trivially pass without checking anything real.
+
+## Verified this session
+
+`uv run pytest evals -v`: 23 collected, `test_repeated_rejection_terminates_within_round_cap`
+passes deterministically, all 22 `test_agent.py` cases skip cleanly (no local GGUF cache, no
+network attempt — confirmed by a ~1.2s total run time) rather than erroring. Full repo suite still
+286 passing; `ruff check .`, `ruff format --check .`, `ty check .` all clean.
+
+## Missing
+
+- `evals/test_agent.py` is unverified against a real model — this container has no GPU and no
+  cached GGUF. In particular, `test_add_unit_conflict_rejected_basmati_rice` — the direct
+  reproduction of the diagnosed failure — has not been run for real; that is the first thing to
+  run once a model is available.
+- The real fix for the diagnosed termination mechanism (token-bounded history, or refusing to
+  retry an identical rejected call) is not implemented — see "Not fixed here" above.
+- Location-reference resolution (positional and emptied-location references) remains unaddressed
+  and untested, as it was in the previous pass.
