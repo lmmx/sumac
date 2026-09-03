@@ -132,6 +132,18 @@ MAX_TOOL_ROUNDS = 20
 # One self-check pass by default; 0 disables it.
 SELF_REVIEW_ROUNDS = 1
 
+# Sampling defaults for every request `AgentRunner` sends. Previously unset —
+# `_build_request` passed no sampling field at all, so a run inherited
+# whatever mistral.rs itself defaults to, which can move under a dependency
+# bump with nothing catching it. Low temperature favours tool-call
+# reliability on a 1-4B model; the classifier in particular is a four-way
+# decision that should not be sampled loosely. `DEFAULT_MAX_TOKENS` is sized
+# above the largest single round recorded in the design journal's real runs
+# (432 completion tokens), not tuned further.
+DEFAULT_TEMPERATURE = 0.2
+DEFAULT_TOP_P = 0.95
+DEFAULT_MAX_TOKENS = 1024
+
 
 # --- Query classification ----------------------------------------------------
 # The first step of handling any request: decide which of a small, fixed set
@@ -545,9 +557,13 @@ def _print_usage(response: mistralrs.ChatCompletionResponse, round_num: int) -> 
     )
 
 
-def _build_runner(model: ModelPreset) -> mistralrs.Runner:
+def _build_runner(model: ModelPreset, *, seed: int | None = None) -> mistralrs.Runner:
     # No `tool_callbacks` here — see the module docstring for why:
     # `AgentRunner` dispatches tool calls itself instead (`_run_loop`).
+    # `seed` is `None` for interactive `sumac ask` use (no fixed seed — the
+    # existing "regenerate" retry already gets its variety from resampling);
+    # an eval run passes an explicit seed so one epoch reproduces exactly
+    # from that seed alone. See docs/journal/2026-09-02-eval-suite.md.
     render.console.print(
         f"[dim]Loading {model.quantized_model_id} "
         "(first run downloads it; may take a while)...[/dim]"
@@ -559,7 +575,7 @@ def _build_runner(model: ModelPreset) -> mistralrs.Runner:
     # `Which.GGUF` is a nested dataclass, not a `Which` subclass, in the
     # installed 0.9.2 stub — the mismatch below is a stub-modeling gap, not a
     # real one; `Which.GGUF(...)` is mistral.rs's own documented construction.
-    return mistralrs.Runner(which=which)  # ty: ignore[invalid-argument-type]
+    return mistralrs.Runner(which=which, seed=seed)  # ty: ignore[invalid-argument-type]
 
 
 class AgentRunner:
@@ -578,11 +594,18 @@ class AgentRunner:
         model: ModelPreset = DEFAULT_MODEL_PRESET,
         runner: SendsCompletions | None = None,
         debug: bool = False,
+        temperature: float = DEFAULT_TEMPERATURE,
+        top_p: float = DEFAULT_TOP_P,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+        seed: int | None = None,
     ) -> None:
         self._data_dir = data_dir
         self._key = key
         self._model = model
         self._debug = debug
+        self._temperature = temperature
+        self._top_p = top_p
+        self._max_tokens = max_tokens
         self._messages: list[dict[str, str]] | None = None
         self._kind: QueryKind | None = None
         self._schemas: list[str] = []
@@ -602,7 +625,7 @@ class AgentRunner:
             # iterator when `stream=True`; `_build_request` never sets it, so
             # narrowing to the non-streaming `SendsCompletions` shape here is
             # safe for every request this class actually sends.
-            else cast(SendsCompletions, _build_runner(model))
+            else cast(SendsCompletions, _build_runner(model, seed=seed))
         )
 
     @property
@@ -769,7 +792,17 @@ class AgentRunner:
             tool_schemas=schemas,
             tool_choice=mistralrs.ToolChoice.Auto,
             enable_thinking=False,
+            temperature=self._temperature,
+            top_p=self._top_p,
+            max_tokens=self._max_tokens,
         )
+
+    def classify(self, prompt: str) -> QueryKind:
+        """Public alias for `_classify` — the routing-only entry point an
+        eval suite outside this module needs (one call per case, not a full
+        `propose()`), without reaching into a private name. See
+        docs/journal/2026-09-02-eval-suite.md."""
+        return self._classify(prompt)
 
     def _classify(self, prompt: str) -> QueryKind:
         """One single-purpose call, made before the model sees any domain

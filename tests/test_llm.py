@@ -897,3 +897,101 @@ def test_run_loop_appends_lfm_formatted_assistant_message_when_configured(
     assert len(tool_call_messages) == 1
     assert "sumac_find_inventory" in tool_call_messages[0]["content"]
     assert "<tool_call>" not in tool_call_messages[0]["content"]
+
+
+# --- sampling configuration (docs/journal/2026-09-02-eval-suite.md) ------
+
+
+def test_classify_public_alias_delegates_to_private_method(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    agent, _fake = _make_agent([_classify_round("find")], data_dir, key)
+
+    assert agent.classify("where is the jam?") is llm.QueryKind.FIND
+
+
+def test_build_request_passes_default_sampling_config(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    """`ChatCompletionRequest` is an opaque PyO3 object — none of its fields
+    are readable back off a real instance (unlike the `@dataclass` its own
+    `.pyi` stub decorates it with, which describes construction, not the
+    runtime type). Capturing the kwargs `_build_request` passes, via a
+    stand-in swapped in for `mistralrs.ChatCompletionRequest` itself, is the
+    only way to confirm what reached it."""
+    captured: dict = {}
+
+    class _CapturingRequest:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(llm.mistralrs, "ChatCompletionRequest", _CapturingRequest)
+    try:
+        agent, _fake = _make_agent([], data_dir, key)
+        agent._build_request([{"role": "user", "content": "hi"}], [])
+    finally:
+        monkeypatch.undo()
+
+    assert captured["temperature"] == llm.DEFAULT_TEMPERATURE
+    assert captured["top_p"] == llm.DEFAULT_TOP_P
+    assert captured["max_tokens"] == llm.DEFAULT_MAX_TOKENS
+
+
+def test_build_request_passes_custom_sampling_config(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    captured: dict = {}
+
+    class _CapturingRequest:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(llm.mistralrs, "ChatCompletionRequest", _CapturingRequest)
+    try:
+        fake = FakeRunner([])
+        agent = llm.AgentRunner(
+            data_dir, key, runner=fake, temperature=0.7, top_p=0.5, max_tokens=256
+        )
+        agent._build_request([{"role": "user", "content": "hi"}], [])
+    finally:
+        monkeypatch.undo()
+
+    assert captured["temperature"] == 0.7
+    assert captured["top_p"] == 0.5
+    assert captured["max_tokens"] == 256
+
+
+def test_build_runner_passes_seed_to_mistralrs_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict = {}
+
+    class _CapturingRunner:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(llm.mistralrs, "Runner", _CapturingRunner)
+    monkeypatch.setattr(
+        llm.render.console, "print", lambda *a, **k: None
+    )  # silence the loading message
+
+    llm._build_runner(llm.DEFAULT_MODEL_PRESET, seed=12345)
+
+    assert captured["seed"] == 12345
+
+
+def test_build_runner_defaults_seed_to_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Interactive `sumac ask` use passes no seed — only an eval run pins
+    one, so that one epoch reproduces exactly from its seed alone."""
+    captured: dict = {}
+
+    class _CapturingRunner:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(llm.mistralrs, "Runner", _CapturingRunner)
+    monkeypatch.setattr(llm.render.console, "print", lambda *a, **k: None)
+
+    llm._build_runner(llm.DEFAULT_MODEL_PRESET)
+
+    assert captured["seed"] is None
