@@ -33,8 +33,8 @@ EVAL_OSUSER = "sumac-eval"
 
 # Single source of truth for the location tree, checked against what
 # `config add-array`/`config add-grid` actually produce
-# (`src/sumac/cli.py:195-241`) by `test_location_path_matches_config` —
-# see `location_path` below.
+# (`src/sumac/cli.py:195-241`) by `test_location_path_matches_real_config`
+# in `test_fixtures.py` — see `location_path` below.
 LOCATIONS: tuple[Location, ...] = (
     Location(id="fridge", name="Fridge"),
     Location(id="fridge-door", name="Door", parent_id="fridge"),

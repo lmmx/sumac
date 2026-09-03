@@ -1,5 +1,5 @@
-"""Safety rails, the one seeded inventory fixture, and small assertion
-helpers for the eval suite — see docs/journal/2026-09-02-eval-suite.md.
+"""Safety rails, the one seeded inventory fixture, and per-scenario result
+collection for the eval suite — see docs/journal/2026-09-02-eval-suite.md.
 The real household inventory lives outside this repository
 (`chez/sumac_data`) and `sumac` resolves its data directory from
 `SUMAC_DATA_DIR`, defaulting to `./data` — every fixture here exists to
@@ -9,12 +9,14 @@ merely unlikely.
 
 from __future__ import annotations
 
-from decimal import Decimal
+import json
+from collections import Counter
 from pathlib import Path
 
 import pytest
 
 from evals import fixtures as eval_fixtures
+from evals.evaluators import EvalResult
 from sumac import config as sumac_config
 from sumac import store as sumac_store
 
@@ -39,6 +41,15 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         action="store_true",
         default=False,
         help="Print raw agent request/response diagnostics (AgentRunner(debug=True)).",
+    )
+    parser.addoption(
+        "--eval-json",
+        action="store",
+        type=str,
+        default=None,
+        help="Write this session's scenario results to this JSON path, for a later "
+        "comparison against a different model/prompt run (no comparison tool exists "
+        "yet — see docs/journal/2026-09-02-eval-suite.md).",
     )
 
 
@@ -168,106 +179,84 @@ def agent_runner_factory(request: pytest.FixtureRequest, inventory: tuple[Path, 
     return make
 
 
-# --- assertion helpers ------------------------------------------------------
-# Deliberately plain functions, not a generic scorer class — each test
-# calls one or two of these directly and reads top-to-bottom.
-
-UNIT_SYNONYMS: dict[str, str] = {
-    "can": "can", "cans": "can",
-    "jar": "jar", "jars": "jar",
-    "carton": "carton", "cartons": "carton",
-    "pack": "pack", "packs": "pack",
-    "tub": "tub", "tubs": "tub",
-    "box": "box", "boxes": "box",
-    "bag": "bag", "bags": "bag",
-    "bottle": "bottle", "bottles": "bottle",
-    "jug": "jug", "jugs": "jug",
-    "g": "g", "kg": "kg",
-}  # fmt: skip
+# --- per-scenario results ---------------------------------------------------
+# `pytest_configure` stashes a plain list on `config` that both the
+# `result` fixture and the `pytest_sessionfinish` hook can reach (hooks
+# have no fixture access) — one `EvalResult` per test, captured on
+# teardown regardless of whether the test's own final `assert` passed, so
+# a failing scenario still reports which of its checks were right.
 
 
-def _canon_unit(unit: str) -> str:
-    return UNIT_SYNONYMS.get(unit.strip().lower(), unit.strip().lower())
+def pytest_configure(config: pytest.Config) -> None:
+    config._eval_results = []  # ty: ignore[unresolved-attribute]
 
 
-def _canon_location(cfg: sumac_config.Config, value: str | None) -> str | None:
-    if value is None:
-        return None
-    if value in cfg.known_locations:
-        return value
-    for loc_id in cfg.known_locations:
-        if sumac_config.location_path(cfg.known_locations, loc_id) == value:
-            return loc_id
-    return value
+@pytest.fixture
+def result(request: pytest.FixtureRequest):
+    """One `EvalResult` per test. `scenario` is derived from the test's own
+    name (`test_add_discriminator_variant_not_confused` ->
+    `add.discriminator_variant_not_confused`) and `category` from the
+    test module's `_CATEGORY` constant — no separate id has to be typed
+    per test, and a scenario can't drift from the function that runs it."""
+    category = getattr(request.module, "_CATEGORY", "uncategorised")
+    scenario = f"{category}.{request.node.name.removeprefix('test_')}"
+    r = EvalResult(scenario=scenario, category=category)
+    yield r
+    request.config._eval_results.append(r)  # ty: ignore[unresolved-attribute]
 
 
-def assert_no_writes(plan) -> None:  # noqa: ANN001
-    assert plan.writes == (), f"expected no writes, got {plan.writes!r}"
+def _print_summary(results: list[EvalResult]) -> None:
+    by_category: dict[str, list[EvalResult]] = {}
+    for r in results:
+        by_category.setdefault(r.category, []).append(r)
+
+    print("\nSUMAC AGENT EVALUATION")
+    total_passed = sum(1 for r in results if r.passed)
+    for category, rs in sorted(by_category.items()):
+        passed = sum(1 for r in rs if r.passed)
+        print(f"  {category:10s} {passed}/{len(rs)}")
+    print(f"  {'overall':10s} {total_passed}/{len(results)}")
+
+    failing = [r for r in results if not r.passed]
+    if failing:
+        print("\nFAILURES")
+        for r in failing:
+            print(f"  {r.scenario}")
+            for f in r.failures:
+                print(f"    - {f}")
+
+    branches = Counter(r.note for r in results if r.note)
+    if branches:
+        print(f"\nask-vs-act branches: {dict(branches)}")
 
 
-def assert_write(
-    plan,  # noqa: ANN001
-    cfg: sumac_config.Config,
-    *,
-    kind,  # noqa: ANN001
-    product_id: str,
-    amount: str,
-    unit: str,
-    to_location: str | None = None,
-    from_location: str | None = None,
-) -> None:
-    """Exactly one write in `plan`, matching every field given — unit and
-    location are canonicalised (a plural unit and a display-path location
-    are accepted), product and amount are compared exactly."""
-    assert len(plan.writes) == 1, f"expected exactly one write, got {plan.writes!r}"
-    w = plan.writes[0]
-    assert w.kind == kind, f"expected kind={kind}, got {w.kind}"
-    assert w.product_id.strip().lower() == product_id.strip().lower(), (
-        f"expected product {product_id!r}, got {w.product_id!r}"
-    )
-    assert w.amount == Decimal(amount), f"expected amount {amount!r}, got {w.amount!r}"
-    assert _canon_unit(w.unit) == _canon_unit(unit), f"expected unit {unit!r}, got {w.unit!r}"
-    if to_location is not None:
-        assert _canon_location(cfg, w.to_location) == to_location, (
-            f"expected to_location {to_location!r}, got {w.to_location!r} "
-            f"(canonicalised: {_canon_location(cfg, w.to_location)!r})"
-        )
-    if from_location is not None:
-        assert _canon_location(cfg, w.from_location) == from_location, (
-            f"expected from_location {from_location!r}, got {w.from_location!r} "
-            f"(canonicalised: {_canon_location(cfg, w.from_location)!r})"
-        )
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    config = session.config
+    results: list[EvalResult] = getattr(config, "_eval_results", [])
+    if not results:
+        return
+    _print_summary(results)
 
+    json_path = config.getoption("--eval-json")
+    if json_path:
+        from sumac import llm
 
-def assert_classified(plan, kind) -> None:  # noqa: ANN001
-    assert plan.trace, "expected a classify_request round in the trace, trace is empty"
-    first = plan.trace[0]
-    assert first.name == "classify_request", f"expected classify_request first, got {first.name}"
-    actual = first.arguments.get("kind")
-    assert actual == kind.value, f"expected classified as {kind.value!r}, got {actual!r}"
-
-
-def assert_tool_called(plan, name: str, *, at_most: int | None = None) -> None:  # noqa: ANN001
-    calls = [t.name for t in plan.trace if t.name == name]
-    trace_names = [t.name for t in plan.trace]
-    assert calls, f"expected {name!r} to be called at least once, trace: {trace_names}"
-    if at_most is not None:
-        assert len(calls) <= at_most, (
-            f"{name!r} called {len(calls)} times, expected at most {at_most}"
-        )
-
-
-def is_ask_or_act(plan, *, max_reply_len: int = 400) -> str:  # noqa: ANN001
-    """Returns `"act"` (wrote something), `"ask"` (empty writes, a
-    question, no tool call beyond find, a short reply), or `"inaction"`
-    (empty writes matching neither — the failure branch). A bare question
-    mark alone isn't enough: it conflates a genuine clarifying question
-    with a reply that rambles without acting."""
-    if plan.writes:
-        return "act"
-    reply = plan.reply_text or ""
-    domain_calls = [t.name for t in plan.trace if t.name != "classify_request"]
-    only_find = all(name == "sumac_find_inventory" for name in domain_calls)
-    if "?" in reply and only_find and len(reply) <= max_reply_len:
-        return "ask"
-    return "inaction"
+        model_name = config.getoption("--eval-model") or llm.DEFAULT_MODEL_PRESET.name
+        payload = {
+            "model": model_name,
+            "seed": config.getoption("--eval-seed"),
+            "results": [
+                {
+                    "scenario": r.scenario,
+                    "category": r.category,
+                    "passed": r.passed,
+                    "checks": r.checks,
+                    "failures": r.failures,
+                    "note": r.note,
+                }
+                for r in results
+            ],
+        }
+        out = Path(json_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(payload, indent=2))

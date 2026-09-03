@@ -894,3 +894,84 @@ a runner producing a version-comparison report — while explicitly keeping pyte
 mechanism and explicitly not reintroducing YAML scenario files, an LLM judge, or the deleted
 statistical machinery. Not acted on this session; the review above (untestable tests, two missing
 regression checks) was treated as the more urgent, concrete work. Revisit once those are fixed.
+
+---
+
+# 2026-09-03: Scenario/Evaluator Refactor
+
+## Context
+
+An external design review (ChatGPT, pasted by the user) proposed restructuring the suite around
+named scenarios, a small typed result, evaluator functions in place of inline assertions, and a
+runner producing a category/dimension summary — while explicitly keeping pytest as the execution
+mechanism and explicitly not introducing YAML, an LLM judge, or the deleted statistical machinery.
+The previous entry recorded this as "under consideration, not decided." This entry is that
+decision, made after the user confirmed the direction directly. The two bugs found in the prior
+review pass (two ADD scenarios depending on a shelf/cupboard naming convention nowhere in the
+system; the contamination and location-path regression checks not carried forward) were fixed in
+the same pass, since every affected file was being rewritten anyway.
+
+## Current State
+
+- `evals/evaluators.py` is new: an `EvalResult` dataclass (`scenario`, `category`, `checks:
+  dict[str, bool]`, `failures: list[str]`, `note: str | None`, a `passed` property, a `check(name,
+  ok, message)` method) and seven `evaluate_*` functions (`evaluate_classification`,
+  `evaluate_no_writes`, `evaluate_write`, `evaluate_tools`, `evaluate_only_tools`,
+  `evaluate_reply_mentions`, `evaluate_reply_order`, `evaluate_ask_or_act`) that mutate a passed-in
+  `EvalResult` in place. These are the old `conftest.py` assertion helpers (`assert_write`,
+  `assert_classified`, `assert_tool_called`, `is_ask_or_act`) with the same logic, changed from
+  raising to recording a named check — nothing about what's verified changed, only whether a
+  partial pass is visible when the final `assert` in a test fails.
+- `evals/conftest.py` gained a `result` fixture (function-scoped, derives `scenario` from the
+  test's own name and `category` from the test module's `_CATEGORY` constant, yields a fresh
+  `EvalResult`, captures it into a session list on teardown regardless of pass/fail) and a
+  `pytest_sessionfinish` hook printing a category tally, a per-scenario failure list, and an
+  ask-vs-act branch tally, plus an optional `--eval-json PATH` writing the same data as JSON. Lost
+  the `assert_no_writes`/`assert_write`/`assert_classified`/`assert_tool_called`/`is_ask_or_act`
+  functions (moved to `evaluators.py`) and the `UNIT_SYNONYMS`/`_canon_unit`/`_canon_location`
+  helpers (moved with them).
+- `evals/test_agent.py` (22 scenarios, one file) is gone, replaced by `evals/test_find.py` (5),
+  `evals/test_add.py` (10), `evals/test_remove.py` (4 — consumption and movement, both classified
+  `REMOVE`), `evals/test_reject.py` (3) — 22 scenarios, same count, split by capability, each file
+  carrying a `_CATEGORY` constant the `result` fixture reads.
+- `evals/test_fixtures.py` is new (2 tests, no model): `test_no_product_name_leaks_into_prompt_constants`
+  and `test_location_path_matches_real_config`, restoring the two checks the reduction pass had
+  dropped — see the previous entry's Missing section for why the second one specifically would
+  have caught the bug below before a real-model run needed to.
+- **The two untestable ADD scenarios are fixed.** `test_add.py::test_existing_item_explicit_location`
+  (renamed from `test_existing_item_full_path`) now targets `fridge-main-shelf-2` via "the second
+  shelf of the fridge" — the fridge's main-shelf array is genuinely numbered "Shelf 1".."Shelf 4",
+  so "the second shelf" is the location's own name, not an invented convention.
+  `test_add.py::test_missing_item_discovers_new_product` now targets `fridge-door` via "the fridge
+  door" — again the location's actual name. Neither depends on the pantry grid's
+  row-means-shelf/column-means-cupboard convention that exists nowhere in `_ADD_PROMPT`, any tool
+  schema, or a location's own `name` field.
+- `evals/fixtures.py`'s stale comment (citing a test that hadn't existed since the reduction pass)
+  now cites `test_location_path_matches_real_config` in `test_fixtures.py`, which exists.
+- `evals/README.md` rewritten: new layout, an example of writing a scenario, an example of the
+  summary output, an updated Blind Spots section (the location-reference gap is now correctly
+  described as "beyond an id, an exact display path, or a location whose own name is the natural
+  phrase," not blanket-unresolvable), and a "Deliberately not here (yet)" section explaining the
+  YAML/LLM-judge/comparison-tool decisions from the design review.
+
+## Verified this session
+
+`uv run pytest evals/test_termination.py evals/test_fixtures.py -v`: 3 passed, including the
+restored `test_location_path_matches_real_config` against the real seeded config (confirms the two
+relocated ADD scenarios' new targets — `fridge-main-shelf-2`, `fridge-door` — actually resolve).
+`uv run pytest evals -v`: 25 collected, 3 passed (the two fixture checks plus termination), 22
+skipped cleanly (no cached GGUF in this container, confirmed no network activity, ~1.2s total).
+The summary printer and `--eval-json` payload shape were smoke-tested directly against synthetic
+`EvalResult`s (not a real run) and produce the output shown in `evals/README.md`. Full repo suite:
+286 passing. `ruff check .`, `ruff format --check .` (evals/ only — the journal's own embedded
+code-block formatting is a pre-existing cosmetic nit, unrelated), `ty check .` all clean.
+
+## Missing
+
+- Every `test_add.py`/`test_find.py`/`test_remove.py`/`test_reject.py` scenario is unverified
+  against a real model this session — same limitation as every entry before this one; this
+  container has no GPU and no cached GGUF.
+- No cross-run comparison tool exists yet, deliberately — see `evals/README.md`'s "Deliberately not
+  here (yet)". `--eval-json` output is unconsumed until one is written.
+- `test_add.py::test_basmati_rice_in_different_unit` is still expected to fail for real — the
+  `decide.py` gap it marks is unfixed, out of scope for this suite.
