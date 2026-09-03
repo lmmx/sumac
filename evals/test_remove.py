@@ -15,11 +15,6 @@ _CATEGORY = "remove"
 pytestmark = pytest.mark.model
 
 
-@pytest.fixture
-def agent(agent_runner_factory):
-    return agent_runner_factory()
-
-
 def test_partial(agent, cfg, result) -> None:
     plan = agent.propose("I used 1 tub of Ragu")
     evaluate_classification(result, plan, QueryKind.REMOVE)

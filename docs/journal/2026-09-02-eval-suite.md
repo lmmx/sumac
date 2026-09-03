@@ -1444,3 +1444,77 @@ neither was taken at face value.
   module right now. If it loads but behaves oddly on tool-heavy scenarios (garbled replies,
   repeated identical tool calls, never settling), check the escaping gap first via `--eval-debug`
   before concluding the model itself is weak.
+
+---
+
+# 2026-09-03: Confirmed Broken — gemma-4-e2b, spark-x2.5-4b — and Tokens/Sec
+
+## Context
+
+Real-run results for the two previous entry's additions, both hard failures at load time — not
+tool-calling or accuracy problems, the model never starts:
+
+- `gemma-4-e2b`: `GGUF architecture 'gemma4' is supported only as a multimodal model. Pass its
+  companion projector with --mmproj <file>, or load from a GGUF repository that publishes one;
+  text-only 'gemma4' checkpoints are not supported`. This `mistralrs` treats Gemma 4 as
+  inherently multimodal at the architecture level — a text-only checkpoint with no `mmproj`
+  sibling (which `unsloth/gemma-4-E2B-it-GGUF` doesn't publish) can't load regardless of quant.
+  The `ToolCallFormat.GEMMA` best-effort rendering added alongside this preset was never
+  exercised — the failure is earlier than that.
+- `spark-x2.5-4b`: `Unknown normal-model GGUF architecture 'spark2_5'` — confirms the previous
+  entry's inference from the model card's "install our llama.cpp fork" instruction: mainline
+  GGUF/llama.cpp (and `mistralrs`, which implements that spec, not community forks) has no
+  registration for this architecture at all.
+
+Separately, the user asked to add tokens/sec to the eval output alongside the existing wall-clock
+latency (`duration_s`) — mistral.rs already reports per-round `usage.completion_tokens` /
+`usage.total_time_sec` (visible in the console's own `round N: ... tok/s ...` log line), just
+never aggregated or exposed anywhere a test could read it.
+
+## Current State
+
+- `src/sumac/llm.py`: `MODEL_PRESETS` back down to 2 — `qwen3.5-4b` (default) and
+  `qwen3.8-4b-distill` (still unverified against a real run — untouched by this entry).
+  `gemma-4-e2b`/`spark-x2.5-4b` removed with a one-line pointer back to this entry.
+  `ToolCallFormat.GEMMA` and its `_render_tool_call` branch/unit test are left in place — unused by
+  any current preset, same as `ToolCallFormat.LFM` already was after `lfm2.5-2.6b` was pruned;
+  infrastructure independent of what's currently registered.
+- `AgentRunner` gained token-throughput tracking: `self._completion_tokens`/
+  `self._generation_time_sec`, accumulated by a new `_record_usage` method (replaces the two direct
+  `_print_usage(...)` call sites in `_classify`/`_run_loop` — printing behavior unchanged, it now
+  also folds the same numbers into a running total), and a `tokens_per_sec` property computing
+  `completion_tokens / generation_time_sec` (summed across every round across every
+  `propose()`/`revise()` call this instance has made, not averaged per-round — averaging would
+  over-weight short rounds). Never reset; a fresh `AgentRunner` per test scenario is what scopes it.
+- `evals/conftest.py` gained a single shared `agent` fixture (`agent_runner_factory` + `result` as
+  dependencies), replacing four identical one-line `agent` fixtures duplicated across
+  `test_add.py`/`test_find.py`/`test_remove.py`/`test_reject.py` — on teardown it writes
+  `result.tokens_per_sec = agent.tokens_per_sec`. Depending on `result` means this fixture's
+  teardown runs *before* `result`'s own (pytest tears down in reverse dependency order), so the
+  write always lands before `result` is captured into the session list.
+- `evals/evaluators.py`: `EvalResult` gained `tokens_per_sec: float | None = None` — not a check
+  (nothing to pass/fail), same category as `duration_s`.
+- `_print_summary` prints a `tok/s` line (mean across scenarios that have one — `test_termination.py`
+  and `test_fixtures.py` don't use the `agent` fixture at all, so they contribute `None` and are
+  excluded from the mean, same as they always were `duration_s`-adjacent no-ops). `--eval-json`
+  payload gained `tokens_per_sec` per scenario and a top-level `mean_tokens_per_sec`.
+  `evals/report.jq` passes `mean_tokens_per_sec` through into the comparison table.
+
+## Verified this session
+
+`ruff check`/`ruff format --check`/`ty check` on every edited file: clean. `evals/report.jq`
+re-validated against a synthetic run JSON carrying the new field (real `runs/*.json` files from
+prior entries were already cleared by the user) — parses and passes the field through correctly.
+No other `def agent(` definitions remain outside the new shared one
+(`grep -rn "def agent(" evals/*.py` → one hit, `conftest.py`). `test_termination.py`/
+`test_fixtures.py` confirmed to never reference `agent`/`agent_runner_factory`, so the fixture
+consolidation doesn't touch them.
+
+## Missing
+
+- None of this — the registry prune or the tok/s instrumentation — has been run for real in any
+  environment this session; same limitation as every entry so far (no GPU, no matching Python ABI
+  in this container). The `tokens_per_sec` property's arithmetic was checked by reading, not by
+  running a real `AgentRunner` against a real `Usage` object.
+- `qwen3.8-4b-distill` (the one still-unverified addition left in the registry) hasn't been pulled
+  or benchmarked yet, tok/s or otherwise.

@@ -21,11 +21,6 @@ _CATEGORY = "find"
 pytestmark = pytest.mark.model
 
 
-@pytest.fixture
-def agent(agent_runner_factory):
-    return agent_runner_factory()
-
-
 def test_existing_item(agent, cfg, result) -> None:
     plan = agent.propose("where is the strawberry jam?")
     evaluate_classification(result, plan, QueryKind.FIND)

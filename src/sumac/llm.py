@@ -104,46 +104,10 @@ class ModelPreset:
 
 
 MODEL_PRESETS: tuple[ModelPreset, ...] = (
-    # The winner of a real multi-model/multi-quant comparison — see
-    # docs/journal/2026-09-02-eval-suite.md's 2026-09-03 entries for the
-    # rest of the field and why each alternative was ruled out (qwen3.5-2b
-    # and lfm2.5-2.6b: lower accuracy/much higher latency; Q4_K_S: no
-    # accuracy benefit; UD-Q4_K_XL/SmolLM3-3B: don't load under this
-    # mistralrs at all).
+    # The winner of a real multi-model/multi-quant comparison
+    # See docs/journal/2026-09-02-eval-suite.md
     ModelPreset("qwen3.5-4b", "unsloth/Qwen3.5-4B-GGUF",
                 "Qwen3.5-4B-Q4_K_M.gguf", ToolCallFormat.QWEN),
-    # A community full-parameter distillation of Alibaba's Qwen3.8-Max
-    # (2.4T-A95B) onto the same Qwen3.5-4B architecture as the preset above
-    # — tagged QWEN on that basis, not a confirmed chat-template match (the
-    # model card documents no tool-calling format of its own). Same
-    # architecture family this mistralrs already loads successfully
-    # (qwen3.5-4b, above), so a better compatibility bet than SmolLM3-3B or
-    # Granite were, but still unverified against a real run — see
-    # docs/journal/2026-09-02-eval-suite.md before trusting a benchmark
-    # built on it.
-    ModelPreset("qwen3.8-4b-distill", "empero-ai/Qwen3.8-4B-Distill-GGUF",
-                "Qwen3.8-4B-Q4_K_M.gguf", ToolCallFormat.QWEN),
-    # Google's Gemma 4 (E2B). Deliberately the *non*-QAT repo the user
-    # actually asked for (`unsloth/gemma-4-E2B-it-qat-GGUF`) only ships
-    # UD-Q2_K_XL/UD-Q4_K_XL — the exact IQ4_XS-tensor quant type already
-    # confirmed unloadable under this mistralrs (see the entry above this
-    # one); this sibling repo has a plain Q4_K_M that sidesteps that known
-    # failure. `ToolCallFormat.GEMMA` is new and best-effort — see its
-    # docstring; this is the least-verified preset in the registry.
-    ModelPreset("gemma-4-e2b", "unsloth/gemma-4-E2B-it-GGUF",
-                "gemma-4-E2B-it-Q4_K_M.gguf", ToolCallFormat.GEMMA),
-    # A 4B model from a much smaller/newer publisher (XHToken) than
-    # anything else here. Flagged, not just unverified: its own model card
-    # says inference needs a *fork* of llama.cpp (`XHToken/llama.cpp`) for
-    # its hybrid attention architecture — mainline llama.cpp/GGUF doesn't
-    # support it, which is real evidence (not just an untried guess) that
-    # mistralrs likely can't load it either. Also the only GGUF this repo
-    # ships is one unquantized 8.23GB file — no Q4_K_M exists to pick.
-    # `ToolCallFormat.QWEN` here is a low-confidence placeholder (the repo
-    # mentions Hermes-style tool use, never its own template) that mostly
-    # doesn't matter if the model never loads to begin with.
-    ModelPreset("spark-x2.5-4b", "XHToken/Spark-X2.5-4B-GGUF",
-                "Spark-X2.5-4B.gguf", ToolCallFormat.QWEN),
 )  # fmt: skip
 
 _MODEL_PRESETS_BY_NAME: dict[str, ModelPreset] = {p.name: p for p in MODEL_PRESETS}
@@ -674,6 +638,8 @@ class AgentRunner:
         self._allowed: frozenset[str] = frozenset()
         self._pending: list[ProposedWrite] = []
         self._trace: list[ToolCallRecord] = []
+        self._completion_tokens = 0
+        self._generation_time_sec = 0.0
         self.tool_callbacks: dict[str, Callable[[str, dict], str]] = {
             "sumac_find_inventory": self._sumac_find_inventory,
             "sumac_consume_inventory": self._sumac_consume_inventory,
@@ -696,6 +662,22 @@ class AgentRunner:
         retry prompt to default to "same model as last time" rather than
         forcing a choice on every retry."""
         return self._model
+
+    @property
+    def tokens_per_sec(self) -> float | None:
+        """Aggregate completion-token throughput across every round this
+        instance has sent so far — the classifier call plus every
+        tool-calling round, across every `propose()`/`revise()` call this
+        instance has made (never reset; a fresh instance per scenario is
+        what scopes it — see `evals/conftest.py`'s `agent` fixture).
+        `completion_tokens / generation_time_sec` summed across rounds
+        rather than averaging each round's own `avg_compl_tok_per_sec`,
+        which would over-weight short rounds. `None` if no round has
+        reported real `usage` yet — a fake `SendsCompletions` in tests has
+        none, so this stays `None` for the whole test."""
+        if self._generation_time_sec <= 0:
+            return None
+        return self._completion_tokens / self._generation_time_sec
 
     # -- tool callbacks -------------------------------------------------------
 
@@ -866,6 +848,18 @@ class AgentRunner:
         docs/journal/2026-09-02-eval-suite.md."""
         return self._classify(prompt)
 
+    def _record_usage(self, response: mistralrs.ChatCompletionResponse, round_num: int) -> None:
+        """Prints the round's usage line (`_print_usage`) and folds its
+        token/timing numbers into `tokens_per_sec`'s running totals — a
+        no-op for the latter beyond the print for a fake `SendsCompletions`
+        with no real `.usage`."""
+        _print_usage(response, round_num)
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return
+        self._completion_tokens += usage.completion_tokens
+        self._generation_time_sec += usage.total_time_sec
+
     def _classify(self, prompt: str) -> QueryKind:
         """One single-purpose call, made before the model sees any domain
         tool: which of find/add/remove this request is, or reject. See the
@@ -877,7 +871,7 @@ class AgentRunner:
         ]
         request = self._build_request(messages, [_CLASSIFY_SCHEMA_JSON])
         response = self._runner.send_chat_completion_request(request)
-        _print_usage(response, 0)
+        self._record_usage(response, 0)
         message = response.choices[0].message
         if not message.tool_calls:
             self._trace.append(
@@ -916,7 +910,7 @@ class AgentRunner:
             if self._debug:
                 render.print_agent_response(response, round_num)
 
-            _print_usage(response, round_num)
+            self._record_usage(response, round_num)
             message = response.choices[0].message
 
             if self._debug:

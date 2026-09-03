@@ -158,6 +158,20 @@ def agent_runner_factory(request: pytest.FixtureRequest, inventory: tuple[Path, 
     return make
 
 
+@pytest.fixture
+def agent(agent_runner_factory, result):
+    """A fresh `AgentRunner` per test (via `agent_runner_factory`), with
+    its `tokens_per_sec` folded into this test's `result` on teardown —
+    centralized here instead of the identical one-liner every
+    `test_*.py` file used to define locally. Depending on `result` means
+    this fixture tears down *before* `result`'s own teardown (pytest tears
+    down in reverse dependency order), so the write below always lands
+    before `result` is captured into the session's list."""
+    a = agent_runner_factory()
+    yield a
+    result.tokens_per_sec = a.tokens_per_sec
+
+
 # --- per-scenario results ---------------------------------------------------
 # `pytest_configure` stashes a plain list on `config` that both the
 # `result` fixture and the `pytest_sessionfinish` hook can reach (hooks
@@ -199,6 +213,9 @@ def _print_summary(results: list[EvalResult]) -> None:
     print(f"  {'overall':10s} {total_passed}/{len(results)}")
     total_duration = sum(r.duration_s for r in results)
     print(f"  {'time':10s} {total_duration:.1f}s")
+    rates = [r.tokens_per_sec for r in results if r.tokens_per_sec is not None]
+    if rates:
+        print(f"  {'tok/s':10s} {sum(rates) / len(rates):.1f} (mean across {len(rates)} scenarios)")
 
     failing = [r for r in results if not r.passed]
     if failing:
@@ -225,10 +242,12 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         from sumac import llm
 
         model_name = config.getoption("--eval-model") or llm.DEFAULT_MODEL_PRESET.name
+        rates = [r.tokens_per_sec for r in results if r.tokens_per_sec is not None]
         payload = {
             "model": model_name,
             "seed": config.getoption("--eval-seed"),
             "total_duration_s": sum(r.duration_s for r in results),
+            "mean_tokens_per_sec": sum(rates) / len(rates) if rates else None,
             "results": [
                 {
                     "scenario": r.scenario,
@@ -238,6 +257,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
                     "failures": r.failures,
                     "note": r.note,
                     "duration_s": r.duration_s,
+                    "tokens_per_sec": r.tokens_per_sec,
                 }
                 for r in results
             ],

@@ -99,6 +99,8 @@ dimension (`classification`, `product`, `amount`, `unit`, `location`, a `tool:<n
 called, `reply`, `outcome` for the ask-or-act scenarios). The final `assert` is what makes pytest
 report the test PASSED/FAILED by name; the `result` fixture captures the same `EvalResult`
 regardless, so a test that fails partway still shows exactly which checks it got right.
+`duration_s`/`tokens_per_sec` aren't checks (nothing to pass or fail) — the `agent` fixture fills
+them in automatically from the real `AgentRunner` it built, no `evaluate_*` call needed for either.
 
 ### Reading the output
 
@@ -110,6 +112,7 @@ SUMAC AGENT EVALUATION
   reject     3/3
   overall    19/22
   time       46.8s
+  tok/s      118.3 (mean across 19 scenarios)
 
 FAILURES
   add.discriminator_variant_not_confused
@@ -122,11 +125,14 @@ ask-vs-act branches: {'branch=act': 2, 'branch=ask': 1}
 
 Printed once at the end of the session (`pytest_sessionfinish` in `conftest.py`) — a category
 tally, a total wall-clock time (sum of each scenario's own `EvalResult.duration_s`, timed around
-just the test body — the once-per-session model load isn't counted), then every failing scenario
-with its specific failed checks, then how the ask-or-act scenarios resolved. `--eval-json PATH`
-additionally writes the same data as JSON, including each scenario's `duration_s` and a
-`total_duration_s` — one run's worth; see "Comparing models" above for turning several of these
-into one table.
+just the test body — the once-per-session model load isn't counted), a mean completion-token
+throughput (`EvalResult.tokens_per_sec`, from `mistralrs`' own per-round `Usage` — summed
+tokens/summed generation-time across every round a scenario ran, not an average of per-round
+rates, which would over-weight short rounds), then every failing scenario with its specific failed
+checks, then how the ask-or-act scenarios resolved. `--eval-json PATH` additionally writes the
+same data as JSON, including each scenario's `duration_s`/`tokens_per_sec` and top-level
+`total_duration_s`/`mean_tokens_per_sec` — one run's worth; see "Comparing models" above for
+turning several of these into one table.
 
 ## Safety rails
 

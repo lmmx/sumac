@@ -14,11 +14,6 @@ _CATEGORY = "reject"
 pytestmark = pytest.mark.model
 
 
-@pytest.fixture
-def agent(agent_runner_factory):
-    return agent_runner_factory()
-
-
 def test_out_of_domain_weather(agent, cfg, result) -> None:
     plan = agent.propose("What's the weather in Edinburgh?")
     evaluate_classification(result, plan, QueryKind.REJECT)

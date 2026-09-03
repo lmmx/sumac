@@ -21,11 +21,6 @@ _CATEGORY = "add"
 pytestmark = pytest.mark.model
 
 
-@pytest.fixture
-def agent(agent_runner_factory):
-    return agent_runner_factory()
-
-
 def test_existing_item_explicit_location(agent, cfg, result) -> None:
     """An explicit, non-inferred destination for an existing product. The
     fridge's main-shelf array is numbered "Shelf 1".."Shelf 4" — a real

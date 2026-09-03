@@ -4,6 +4,7 @@ map({
   passed: ([.results[] | select(.passed)] | length),
   pass_rate: (([.results[] | select(.passed)] | length) / (.results | length) * 100),
   total_duration_s,
+  mean_tokens_per_sec,
   checks: (
     [.results[].checks | to_entries[]]
     | group_by(.key)

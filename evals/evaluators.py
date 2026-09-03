@@ -66,6 +66,7 @@ class EvalResult:
     failures: list[str] = field(default_factory=list)
     note: str | None = None
     duration_s: float = 0.0
+    tokens_per_sec: float | None = None
 
     @property
     def passed(self) -> bool:
