@@ -1086,3 +1086,165 @@ hasn't been exercised against `evals/conftest.py`'s `--eval-model` option resolu
   the preset is dropped.
 - Local HF cache still holds weights for the four dropped presets — cleanup is manual, out of
   scope here (the user's own).
+
+---
+
+# 2026-09-03: Quant Variants, SmolLM3-3B, Model-Pull/Benchmark DX, Eval Timing
+
+## Context
+
+Follow-up to the registry trim above. The user wanted to keep experimenting inside the
+same-size-class field (more quantizations of the three kept presets; a same-size-class contender,
+SmolLM3-3B) without the DX friction that shaped the previous entry — manually editing
+`DEFAULT_MODEL_PRESET` and running `sumac ask` once per model just to prime the HF cache before a
+benchmark loop — and wanted eval latency tracked alongside correctness, not just pass/fail.
+
+Before writing any code, confirmed by direct HF lookups (not guessed):
+- `unsloth/Qwen3.5-4B-GGUF` and `unsloth/Qwen3.5-2B-GGUF` each offer `Q4_K_S`, `Q4_K_M` (already in
+  the registry), and `UD-Q4_K_XL` quant files — filenames and sizes matched what the user had
+  independently seen on the qwen3.5-4b model card.
+- `LiquidAI/LFM2.5-2.6B-GGUF` (LiquidAI's own repo, not unsloth) has no `Q4_K_S` or `UD` variant —
+  only `Q4_0`/`Q4_K_M`/`Q5_K_M`/`Q6_K`/`Q8_0`/`F16`/`BF16`/a QAD checkpoint. No quant expansion
+  added there.
+- `unsloth/SmolLM3-3B-GGUF` exists, offers the same three 4-bit quants, and its own chat template
+  documents the tool-call wrapping `<tool_call>\n{"name": <fn>, "arguments": <args>}\n</tool_call>`
+  — byte-identical to what `_render_tool_call`'s `ToolCallFormat.QWEN` branch already produces —
+  with no `tool_calls`-specific rendering of its own (an assistant turn's `content` is echoed
+  verbatim by its template). Strong evidence `ToolCallFormat.QWEN` is directly reusable, but this
+  is a documented-template read, not a real run — flagged as unverified everywhere it's referenced
+  below.
+- Granite 4.0's tool-call format was not confirmed to the same byte-exact level and would need a
+  genuinely new `ToolCallFormat` branch to hand-render correctly (the client-side tool-calling loop
+  requires an exact match — see the module docstring). By the user's own choice, deferred to a
+  follow-up once actually researched, rather than guessed now.
+
+## Current State
+
+- `src/sumac/llm.py`: `MODEL_PRESETS` grew from 3 to 10 entries. The original three keep their
+  names/positions unchanged (nothing already referencing `qwen3.5-4b`/`qwen3.5-2b`/`lfm2.5-2.6b`
+  breaks). Four new quant-suffixed presets for the two unsloth-published models
+  (`qwen3.5-4b-Q4_K_S`, `qwen3.5-4b-UD-Q4_K_XL`, `qwen3.5-2b-Q4_K_S`, `qwen3.5-2b-UD-Q4_K_XL`), and
+  three new SmolLM3-3B presets (`smollm3-3b-Q4_K_S`, `smollm3-3b-Q4_K_M`,
+  `smollm3-3b-UD-Q4_K_XL`), all `ToolCallFormat.QWEN`, with an inline comment recording the
+  chat-template evidence and the unverified status. `DEFAULT_MODEL_PRESET` unchanged (still index
+  0, `qwen3.5-4b`).
+- `src/sumac/llm.py` also gained `is_cached(model: ModelPreset) -> bool` — the same HF-cache-probe
+  logic that used to live only as `evals/conftest.py`'s private `_gguf_cached_locally`, moved here
+  so both the eval fixture and the new CLI commands below share one implementation.
+  `evals/conftest.py`'s `agent_runner_factory` now calls `llm.is_cached` instead of keeping its own
+  copy.
+- `src/sumac/cli.py`: new `sumac models` sub-Typer (`models_app`, registered the same way as the
+  existing `config_app`), with `models list [--names-only]` (every preset, cached-or-not; the
+  `--names-only` form is plain one-name-per-line for scripting) and `models pull [NAME...]`
+  (defaults to every registry preset; skips ones already cached; loads each uncached one via
+  `llm._build_runner` just long enough to trigger `mistralrs`' own download-on-load, then drops
+  it). The existing inline `try/except ImportError` around `from sumac import llm` in `ask()` was
+  extracted into `_import_llm()`, now shared by `ask`, `models list`, and `models pull` — three
+  call sites of the same guard was worth naming.
+- `scripts/benchmark-models.sh` (new, mirrors `scripts/build-mistralrs-cuda.sh`'s existing
+  dev-tooling convention): `sumac models pull` → `pytest evals --eval-model NAME --eval-json
+  runs/NAME.json` looped over `sumac models list --names-only` → `jq -c -s -f evals/report.jq
+  runs/*.json`. `evals/report.jq` is the aggregation query from this file's own 2026-09-03 entry
+  above, checked in instead of retyped by hand each time — the README previously listed a
+  cross-run comparison tool under "Deliberately not here (yet)"; this is that tool, now that
+  there's real multi-run data to justify it, and that bullet is removed.
+- `evals/evaluators.py`: `EvalResult` gained `duration_s: float = 0.0`. `evals/conftest.py`'s
+  `result` fixture times the test body (`time.perf_counter()` around the `yield` — the once-per-
+  session model load isn't included, only the per-request latency each scenario actually
+  measures). `_print_summary` prints a total wall-clock line; the `--eval-json` payload carries
+  `duration_s` per scenario and a top-level `total_duration_s`.
+- `evals/README.md` updated throughout: the "Running" section's cache-priming instruction now
+  points at `sumac models pull` instead of "run `sumac ask` once"; a new "Comparing models" section
+  documents `models list`/`models pull`/`scripts/benchmark-models.sh`; the sample output block
+  shows the new time line; `report.jq` added to the file tree.
+
+## Verified this session
+
+`ruff check` and `ruff format --check` on every edited `.py` file: clean (one caught issue fixed —
+a missing blank line before `MAX_TOOL_ROUNDS`'s comment block in `llm.py`). `ty check`: clean.
+`bash -n scripts/benchmark-models.sh`: clean. `evals/report.jq` smoke-tested directly against the
+real `runs/*.json` from the previous entry's model comparison (`jq -c -s -f evals/report.jq
+runs/*.json`) — reproduces the same pass-rate ranking, `total_duration_s` reads `null` for those
+older files as expected (they predate this session's timing field). `MODEL_PRESETS` checked for
+duplicate names (`grep -oP 'ModelPreset\("\K[^"]+' | sort | uniq -d`, empty) and correct count (10
+entries, matching 3 original + 4 quant variants + 3 SmolLM3).
+
+## Missing
+
+- Nothing here has been run against a real model or a real HF download in this container (no GPU,
+  no network attempt made deliberately) — `sumac models pull`, `sumac models list`,
+  `scripts/benchmark-models.sh`, and every new preset's actual load are all unverified outside it.
+- **SmolLM3-3B's `ToolCallFormat.QWEN` reuse is a documented-template read, not a confirmed
+  match** — before trusting any SmolLM3 benchmark score, run it once with `--eval-debug` (or
+  `sumac ask --debug`) and inspect the tool-call round-trip by eye for a malformed replay. If it's
+  wrong, it needs its own `ToolCallFormat` branch, not a registry-only fix.
+- Granite 4.0 is still not in the registry — deferred, per the Context section above, until its
+  tool-call chat template is actually worked out rather than guessed.
+- The new quant-variant presets' filenames were confirmed against HF's file listing but not
+  against an actual download — a typo or a since-renamed file would surface as a 404 the first
+  time `sumac models pull` tries it, not before.
+
+---
+
+# 2026-09-03: Confirmed Broken — UD-Q4_K_XL and SmolLM3-3B
+
+## Context
+
+First real run of the additions from the entry above (quant variants + SmolLM3-3B), via `sumac
+models pull` and `scripts/benchmark-models.sh`, outside this container. Two of that entry's
+additions are confirmed non-functional with the installed `mistralrs` — not a benchmark loss, a
+load-time failure before inference ever starts:
+
+- **`UD-Q4_K_XL` (any model)**: fails for all three presets tried (`qwen3.5-4b-UD-Q4_K_XL`,
+  `qwen3.5-2b-UD-Q4_K_XL`, `smollm3-3b-UD-Q4_K_XL`), same error shape —
+  `GGUF tensor ... uses dtype IQ4_XS (23) ...; direct GGUF loading currently supports F32, F16,
+  BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q8_1, and Q2_K through Q8_K`. Unsloth's "Dynamic 2.0"
+  quantization mixes `IQ4_XS` tensors into what's nominally a "Q4_K_XL" file; this installed
+  `mistralrs` version's direct-GGUF loader doesn't support that dtype at all (MXFP4 has an explicit
+  GPT-OSS-only path; IQ4_XS has no path). This is a mistralrs limitation, not a per-model issue —
+  no `UD-*` quant of anything is expected to load until that changes.
+- **SmolLM3-3B (every quant, not just UD)**: `smollm3-3b-Q4_K_S` and `smollm3-3b-Q4_K_M` both fail
+  with `GGUF BPE pre-tokenizer 'smaug-bpe' is not supported for standalone conversion; use the
+  original tokenizer.json or add its exact tokenizer.ggml.pre profile` — a tokenizer-construction
+  failure before the model itself loads, unrelated to quantization or to the `ToolCallFormat.QWEN`
+  hypothesis from the previous entry (never reached far enough to test it). SmolLM3-3B is not
+  usable via this mistralrs version's direct GGUF loading path at all, regardless of quant.
+
+`qwen3.5-4b-Q4_K_S` and `qwen3.5-2b-Q4_K_S` both loaded and pulled successfully — the only two of
+the previous entry's five new-model/new-quant additions that actually work.
+
+Separately, `scripts/benchmark-models.sh` stalled after one model: `qwen3.5-4b`'s run had 1 real
+(expected — `add.basmati_rice_in_different_unit`, deliberately left failing) scenario failure, so
+`pytest` exited 1, and the script's `set -euo pipefail` aborted the whole loop right there instead
+of moving to the next preset. Bug in the script, not in the eval suite or the registry.
+
+## Current State
+
+- `src/sumac/llm.py`: `MODEL_PRESETS` reduced from 10 back to 5 — the original 3 plus
+  `qwen3.5-4b-Q4_K_S` and `qwen3.5-2b-Q4_K_S` only. `qwen3.5-4b-UD-Q4_K_XL`,
+  `qwen3.5-2b-UD-Q4_K_XL`, and all three `smollm3-3b-*` presets removed, with a short comment
+  pointing back at this entry rather than restating the failure detail in code.
+- `scripts/benchmark-models.sh`: the per-model `pytest` line now ends `|| true`, with a comment
+  explaining why (a scenario failing is an expected, informative result some of the time — see the
+  eval README's Blind Spots — and shouldn't abort the rest of the model comparison).
+
+## Verified this session
+
+Real-model evidence only (no container run needed/attempted for this entry) — `qwen3.5-4b`'s real
+`scripts/benchmark-models.sh` run: 25 collected, 21/22 correctness (`time 40.6s`), the one failure
+being the already-documented `add.basmati_rice_in_different_unit`. `ruff check`/`ruff format
+--check`/`ty check` on the edited `llm.py`: clean. `bash -n scripts/benchmark-models.sh`: clean.
+`MODEL_PRESETS` name count re-checked (5, no duplicates).
+
+## Missing
+
+- `scripts/benchmark-models.sh` with the `|| true` fix hasn't been re-run for real yet — should
+  now get through all 5 registry presets and produce a `runs/*.json` per preset plus the
+  `evals/report.jq` summary table in one pass.
+- The local HF cache still holds the fetched-but-broken GGUF files for the removed presets
+  (`Qwen3.5-4B-UD-Q4_K_XL.gguf`, `Qwen3.5-2B-UD-Q4_K_XL.gguf`, and the whole `SmolLM3-3B-GGUF`
+  repo, all three of its fetched quants) — safe to delete (the user's own action, per standing
+  preference; `SmolLM3-3B-GGUF` can go entirely, the two Qwen repos should keep their working
+  `Q4_K_M`/`Q4_K_S` files and only drop the `UD-Q4_K_XL` blob).
+- If `mistralrs` gains `IQ4_XS`/dynamic-quant support in a later version, or SmolLM3 GGUFs start
+  shipping with a recognized pre-tokenizer profile, both are worth retrying — not planned now.

@@ -46,6 +46,7 @@ Full traces and upstream references are in the design journal above.
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -102,6 +103,13 @@ MODEL_PRESETS: tuple[ModelPreset, ...] = (
                 "Qwen3.5-2B-Q4_K_M.gguf", ToolCallFormat.QWEN),
     ModelPreset("lfm2.5-2.6b", "LiquidAI/LFM2.5-2.6B-GGUF",
                 "LFM2.5-2.6B-Q4_K_M.gguf", ToolCallFormat.LFM),
+    # Alternate quant of the two presets above, same repo/tool_call_format —
+    # LiquidAI's own LFM2.5-2.6B-GGUF repo has no Q4_K_S/UD variant to add.
+    # `UD-Q4_K_XL` (either model) and SmolLM3-3B (any quant) are incompatible.
+    ModelPreset("qwen3.5-4b-Q4_K_S", "unsloth/Qwen3.5-4B-GGUF",
+                "Qwen3.5-4B-Q4_K_S.gguf", ToolCallFormat.QWEN),
+    ModelPreset("qwen3.5-2b-Q4_K_S", "unsloth/Qwen3.5-2B-GGUF",
+                "Qwen3.5-2B-Q4_K_S.gguf", ToolCallFormat.QWEN),
 )  # fmt: skip
 
 _MODEL_PRESETS_BY_NAME: dict[str, ModelPreset] = {p.name: p for p in MODEL_PRESETS}
@@ -115,6 +123,23 @@ def model_preset(name: str) -> ModelPreset:
 
 
 DEFAULT_MODEL_PRESET = MODEL_PRESETS[0]
+
+
+def is_cached(model: ModelPreset) -> bool:
+    """Whether `model.quantized_filename` is already present in the local
+    Hugging Face Hub cache, checked without ever constructing a real
+    `mistralrs.Runner` — a first load of an uncached preset downloads a
+    multi-gigabyte GGUF file over the network (`_build_runner`'s own log
+    line: "first run downloads it; may take a while"). `sumac models
+    pull`/`list` and the eval suite's `agent_runner_factory` fixture both
+    use this to decide whether to trigger that download, so it lives here
+    rather than duplicated in `evals/conftest.py`."""
+    hf_home = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface"))
+    repo_dir = hf_home / "hub" / ("models--" + model.quantized_model_id.replace("/", "--"))
+    if not repo_dir.exists():
+        return False
+    return any(repo_dir.rglob(model.quantized_filename))
+
 
 # A termination guarantee sized for "one write per round" (every sequential
 # search-then-act step a compound request could produce), not a cap on how

@@ -10,6 +10,7 @@ merely unlikely.
 from __future__ import annotations
 
 import json
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -117,28 +118,6 @@ def cfg(inventory: tuple[Path, bytes]) -> sumac_config.Config:
     return sumac_config.build_config(data_dir, key)
 
 
-def _gguf_cached_locally(model) -> bool:  # noqa: ANN001
-    """Whether `model.quantized_filename` is already present in the local
-    Hugging Face Hub cache, checked *before* ever constructing a real
-    `mistralrs.Runner`. A first run of `sumac ask` against an uncached
-    preset downloads a multi-gigabyte GGUF file over the network
-    (`llm._build_runner`'s own log line: "first run downloads it; may take
-    a while"), and a try/except around that construction only catches an
-    immediate error, not a slow download that never raises. This check is
-    what makes `agent_runner` skip cleanly with no network attempt when
-    nothing is cached, rather than hang or spend bandwidth silently — an
-    earlier version of this fixture without it triggered a real ~2.5GB
-    download in this repo's own development, caught partway through; see
-    docs/journal/2026-09-02-eval-suite.md."""
-    import os
-
-    hf_home = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface"))
-    repo_dir = hf_home / "hub" / ("models--" + model.quantized_model_id.replace("/", "--"))
-    if not repo_dir.exists():
-        return False
-    return any(repo_dir.rglob(model.quantized_filename))
-
-
 @pytest.fixture(scope="session")
 def agent_runner_factory(request: pytest.FixtureRequest, inventory: tuple[Path, bytes]):
     """Model-gated tests only (`pytest.mark.model`). Returns a zero-arg
@@ -146,7 +125,7 @@ def agent_runner_factory(request: pytest.FixtureRequest, inventory: tuple[Path, 
     `mistralrs.Runner` — a fresh wrapper per test (no leaked conversation
     state) over one loaded model (expensive to reload). Skips — never
     errors, never attempts a network download — when the GGUF isn't
-    already in the local cache; see `_gguf_cached_locally`."""
+    already in the local cache; see `llm.is_cached`."""
     pytest.importorskip("mistralrs")
     from typing import cast
 
@@ -154,7 +133,7 @@ def agent_runner_factory(request: pytest.FixtureRequest, inventory: tuple[Path, 
 
     model_name = request.config.getoption("--eval-model") or llm.DEFAULT_MODEL_PRESET.name
     model = llm.model_preset(model_name)
-    if not _gguf_cached_locally(model):
+    if not llm.is_cached(model):
         pytest.skip(
             f"{model.quantized_model_id}/{model.quantized_filename} not in the local "
             "Hugging Face cache — refusing to trigger a network download from a test fixture"
@@ -201,7 +180,9 @@ def result(request: pytest.FixtureRequest):
     category = getattr(request.module, "_CATEGORY", "uncategorised")
     scenario = f"{category}.{request.node.name.removeprefix('test_')}"
     r = EvalResult(scenario=scenario, category=category)
+    started = time.perf_counter()
     yield r
+    r.duration_s = time.perf_counter() - started
     request.config._eval_results.append(r)  # ty: ignore[unresolved-attribute]
 
 
@@ -216,6 +197,8 @@ def _print_summary(results: list[EvalResult]) -> None:
         passed = sum(1 for r in rs if r.passed)
         print(f"  {category:10s} {passed}/{len(rs)}")
     print(f"  {'overall':10s} {total_passed}/{len(results)}")
+    total_duration = sum(r.duration_s for r in results)
+    print(f"  {'time':10s} {total_duration:.1f}s")
 
     failing = [r for r in results if not r.passed]
     if failing:
@@ -245,6 +228,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         payload = {
             "model": model_name,
             "seed": config.getoption("--eval-seed"),
+            "total_duration_s": sum(r.duration_s for r in results),
             "results": [
                 {
                     "scenario": r.scenario,
@@ -253,6 +237,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
                     "checks": r.checks,
                     "failures": r.failures,
                     "note": r.note,
+                    "duration_s": r.duration_s,
                 }
                 for r in results
             ],

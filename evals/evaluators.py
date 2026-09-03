@@ -65,6 +65,7 @@ class EvalResult:
     checks: dict[str, bool] = field(default_factory=dict)
     failures: list[str] = field(default_factory=list)
     note: str | None = None
+    duration_s: float = 0.0
 
     @property
     def passed(self) -> bool:

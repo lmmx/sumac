@@ -27,9 +27,29 @@ uv run pytest evals -v --eval-json runs/qwen3.5-2b.json             # also write
 ```
 
 `test_add.py`/`test_find.py`/`test_remove.py`/`test_reject.py` skip cleanly — no network attempt,
-no GPU touched — if the target GGUF isn't already in the local Hugging Face cache. Run `sumac ask`
-once against the model you want first, so the weights are cached, then these actually run instead
-of skipping.
+no GPU touched — if the target GGUF isn't already in the local Hugging Face cache. Run `sumac
+models pull [NAME...]` first (defaults to every preset in the registry) so the weights are cached,
+then these actually run instead of skipping.
+
+## Comparing models
+
+```sh
+sumac models list                    # every ModelPreset, and whether it's cached locally
+sumac models pull                    # download every preset's GGUF (skips ones already cached)
+sumac models pull qwen3.5-4b lfm2.5-2.6b   # or just specific ones
+
+scripts/benchmark-models.sh          # pull what's missing, run the suite once per preset,
+                                      # print a pass-rate/latency table (evals/report.jq)
+```
+
+`sumac models pull` replaces manually editing `DEFAULT_MODEL_PRESET` and running `sumac ask` once
+per model just to prime the cache — it loads each uncached preset just long enough to trigger
+`mistralrs`' own download-on-load, the same mechanism `sumac ask` already relies on, then drops it.
+`scripts/benchmark-models.sh` is `sumac models pull` plus a `pytest --eval-model NAME --eval-json
+runs/NAME.json` loop over every registry preset, finished with `jq -c -s -f evals/report.jq
+runs/*.json` — the aggregation query from a real multi-model comparison in
+`docs/journal/2026-09-02-eval-suite.md`'s 2026-09-03 entries, checked in instead of retyped by
+hand each time.
 
 ## What's here
 
@@ -38,6 +58,7 @@ evals/
 ├── conftest.py       # safety rails, the inventory fixture, agent_runner_factory, result collection
 ├── evaluators.py      # EvalResult + evaluate_* functions — the checks, not tied to any one test
 ├── fixtures.py         # one realistic seeded inventory, built via real `sumac` CLI commands
+├── report.jq            # the multi-model summary table query — see scripts/benchmark-models.sh
 ├── test_find.py         # 5 scenarios
 ├── test_add.py           # 10 scenarios
 ├── test_remove.py         # 4 scenarios (consumption and movement — both classified REMOVE)
@@ -80,6 +101,7 @@ SUMAC AGENT EVALUATION
   remove     3/4
   reject     3/3
   overall    19/22
+  time       46.8s
 
 FAILURES
   add.discriminator_variant_not_confused
@@ -91,9 +113,12 @@ ask-vs-act branches: {'branch=act': 2, 'branch=ask': 1}
 ```
 
 Printed once at the end of the session (`pytest_sessionfinish` in `conftest.py`) — a category
-tally, then every failing scenario with its specific failed checks, then how the ask-or-act
-scenarios resolved. `--eval-json PATH` additionally writes the same data as JSON, one run's worth
-— there is no comparison tool yet; see Deliberately not here (yet).
+tally, a total wall-clock time (sum of each scenario's own `EvalResult.duration_s`, timed around
+just the test body — the once-per-session model load isn't counted), then every failing scenario
+with its specific failed checks, then how the ask-or-act scenarios resolved. `--eval-json PATH`
+additionally writes the same data as JSON, including each scenario's `duration_s` and a
+`total_duration_s` — one run's worth; see "Comparing models" above for turning several of these
+into one table.
 
 ## Safety rails
 
@@ -108,10 +133,6 @@ that temp root; no eval calls `AgentRunner.commit` — every assertion reads `pl
 - **Generated cases, epochs, seeds beyond one, null baselines, McNemar/ICC/MDE/cluster bootstrap.**
   All built once, all deleted, in the reduction pass this suite went through before reaching this
   shape — see the journal for what each did and why none of it earned its complexity at 25 cases.
-- **A cross-run comparison tool.** `--eval-json` writes one run's results in a shape meant to
-  support diffing two runs later (different model, different prompt), but that tool doesn't exist
-  yet — there's only been one real-model run so far, and building a diff tool before there's a
-  second run to diff against would be guessing what it needs to show.
 - **YAML scenario files.** Considered (an external design review suggested it) and explicitly not
   done — the scenarios carry real semantic nuance in their prompts and docstrings (why this
   wording, why this location, why this outcome is acceptable) that YAML would flatten.
