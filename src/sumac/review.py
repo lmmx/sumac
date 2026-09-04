@@ -139,8 +139,14 @@ def headline(findings: tuple[tuple[Finding, ...], ...]) -> str:
     `near-match` never appears here on its own, since it only ever
     accompanies `new-product`."""
     total = len(findings)
-    changes = f"{total} change" + ("" if total == 1 else "s")
-    parts = [changes]
+    flagged = [per_write for per_write in findings if per_write]
+    if total == 1 and not flagged:
+        # One change with nothing to flag: the row underneath already says
+        # everything a "1 change" line would, and a header that only ever
+        # restates the obvious trains the eye to skip the one case where it
+        # says something.
+        return ""
+    parts = [f"{total} change" + ("" if total == 1 else "s")]
     for code, (singular, plural) in _HEADLINE_PHRASE.items():
         n = sum(1 for per_write in findings if any(f.code == code for f in per_write))
         if n:

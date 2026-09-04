@@ -118,7 +118,14 @@ def test_headline_counts_writes_not_findings() -> None:
     )
 
 
-def test_headline_of_a_clean_plan_is_just_the_count() -> None:
+def test_a_single_clean_change_has_no_headline_at_all() -> None:
+    """The write's own row says everything a "1 change" line would."""
     findings = review.review_plan(_plan(_write("jam")), CFG)
 
-    assert review.headline(findings) == "1 change"
+    assert review.headline(findings) == ""
+
+
+def test_a_single_flagged_change_still_says_what_is_flagged() -> None:
+    findings = review.review_plan(_plan(_write("jam", to="shed")), CFG)
+
+    assert review.headline(findings) == "1 change · 1 names a new location"

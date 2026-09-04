@@ -96,8 +96,8 @@ and callers are untouched.
 This makes the preview's numbers `decide`'s own, including the shortfall `Counted` correction
 `docs/journal/2026-08-30_decide-pattern-data-integrity-upgrade.md` §3.5 emits — the exact case
 `render.print_plan`'s docstring cites as the reason not to compute an "after" by subtraction.
-`render.print_plan` renders each effect as `Location · product: before → after`, with the
-`(--dry-run)` and multi-write headers folded into one line above it.
+`render.print_plan` renders each write as two lines — kind, amount and product, then the location
+path and `before → after` per endpoint — with a single count line above the whole plan.
 
 Two things this does not claim: the projection is per-write against the inventory each
 `_propose_write` call loaded, so two writes in one plan touching the same product both project from
@@ -107,8 +107,8 @@ computed, labeled as such.
 
 ### 3.3 Grounding badges: what in this plan is not in your vault
 
-`sumac/review.py` — new, pure, no I/O — takes a plan, a `Config`, and an `Inventory` and returns a
-per-write list of findings:
+`sumac/review.py` — new, pure, no I/O — takes a plan and a `Config` and returns a per-write list of
+findings:
 
 - `new-product`: `product_id` is not in `cfg.known_products`.
 - `new-unit`: the product is known and `cfg.can_convert(product_id, unit)` is false.
@@ -138,9 +138,10 @@ cover every case a script can express.
 
 `render.print_trace` gains a compact mode — one line per call, `tool(args) → <n> matches` for a
 search and the decided effect for a write, with the raw JSON result kept for `--trace`. `ask` gains
-`--trace` (full table, today's behavior) and `--stats` (the `_print_usage` lines). `_print_usage`
-takes an explicit `enabled` argument threaded from `AgentRunner`, rather than printing
-unconditionally, closing the Missing bullet
+`--trace` (full table, today's behavior) and `--stats` (the `_print_usage` lines), the latter
+threaded into `AgentRunner` as `show_usage` — which defaults True, so `evals/` and the benchmark
+scripts keep printing what they always did and only `sumac ask` changes. That closes the Missing
+bullet
 `docs/journal/2026-09-01-ask-agent-design.md`'s tail section carries.
 
 ## 4. A preview harness, because the model is not the thing being iterated on
@@ -193,7 +194,7 @@ tests for what it introduces.
 ## Current State
 
 - `docs/journal/2026-09-04-ask-confirmation-ux.md` (this file) plans five changes to `sumac ask`'s
-  confirmation interface and one preview harness; no code accompanies this commit.
+  confirmation interface and one preview harness; no code accompanies the commit that added it.
 - `src/sumac/cli.py`'s `ask` command takes `PROMPT`, `--loop`, `--dry-run`, `--debug`, and
   `--data-dir` (cli.py:424-438), and routes to `_ask_one` (cli.py:591) or `_ask_loop` (cli.py:662).
 - `_ask_one` and `_ask_loop_request` each read a decision with `typer.prompt("Choice", default="a")`
@@ -214,17 +215,122 @@ tests for what it introduces.
 
 ## Missing
 
-- Nothing in this plan is implemented at this commit — `src/sumac/prompt_ui.py`,
+- Nothing in this plan is implemented at the commit that added it — `src/sumac/prompt_ui.py`,
   `src/sumac/review.py`, `ledger.project`, `ProposedWrite.effects`, `ask --trace`, `ask --stats`,
-  and `scripts/preview-ask-ui.py` do not exist.
+  and `scripts/preview-ask-ui.py` do not exist there.
 - No `sumac ask` interaction reads a single keypress; every prompt in the `ask` code path is a
   line-buffered `typer.prompt`.
 - Nothing in the `ask` code path compares a `ProposedWrite`'s `product_id` against `AgentPlan.trace`
   or against `Config.known_products` for display — `decide._resolve_product`'s auto-registration
-  warning (decide.py:176-183), carried in `ProposedWrite.warnings`, is the only signal in the
+  warning (decide.py:191-195), carried in `ProposedWrite.warnings`, is the only signal in the
   preview that a product is unregistered.
 
 ## Divergence
 
 - `README.md` documents `sumac ask` as parsing freeform text via a local LLM and does not describe
   the confirmation interface, so nothing in it diverges from what this plan changes.
+
+---
+
+# 2026-09-04: `sumac ask` Confirmation UX — Implementation State
+
+## Current State
+
+- `src/sumac/prompt_ui.py` (new) defines `Option`, `Choice`, `interactive()`, `read_key()`,
+  `select()`, and `multiselect()`; `interactive()` returns False unless `termios`/`tty` imported
+  and both `sys.stdin` and `sys.stdout` are ttys, and `select()` prints
+  `render.print_decision_options` and reads `typer.prompt("Choice", default=...)` when it does.
+- `prompt_ui.select` returns an option's `key`, the typed line for an option with
+  `prompt_for_text=True`, and `"r"` for Escape or Ctrl-C — the same strings the typed path
+  produces, so `cli.py`'s accept/reject/edit branches match on one set of values regardless of
+  which path produced the answer.
+- `prompt_ui.read_key` returns `"\x1b[A"`/`"\x1b[B"` whole for the arrow keys, distinguishing a
+  bare Escape from an escape sequence by a zero-length `select.select` poll rather than a blocking
+  read of the following bytes.
+- `ledger._fold_into(state, records, locations)` (extracted from `_fold`) applies records onto a
+  caller-supplied state dict; `ledger._fold` calls it with an empty dict and returns
+  `(state, anomalies)` as before.
+- `ledger.project(inventory, locations, objs)` parses already-serialized record dicts through
+  `RecordSchema.model_validate(...).to_domain()` and `upcast.upcast`, then folds them onto a copy
+  of `inventory.by_location` via `_fold_into`, returning a new `Inventory`.
+- `llm.LocationEffect(location_id, product_id, unit, before, after)` and
+  `llm.ProposedWrite.effects: tuple[LocationEffect, ...] = ()` record a write's per-location
+  before/after; `llm._effects` computes them from `ledger.project` over the log-stream writes
+  `decide.decide_change` returned, filtering out the config-stream writes an auto-registration adds.
+- `ProposedWrite.current_amount` is unchanged and still populated — `render._effect_text` falls
+  back to it when `effects` is empty, so a `ProposedWrite` built by hand renders as it did before.
+- `src/sumac/review.py` (new) defines `Finding(code, label, detail, explain)`, `review_write`,
+  `review_plan`, and `headline`; `review_plan` returns one findings tuple per write, positionally
+  aligned with `plan.writes`.
+- `review.review_write` emits `ungrounded` when a `product_id` is in neither `cfg.known_products`
+  nor the concatenated results of the plan's `sumac_find_inventory` calls (`review.READ_TOOLS`),
+  plus `new-product`, `near-match` (via `decide.near_matches`), `new-unit` (a known product whose
+  unit `cfg.can_convert` rejects), and `unknown-location`.
+- `review.READ_TOOLS` excludes the three write tools — `llm._propose_write`'s result JSON echoes
+  the `product_id` it was called with, which a grounding check over every trace entry would count
+  as a search result (`test_grounding_ignores_a_write_tool_echoing_its_own_argument`,
+  tests/test_review.py).
+- `Finding.explain` is True only for `ungrounded` and `unknown-location`; `render.print_plan`
+  prints a detail line for those and shows every other finding as a badge only, alongside the
+  `decide` warnings already carried on the write.
+- `review.headline` returns `""` for a single write with no findings, and otherwise a count line
+  ("2 changes · 1 creates a new product") counting writes rather than findings.
+- `render.print_plan(plan, *, findings=(), locations=None, header="")` prints two lines per write —
+  kind/amount/product with badges, then location path and `before → after` per endpoint — plus one
+  indented line per explaining finding and per `decide` warning, via `render._indented`'s `Padding`
+  so a wrapped line keeps its indent.
+- `render.print_trace(trace, *, verbose=False)` prints one summary line per call by default —
+  `render._trace_summary` reports product/location counts for a search result, a status or
+  rejection reason for a write result, and the first 60 characters of anything it cannot parse —
+  and the previous full table when `verbose`.
+- `sumac ask` takes `--trace` and `--stats` alongside `--dry-run`/`--debug`, carried through
+  `cli._AskView`; `--stats` reaches `AgentRunner(show_usage=...)` (llm.py), whose default stays
+  True so `evals/` and the benchmark scripts print what they always did.
+- `cli._decision_options` returns `list[prompt_ui.Option]` and takes `pick`, which `cli._decide_prompt`
+  passes only when a plan has more than one write and `prompt_ui.interactive()` is True.
+- `cli._pick_writes` runs `prompt_ui.multiselect` over a plan's writes and returns a
+  `dataclasses.replace`d plan; the narrowed plan re-enters the same preview and decision prompt
+  rather than committing from the checklist.
+- `cli._build_agent` constructs every `AgentRunner` in the `ask` code path — four call sites across
+  the two decision loops previously repeated the constructor call.
+- `scripts/preview-ask-ui.py` (new) renders seven scenes (single, compound, fabricated, read-only,
+  trace, typed, checklist) against hand-built `AgentPlan`s with no vault and no `mistralrs` import;
+  `--svg <dir>` writes each through `rich.console.Console.save_svg`.
+- `tests/test_prompt_ui.py` (15 tests) drives `select`/`multiselect` with `interactive` and
+  `read_key` monkeypatched to a scripted keypress list, and asserts the non-TTY path calls
+  `typer.prompt`.
+- `tests/test_review.py` (10 tests) covers each finding code, the write-tool echo exclusion, which
+  findings explain themselves, and `headline`'s two shapes.
+- `tests/test_ledger.py` gains three `project` tests, including the shortfall case where folding
+  lands on zero and subtraction would give -2; `tests/test_llm.py` gains four `effects` tests;
+  `tests/test_cli.py` gains five (`before → after` in the preview, the `[unverified]` badge, the
+  compact trace, `--trace`'s table, `--stats` reaching the agent).
+- `tests/test_preview_script.py` imports `scripts/preview-ask-ui.py` by path and runs every scene
+  against a recording console, restoring `render.console`/`prompt_ui.console` afterwards.
+- `README.md`'s `sumac ask` section documents the preview, the four badges, the two input paths,
+  `p`, `--trace`/`--stats`, and `scripts/preview-ask-ui.py`.
+- `pytest` reports 354 passing tests repo-wide; `ruff format --check .`, `ruff check .`, and
+  `ty check` each report no findings.
+
+## Missing
+
+- No real-model run exercises any of this — every test drives a scripted `SendsCompletions` or a
+  `_FakeAgentRunner`, and no `sumac ask` invocation against a real GGUF is recorded in this entry.
+- No test drives `prompt_ui` against a real terminal: `interactive()` is monkeypatched to True and
+  `read_key` replaced, so `termios.tcgetattr`/`tty.setraw` and the `rich.live.Live` redraw are
+  exercised by no test.
+- `prompt_ui.multiselect` has no non-TTY path — `cli._decide_prompt` omits the `p` option entirely
+  when `interactive()` is False, so a pipe and a script cannot apply a subset of a compound plan.
+- `llm._effects` projects each write against the inventory that write's own `_propose_write` call
+  loaded, so two writes in one plan touching the same product both project from the same base —
+  `docs/journal/2026-09-01-ask-agent-design.md` §15's first accepted limitation, unchanged.
+- `review`'s `ungrounded` check matches a `product_id` as a case-insensitive substring of the
+  concatenated search results, so a product id that is a substring of an unrelated one a search
+  returned counts as grounded.
+- Nothing undoes a committed `ask` as a unit — `sumac correct` (cli.py) supersedes one record by
+  id, and the writes of one plan share no identifier that would group them.
+
+## Divergence
+
+- None found. `README.md`'s new `sumac ask` review section was written against the flags
+  `cli.py`'s `ask` signature declares and the badge labels `review.py` emits.

@@ -450,7 +450,7 @@ def _indented(markup: str) -> None:
     """A detail line under a write, indented four columns — as `Padding` so a
     line long enough to wrap keeps its indent on every wrapped line instead
     of falling back to column zero mid-sentence."""
-    console.print(Padding(Text.from_markup(markup), (0, 0, 0, 4)))
+    console.print(Padding(Text.from_markup(markup), (0, 0, 0, 4), expand=False))
 
 
 def print_plan(

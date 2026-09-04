@@ -97,6 +97,41 @@ group, the rest of `sumac` works without it.
 uv sync --group ask          # CPU/Metal — no GPU required
 ```
 
+### Reviewing what it proposes
+
+`ask` never writes anything without showing you the plan first. Each proposed change is one line
+of what changes on the shelf — `Fridge > Door   3 jar → 2 jar` — where the "after" comes from
+folding the records the write-time gate actually decided on, so a consumption bigger than the
+recorded stock shows the zero its reconciliation produces rather than a negative number.
+
+Alongside it, a few deterministic checks (no second model call) flag anything worth a closer look
+before you accept:
+
+| badge | what it means |
+| --- | --- |
+| `[unverified]` | the product name is in no search result and in no config record — nothing the agent looked up supplied it |
+| `[new product]` | accepting registers a product that doesn't exist yet |
+| `[near-duplicate]` | the name is one edit away from a product you already have |
+| `[new unit]` | the product is tracked in a different unit, with no conversion configured |
+
+On a terminal the decision is an arrow-key menu (`↑`/`↓`, Enter, or the option's own letter; Esc
+rejects); piped or scripted, it prints the same options and reads a typed line. On a plan with
+more than one change, `p` opens a checklist to apply only some of them. Anything you type that
+isn't an option is feedback the agent revises the plan with.
+
+```sh
+sumac ask "move the ragu to the fridge" --dry-run   # show the plan, write nothing
+sumac ask "consume 1 jar of jam" --trace            # full tool-call arguments and raw results
+sumac ask "where is the rice?" --stats              # per-round token counts and tok/s
+```
+
+To iterate on the review screens themselves without loading a model:
+
+```sh
+uv run scripts/preview-ask-ui.py            # every screen, against fixed example plans
+uv run scripts/preview-ask-ui.py --svg out/ # one SVG per screen
+```
+
 ### NVIDIA GPU acceleration
 
 ```sh
