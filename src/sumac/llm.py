@@ -46,6 +46,7 @@ Full traces and upstream references are in the design journal above.
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -72,10 +73,17 @@ class ToolCallFormat(StrEnum):
     is template-specific, not generic. Qwen3 uses a `<tool_call>` JSON
     block; LFM2.5 uses a different, Pythonic `<|tool_call_start|>[name(...)]
     <|tool_call_end|>` syntax. See the design journal for how each was
-    worked out against a real GGUF-embedded chat template."""
+    worked out against a real GGUF-embedded chat template.
+
+    `GEMMA` (Gemma 4's `<|tool_call>call:name{...}<tool_call|>` syntax) is
+    the odd one out here — reconstructed from published research, not from
+    reading a real chat template byte-for-byte the way QWEN and LFM were
+    (see `_render_tool_call`). Treat any benchmark built on it as
+    unverified until checked against a real `--eval-debug` trace."""
 
     QWEN = "qwen"
     LFM = "lfm"
+    GEMMA = "gemma"
 
 
 # --- Configuration -----------------------------------------------------------
@@ -96,20 +104,14 @@ class ModelPreset:
 
 
 MODEL_PRESETS: tuple[ModelPreset, ...] = (
+    # The winner of a real multi-model/multi-quant comparison
+    # See docs/journal/2026-09-02-eval-suite.md
     ModelPreset("qwen3.5-4b", "unsloth/Qwen3.5-4B-GGUF",
                 "Qwen3.5-4B-Q4_K_M.gguf", ToolCallFormat.QWEN),
-    ModelPreset("qwen3-4b", "unsloth/Qwen3-4B-Instruct-2507-GGUF",
-                "Qwen3-4B-Instruct-2507-Q4_K_M.gguf", ToolCallFormat.QWEN),
-    ModelPreset("lfm2.5-2.6b", "LiquidAI/LFM2.5-2.6B-GGUF",
-                "LFM2.5-2.6B-Q4_K_M.gguf", ToolCallFormat.LFM),
-    ModelPreset("lfm2.5-1.2b", "unsloth/LFM2.5-1.2B-Instruct-GGUF",
-                "LFM2.5-1.2B-Instruct-Q4_K_M.gguf", ToolCallFormat.LFM),
-    ModelPreset("qwen3.5-2b", "unsloth/Qwen3.5-2B-GGUF",
-                "Qwen3.5-2B-Q4_K_M.gguf", ToolCallFormat.QWEN),
-    ModelPreset("qwen3-1.7b", "unsloth/Qwen3-1.7B-GGUF",
-                "Qwen3-1.7B-Q4_K_M.gguf", ToolCallFormat.QWEN),
-    ModelPreset("qwen3-0.6b", "unsloth/Qwen3-0.6B-GGUF",
-                "Qwen3-0.6B-Q4_K_M.gguf", ToolCallFormat.QWEN),
+    # Same family/tool_call_format, one size up — kept on hand for a later
+    # comparison, not benchmarked yet. See docs/journal/2026-09-02-eval-suite.md.
+    ModelPreset("qwen3.5-9b", "unsloth/Qwen3.5-9B-GGUF",
+                "Qwen3.5-9B-Q4_K_M.gguf", ToolCallFormat.QWEN),
 )  # fmt: skip
 
 _MODEL_PRESETS_BY_NAME: dict[str, ModelPreset] = {p.name: p for p in MODEL_PRESETS}
@@ -124,6 +126,23 @@ def model_preset(name: str) -> ModelPreset:
 
 DEFAULT_MODEL_PRESET = MODEL_PRESETS[0]
 
+
+def is_cached(model: ModelPreset) -> bool:
+    """Whether `model.quantized_filename` is already present in the local
+    Hugging Face Hub cache, checked without ever constructing a real
+    `mistralrs.Runner` — a first load of an uncached preset downloads a
+    multi-gigabyte GGUF file over the network (`_build_runner`'s own log
+    line: "first run downloads it; may take a while"). `sumac models
+    pull`/`list` and the eval suite's `agent_runner_factory` fixture both
+    use this to decide whether to trigger that download, so it lives here
+    rather than duplicated in `evals/conftest.py`."""
+    hf_home = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface"))
+    repo_dir = hf_home / "hub" / ("models--" + model.quantized_model_id.replace("/", "--"))
+    if not repo_dir.exists():
+        return False
+    return any(repo_dir.rglob(model.quantized_filename))
+
+
 # A termination guarantee sized for "one write per round" (every sequential
 # search-then-act step a compound request could produce), not a cap on how
 # compound a single request may be.
@@ -131,6 +150,18 @@ MAX_TOOL_ROUNDS = 20
 
 # One self-check pass by default; 0 disables it.
 SELF_REVIEW_ROUNDS = 1
+
+# Sampling defaults for every request `AgentRunner` sends. Previously unset —
+# `_build_request` passed no sampling field at all, so a run inherited
+# whatever mistral.rs itself defaults to, which can move under a dependency
+# bump with nothing catching it. Low temperature favours tool-call
+# reliability on a 1-4B model; the classifier in particular is a four-way
+# decision that should not be sampled loosely. `DEFAULT_MAX_TOKENS` is sized
+# above the largest single round recorded in the design journal's real runs
+# (432 completion tokens), not tuned further.
+DEFAULT_TEMPERATURE = 0.2
+DEFAULT_TOP_P = 0.95
+DEFAULT_MAX_TOKENS = 1024
 
 
 # --- Query classification ----------------------------------------------------
@@ -484,12 +515,23 @@ def _render_tool_call(
     through. `tool_call_format` (the active `AgentRunner`'s `ModelPreset`)
     selects which template convention to target; `raw_arguments` (the
     model's own emitted JSON string) is only used by the Qwen branch,
-    `arguments` (already parsed) only by LFM's."""
+    `arguments` (already parsed) only by LFM's and Gemma's."""
     if tool_call_format is ToolCallFormat.LFM:
         # LFM2.5's own documented Pythonic syntax:
         # <|tool_call_start|>[name(key="value", ...)]<|tool_call_end|>
         args_text = ", ".join(f"{key}={_lfm_literal(value)}" for key, value in arguments.items())
         return f"<|tool_call_start|>[{name}({args_text})]<|tool_call_end|>"
+    if tool_call_format is ToolCallFormat.GEMMA:
+        # Best-effort, NOT a verified byte-exact match (see
+        # `ToolCallFormat.GEMMA`'s docstring) — reconstructed as
+        # <|tool_call>call:name{key:value,...}<tool_call|>, values passed
+        # through unquoted/unescaped. Every tool schema here is
+        # string-typed, so there's no other JSON type to represent — but a
+        # value containing ',', ':', '{', or '}' will still produce a
+        # malformed replay, since the exact escaping rule (if any) wasn't
+        # confirmed against a real chat template.
+        args_text = ",".join(f"{key}:{value}" for key, value in arguments.items())
+        return f"<|tool_call>call:{name}{{{args_text}}}<tool_call|>"
     # QWEN: byte-for-byte what the `{%- if message.tool_calls %}` branch
     # renders from a real `tool_calls` field. `raw_arguments` is spliced in
     # verbatim — already what `{{- tool_call.arguments }}` inserts when
@@ -545,9 +587,13 @@ def _print_usage(response: mistralrs.ChatCompletionResponse, round_num: int) -> 
     )
 
 
-def _build_runner(model: ModelPreset) -> mistralrs.Runner:
+def _build_runner(model: ModelPreset, *, seed: int | None = None) -> mistralrs.Runner:
     # No `tool_callbacks` here — see the module docstring for why:
     # `AgentRunner` dispatches tool calls itself instead (`_run_loop`).
+    # `seed` is `None` for interactive `sumac ask` use (no fixed seed — the
+    # existing "regenerate" retry already gets its variety from resampling);
+    # an eval run passes an explicit seed so one epoch reproduces exactly
+    # from that seed alone. See docs/journal/2026-09-02-eval-suite.md.
     render.console.print(
         f"[dim]Loading {model.quantized_model_id} "
         "(first run downloads it; may take a while)...[/dim]"
@@ -559,7 +605,7 @@ def _build_runner(model: ModelPreset) -> mistralrs.Runner:
     # `Which.GGUF` is a nested dataclass, not a `Which` subclass, in the
     # installed 0.9.2 stub — the mismatch below is a stub-modeling gap, not a
     # real one; `Which.GGUF(...)` is mistral.rs's own documented construction.
-    return mistralrs.Runner(which=which)  # ty: ignore[invalid-argument-type]
+    return mistralrs.Runner(which=which, seed=seed)  # ty: ignore[invalid-argument-type]
 
 
 class AgentRunner:
@@ -578,17 +624,27 @@ class AgentRunner:
         model: ModelPreset = DEFAULT_MODEL_PRESET,
         runner: SendsCompletions | None = None,
         debug: bool = False,
+        temperature: float = DEFAULT_TEMPERATURE,
+        top_p: float = DEFAULT_TOP_P,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+        seed: int | None = None,
     ) -> None:
         self._data_dir = data_dir
         self._key = key
         self._model = model
         self._debug = debug
+        self._temperature = temperature
+        self._top_p = top_p
+        self._max_tokens = max_tokens
         self._messages: list[dict[str, str]] | None = None
         self._kind: QueryKind | None = None
         self._schemas: list[str] = []
         self._allowed: frozenset[str] = frozenset()
         self._pending: list[ProposedWrite] = []
         self._trace: list[ToolCallRecord] = []
+        self._trace_history: list[ToolCallRecord] = []
+        self._completion_tokens = 0
+        self._generation_time_sec = 0.0
         self.tool_callbacks: dict[str, Callable[[str, dict], str]] = {
             "sumac_find_inventory": self._sumac_find_inventory,
             "sumac_consume_inventory": self._sumac_consume_inventory,
@@ -602,7 +658,7 @@ class AgentRunner:
             # iterator when `stream=True`; `_build_request` never sets it, so
             # narrowing to the non-streaming `SendsCompletions` shape here is
             # safe for every request this class actually sends.
-            else cast(SendsCompletions, _build_runner(model))
+            else cast(SendsCompletions, _build_runner(model, seed=seed))
         )
 
     @property
@@ -611,6 +667,37 @@ class AgentRunner:
         retry prompt to default to "same model as last time" rather than
         forcing a choice on every retry."""
         return self._model
+
+    @property
+    def tokens_per_sec(self) -> float | None:
+        """Aggregate completion-token throughput across every round this
+        instance has sent so far — the classifier call plus every
+        tool-calling round, across every `propose()`/`revise()` call this
+        instance has made (never reset; a fresh instance per scenario is
+        what scopes it — see `evals/conftest.py`'s `agent` fixture).
+        `completion_tokens / generation_time_sec` summed across rounds
+        rather than averaging each round's own `avg_compl_tok_per_sec`,
+        which would over-weight short rounds. `None` if no round has
+        reported real `usage` yet — a fake `SendsCompletions` in tests has
+        none, so this stays `None` for the whole test."""
+        if self._generation_time_sec <= 0:
+            return None
+        return self._completion_tokens / self._generation_time_sec
+
+    @property
+    def trace_history(self) -> tuple[ToolCallRecord, ...]:
+        """Every `ToolCallRecord` this instance has dispatched across every
+        `propose()`/`revise()` call it has made so far — unlike
+        `AgentPlan.trace`, which is scoped to just the most recent call
+        (`self._trace` resets at the top of each), this never resets. A
+        fresh `AgentRunner` per scenario (see `evals/conftest.py`'s `agent`
+        fixture) is what scopes it to one scenario's full history, feedback
+        rounds included."""
+        return tuple(self._trace_history)
+
+    def _record_call(self, record: ToolCallRecord) -> None:
+        self._trace.append(record)
+        self._trace_history.append(record)
 
     # -- tool callbacks -------------------------------------------------------
 
@@ -769,7 +856,29 @@ class AgentRunner:
             tool_schemas=schemas,
             tool_choice=mistralrs.ToolChoice.Auto,
             enable_thinking=False,
+            temperature=self._temperature,
+            top_p=self._top_p,
+            max_tokens=self._max_tokens,
         )
+
+    def classify(self, prompt: str) -> QueryKind:
+        """Public alias for `_classify` — the routing-only entry point an
+        eval suite outside this module needs (one call per case, not a full
+        `propose()`), without reaching into a private name. See
+        docs/journal/2026-09-02-eval-suite.md."""
+        return self._classify(prompt)
+
+    def _record_usage(self, response: mistralrs.ChatCompletionResponse, round_num: int) -> None:
+        """Prints the round's usage line (`_print_usage`) and folds its
+        token/timing numbers into `tokens_per_sec`'s running totals — a
+        no-op for the latter beyond the print for a fake `SendsCompletions`
+        with no real `.usage`."""
+        _print_usage(response, round_num)
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return
+        self._completion_tokens += usage.completion_tokens
+        self._generation_time_sec += usage.total_time_sec
 
     def _classify(self, prompt: str) -> QueryKind:
         """One single-purpose call, made before the model sees any domain
@@ -782,16 +891,16 @@ class AgentRunner:
         ]
         request = self._build_request(messages, [_CLASSIFY_SCHEMA_JSON])
         response = self._runner.send_chat_completion_request(request)
-        _print_usage(response, 0)
+        self._record_usage(response, 0)
         message = response.choices[0].message
         if not message.tool_calls:
-            self._trace.append(
+            self._record_call(
                 ToolCallRecord(name="classify_request", arguments={}, result=message.content or "")
             )
             return QueryKind.REJECT
         call = message.tool_calls[0].function
         args = json.loads(call.arguments)
-        self._trace.append(
+        self._record_call(
             ToolCallRecord(name="classify_request", arguments=args, result=json.dumps(args))
         )
         try:
@@ -821,7 +930,7 @@ class AgentRunner:
             if self._debug:
                 render.print_agent_response(response, round_num)
 
-            _print_usage(response, round_num)
+            self._record_usage(response, round_num)
             message = response.choices[0].message
 
             if self._debug:
@@ -844,7 +953,7 @@ class AgentRunner:
                 # this one call rather than crash or silently dispatch the
                 # wrong domain action.
                 result = _rejected("tool_not_available", {"name": call.name})
-            self._trace.append(ToolCallRecord(name=call.name, arguments=args, result=result))
+            self._record_call(ToolCallRecord(name=call.name, arguments=args, result=result))
             self._messages.append(
                 {
                     "role": "assistant",

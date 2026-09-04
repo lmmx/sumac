@@ -809,7 +809,12 @@ def test_ask_regenerate_reuses_the_prompt_with_a_different_model(
     data_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _run(data_dir, "init")
-    other = next(p for p in llm.MODEL_PRESETS if p != llm.DEFAULT_MODEL_PRESET)
+    # A throwaway second preset, not a real registry entry — this test only
+    # needs `model_preset(other.name)` to resolve to something other than
+    # the default; it never touches a real GGUF, and the registry itself
+    # may hold just one preset (see docs/journal/2026-09-02-eval-suite.md).
+    other = llm.ModelPreset("other-model", "unused/repo", "unused.gguf", llm.ToolCallFormat.QWEN)
+    monkeypatch.setitem(llm._MODEL_PRESETS_BY_NAME, other.name, other)
     fake_cls = _patch_agent_runner(
         monkeypatch, [_consumption_plan(amount="1"), _consumption_plan(amount="1")]
     )

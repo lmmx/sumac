@@ -44,6 +44,10 @@ from sumac.passphrase import get_key, resolve_passphrase
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 config_app = typer.Typer(no_args_is_help=True, help="Inspect and edit the location layout.")
 app.add_typer(config_app, name="config")
+models_app = typer.Typer(
+    no_args_is_help=True, help="Inspect and pre-download `sumac ask` model presets."
+)
+app.add_typer(models_app, name="models")
 
 DataDirOption = Annotated[
     Path, typer.Option("--data-dir", envvar="SUMAC_DATA_DIR", help="Data directory.")
@@ -59,6 +63,19 @@ def _load_vault(data_dir: Path) -> Vault:
 
 def _key(data_dir: Path) -> bytes:
     return get_key(_load_vault(data_dir))
+
+
+def _import_llm():  # noqa: ANN202
+    """`sumac.llm` imports `mistralrs` at module scope, which is an optional
+    dependency (the `ask`/`ask-cuda` groups) — every command that touches
+    model presets imports it here, lazily, instead of at the top of this
+    module, so the rest of the CLI works without it installed."""
+    try:
+        from sumac import llm
+    except ImportError as e:
+        render.print_error(f"Agent requires mistralrs. Install with: pip install mistralrs\n{e}")
+        raise typer.Exit(code=1) from e
+    return llm
 
 
 def _slugify(name: str) -> str:
@@ -442,13 +459,7 @@ def ask(
     pending and "retry N" revisits one.
     """
     key = _key(data_dir)
-
-    # Import llm here so mistralrs is optional
-    try:
-        from sumac import llm
-    except ImportError as e:
-        render.print_error(f"Agent requires mistralrs. Install with: pip install mistralrs\n{e}")
-        raise typer.Exit(code=1) from e
+    llm = _import_llm()
 
     if prompt is None or loop:
         _ask_loop(data_dir, key, llm, first_prompt=prompt, dry_run=dry_run, debug=debug)
@@ -792,6 +803,65 @@ def _ask_loop_request(
         except Exception as e:
             _fail(e)
             return
+
+
+@models_app.command("list")
+def models_list(
+    names_only: Annotated[
+        bool,
+        typer.Option("--names-only", help="One bare preset name per line — for scripting."),
+    ] = False,
+) -> None:
+    """List every `ModelPreset` in the registry and whether its GGUF is
+    already in the local Hugging Face cache."""
+    llm = _import_llm()
+    if names_only:
+        for model in llm.MODEL_PRESETS:
+            print(model.name)
+        return
+    for model in llm.MODEL_PRESETS:
+        cached = "cached" if llm.is_cached(model) else "not cached"
+        repo = f"{model.quantized_model_id}/{model.quantized_filename}"
+        render.console.print(f"  {model.name:24s} {repo}  [dim]({cached})[/dim]")
+
+
+@models_app.command("pull")
+def models_pull(
+    names: Annotated[
+        list[str] | None,
+        typer.Argument(help="Preset names to pull; defaults to every preset in the registry."),
+    ] = None,
+) -> None:
+    """Download every named preset's GGUF into the local Hugging Face
+    cache (all of them, by default) by loading each one just long enough
+    to trigger `mistralrs`' own download-on-load — the same mechanism
+    `sumac ask` relies on, without needing to run `sumac ask` once per
+    model and pick it from the "g" regenerate prompt. Already-cached
+    presets are skipped."""
+    llm = _import_llm()
+    targets = list(llm.MODEL_PRESETS)
+    if names:
+        try:
+            targets = [llm.model_preset(name) for name in names]
+        except KeyError as e:
+            valid = ", ".join(p.name for p in llm.MODEL_PRESETS)
+            render.print_error(f"Unknown model {e.args[0]!r}. Choose from: {valid}")
+            raise typer.Exit(code=1) from e
+
+    failed: list[str] = []
+    for model in targets:
+        if llm.is_cached(model):
+            render.console.print(f"[dim]{model.name}: already cached, skipping[/dim]")
+            continue
+        try:
+            llm._build_runner(model)
+        except Exception as e:  # noqa: BLE001 - report and keep pulling the rest
+            render.print_error(f"{model.name}: {e}")
+            failed.append(model.name)
+        else:
+            render.print_success(f"{model.name}: pulled")
+    if failed:
+        raise typer.Exit(code=1)
 
 
 def main() -> None:

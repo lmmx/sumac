@@ -78,6 +78,9 @@ uv run ty check
 uv run pytest
 ```
 
+An eval suite for `sumac ask`'s agent, run against a real local model, lives in `evals/` — not
+under `src/`, so it doesn't ship. See `evals/README.md`.
+
 ## Optional: natural-language input (`sumac ask`)
 
 `sumac ask` parses freeform text ("consume 1 jar of jam") into structured commands using a local
