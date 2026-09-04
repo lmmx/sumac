@@ -7,17 +7,23 @@
 # covers "N epochs x every registered model"; this is deliberately narrower
 # and not meant to grow into a generic variant-comparison tool.
 #
-# -k restricts each epoch to the two scenarios the nudge actually targets
-# (via plain pytest test-selection, nothing new) — a full 22-scenario epoch
-# takes ~1m24s on 9B, so 10 epochs x 2 conditions is ~28 minutes; these two
-# alone run in a fraction of that, for fast iteration on the wording itself.
-# Before trusting a result, rerun without -k (the full suite) to confirm
-# nothing else regressed — narrowing the scenarios narrows what you learn.
+# Runs evals/test_add.py only (10 scenarios), not the full 22 — but NOT via
+# -k to just the two target scenarios either. `mistralrs.Runner(seed=...)`
+# is seeded once per session and shared by every test in it (no per-request
+# seed), so a test's effective sample depends on how many tokens every test
+# that ran before it in the same session already generated. -k'ing straight
+# to the two target tests skips their real predecessors and samples from a
+# different point in the stream than the full-suite discovery run did —
+# that's what produced the misleadingly-clean 10/10 result. Nothing in
+# test_find.py/test_remove.py/test_reject.py/test_fixtures.py/
+# test_termination.py runs before test_add.py either way (alphabetical
+# collection order), so running the whole file reproduces the exact same
+# RNG position for both target tests as the full suite would, while still
+# skipping the other three-fifths of the scenario count.
 set -euo pipefail
 
 MODEL=qwen3.5-9b
 EPOCHS=10
-SCENARIOS="test_missing_item_discovers_new_product or test_multiple_products_with_omitted_amounts"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -29,7 +35,7 @@ for variant in default nudge-v2; do
   mkdir -p "$out_dir"
   for seed in $(seq 1 "$EPOCHS"); do
     echo "==> ${MODEL} [${variant}] epoch ${seed}/${EPOCHS}"
-    uv run pytest evals -k "$SCENARIOS" --eval-model "$MODEL" --eval-prompt-variant "$variant" \
+    uv run pytest evals/test_add.py --eval-model "$MODEL" --eval-prompt-variant "$variant" \
       --eval-seed "$seed" --eval-json "${out_dir}/epoch-$(printf '%02d' "$seed").json" || true
   done
 done

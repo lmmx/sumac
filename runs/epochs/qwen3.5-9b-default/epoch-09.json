@@ -1,0 +1,136 @@
+{
+  "model": "qwen3.5-9b",
+  "prompt_variant": "default",
+  "seed": 9,
+  "total_duration_s": 12.896179215997108,
+  "mean_tokens_per_sec": 67.61010758637823,
+  "results": [
+    {
+      "scenario": "add.missing_item_discovers_new_product",
+      "category": "add",
+      "passed": true,
+      "checks": {
+        "classification": true,
+        "tool:sumac_find_inventory": true,
+        "writes": true,
+        "kind": true,
+        "product": true,
+        "amount": true,
+        "unit": true,
+        "location": true
+      },
+      "failures": [],
+      "note": null,
+      "duration_s": 4.500634533003904,
+      "tokens_per_sec": 65.65064546205902,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "add"
+          },
+          "result": "{\"kind\": \"add\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "Irn-Bru Zero"
+          },
+          "result": "{\"products\": []}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "Irn-Bru"
+          },
+          "result": "{\"products\": []}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Irn-Bru Zero",
+            "amount": "2",
+            "unit": "bottles",
+            "to_location": "fridge door"
+          },
+          "result": "{\"status\": \"rejected\", \"reason\": \"unknown_location\", \"detail\": {\"field\": \"to\", \"value\": \"fridge door\", \"suggestions\": \"['fridge-door']\"}, \"hint\": \"If a fix is obvious from this, retry with the correction \\u2014 actually make the retry, don't just describe one and stop. Otherwise explain why in plain text.\"}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Irn-Bru Zero",
+            "amount": "2",
+            "unit": "bottles",
+            "to_location": "fridge-door"
+          },
+          "result": "{\"status\": \"proposed\", \"product_id\": \"Irn-Bru Zero\", \"amount\": \"2\", \"unit\": \"bottles\", \"from_location\": null, \"to_location\": \"fridge-door\", \"warnings\": []}"
+        }
+      ]
+    },
+    {
+      "scenario": "add.multiple_products_with_omitted_amounts",
+      "category": "add",
+      "passed": true,
+      "checks": {
+        "classification": true,
+        "writes": true,
+        "kind:Butter": true,
+        "amount:Butter": true,
+        "unit:Butter": true,
+        "kind:Jam": true,
+        "amount:Jam": true,
+        "unit:Jam": true,
+        "product:butter": true,
+        "product:butter_not_beans": true,
+        "product:jam": true
+      },
+      "failures": [],
+      "note": null,
+      "duration_s": 8.395544682993204,
+      "tokens_per_sec": 69.56956971069746,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "add"
+          },
+          "result": "{\"kind\": \"add\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "butter"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Butter Beans\", \"is_exact_match\": false, \"locations\": [{\"location_id\": \"pantry-white-unit-r1c2\", \"location_path\": \"Pantry > White Unit R1C2\", \"amount\": \"2\", \"unit\": \"cans\"}]}, {\"product_id\": \"Salted Butter\", \"is_exact_match\": false, \"locations\": [{\"location_id\": \"freezer-drawer-1\", \"location_path\": \"Big Freezer > Drawer 1\", \"amount\": \"1\", \"unit\": \"pack\"}]}, {\"product_id\": \"Unsalted Butter\", \"is_exact_match\": false, \"locations\": [{\"location_id\": \"freezer-drawer-2\", \"location_path\": \"Big Freezer > Drawer 2\", \"amount\": \"2\", \"unit\": \"packs\"}]}]}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "jam"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Strawberry Jam\", \"is_exact_match\": false, \"locations\": [{\"location_id\": \"pantry-white-unit-r3c1\", \"location_path\": \"Pantry > White Unit R3C1\", \"amount\": \"1\", \"unit\": \"jar\"}]}]}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Butter",
+            "amount": "1",
+            "unit": "pack",
+            "to_location": "Pantry > White Unit R1C2"
+          },
+          "result": "{\"status\": \"proposed\", \"product_id\": \"Butter\", \"amount\": \"1\", \"unit\": \"pack\", \"from_location\": null, \"to_location\": \"Pantry > White Unit R1C2\", \"warnings\": [\"'Butter' is not a registered product \\u2014 did you mean 'Butter Beans'? Registering 'Butter' instead; run `sumac correct` if it was a typo.\"]}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Jam",
+            "amount": "1",
+            "unit": "jar",
+            "to_location": "Pantry > White Unit R3C1"
+          },
+          "result": "{\"status\": \"proposed\", \"product_id\": \"Jam\", \"amount\": \"1\", \"unit\": \"jar\", \"from_location\": null, \"to_location\": \"Pantry > White Unit R3C1\", \"warnings\": []}"
+        }
+      ]
+    }
+  ]
+}
