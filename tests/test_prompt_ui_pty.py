@@ -232,3 +232,61 @@ def test_pick_of_an_empty_list_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
 
     assert prompt_ui.pick([], title="Where?") is None
+
+
+def test_typing_something_new_offers_it_as_a_row(
+    terminal: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A unit or a product may legitimately be one the vault has never seen,
+    so nothing matching is not a dead end — the typed text is the row."""
+    monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
+    _type(terminal, b"t", b"u", b"b", b"\r")
+
+    assert prompt_ui.pick(ROWS, title="Unit?", allow_new=True, new_hint="new unit") == "tub"
+
+
+def test_an_exact_existing_match_is_not_offered_twice(
+    terminal: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Typing a value that already exists selects that row, not a new one
+    beside it — the cursor resets to the top of the matches on each
+    keystroke, and the added row goes last."""
+    monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
+    rows = [prompt_ui.Row("jar", "jar  (12 uses)", "jar")]
+    _type(terminal, b"j", b"a", b"r", b"\r")
+
+    assert prompt_ui.pick(rows, title="Unit?", allow_new=True) == "jar"
+
+
+def test_a_partial_match_still_reaches_the_new_row(
+    terminal: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "jarful" filters to the "jar" row *and* offers itself; arrowing down
+    once past the match takes the typed text."""
+    monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
+    rows = [prompt_ui.Row("jar", "jar  (12 uses)", "jar")]
+    _type(terminal, b"j", b"a", b"r", b"f", b"u", b"l", b"\x1b[B", b"\r")
+
+    assert prompt_ui.pick(rows, title="Unit?", allow_new=True) == "jarful"
+
+
+def test_an_empty_list_still_takes_a_new_value(
+    terminal: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A vault with nothing recorded yet has no units to offer, which is not
+    a reason to refuse one."""
+    monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
+    _type(terminal, b"b", b"o", b"x", b"\r")
+
+    assert prompt_ui.pick([], title="Unit?", allow_new=True) == "box"
+
+
+def test_without_allow_new_a_typed_value_is_not_offered(
+    terminal: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A location is a closed set — `decide` rejects one that is not
+    configured — so the picker must not invent a row for one."""
+    monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
+    _type(terminal, b"s", b"h", b"e", b"d", b"\r", b"\x1b")
+
+    assert prompt_ui.pick(ROWS, title="Where?") is None

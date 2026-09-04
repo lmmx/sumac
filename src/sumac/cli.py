@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections import Counter
 from dataclasses import dataclass
 from dataclasses import replace as dataclass_replace
 from datetime import UTC, datetime
@@ -730,6 +731,58 @@ def _location_rows(locations: dict[str, models.Location]) -> list[prompt_ui.Row]
     return sorted(rows, key=lambda row: row.label)
 
 
+def _unit_rows(
+    observed: dict[str, Counter[str]], cfg: config.Config, product_id: str
+) -> list[prompt_ui.Row]:
+    """Every unit this vault has ever used, the ones already used for
+    `product_id` first, then the rest by how often they appear anywhere.
+
+    Frequency order, not alphabetical: a unit is reused far more often than
+    it is invented, and the handful a household actually says ("jar", "tin",
+    "packet") should be reachable without typing. The product's own units
+    lead because a write in one of them converts, and a write in any other
+    is what `decide._resolve_product` records as a separately-tracked
+    quantity with a warning."""
+    totals: Counter[str] = Counter()
+    for units in observed.values():
+        totals.update(units)
+    for product in cfg.known_products.values():
+        totals.setdefault(product.unit, 0)
+        for alt in product.conversions:
+            totals.setdefault(alt, 0)
+
+    for_product = set(observed.get(product_id, ()))
+    product = cfg.known_products.get(product_id)
+    if product is not None:
+        for_product.add(product.unit)
+        for_product.update(product.conversions)
+
+    def note(unit: str) -> str:
+        if unit in for_product:
+            return f"already used for {product_id}"
+        return f"{totals[unit]} use{'' if totals[unit] == 1 else 's'}"
+
+    return [
+        prompt_ui.Row(value=unit, label=f"{unit}  ({note(unit)})", search=unit)
+        for unit in sorted(totals, key=lambda u: (u not in for_product, -totals[u], u))
+    ]
+
+
+def _product_rows(cfg: config.Config) -> list[prompt_ui.Row]:
+    """Every registered, unretired product with the unit it is tracked in —
+    the unit is half of what makes a product the right one to pick, and
+    seeing it here is what turns "Strawberry Jam" from a name into a choice
+    with consequences."""
+    return [
+        prompt_ui.Row(
+            value=product.id,
+            label=f"{product.id}  ({product.unit})",
+            search=f"{product.id} {product.name} {product.unit}",
+        )
+        for product in sorted(cfg.active_products.values(), key=lambda p: p.id.lower())
+    ]
+
+
 def _choose_location(
     locations: dict[str, models.Location], field: str, current: str | None
 ) -> str | None:
@@ -746,8 +799,22 @@ def _choose_location(
     return prompt_ui.pick(rows, title=f"Which location for {field}?", current=current)
 
 
+def _choose_from_rows(
+    rows: list[prompt_ui.Row], *, title: str, current: str | None, new_hint: str
+) -> str | None:
+    """A picker that also takes something not on the list. Unlike a location,
+    a product or a unit may legitimately be one the vault has never seen —
+    `decide` registers a product on first use, and records an unconvertible
+    unit as its own tracked quantity — so the list is a shortcut past
+    retyping a known value, never a restriction to known values."""
+    return prompt_ui.pick(rows, title=title, current=current, allow_new=True, new_hint=new_hint)
+
+
 def _edit_fields_by_menu(
-    write: ProposedWrite, locations: dict[str, models.Location]
+    data_dir: Path,
+    key: bytes,
+    write: ProposedWrite,
+    locations: dict[str, models.Location],
 ) -> dict[str, str | None] | None:
     """Pick a field, retype that one, repeat until done — rather than walking
     every field in order and pressing Enter through the ones that were
@@ -791,12 +858,33 @@ def _edit_fields_by_menu(
         if match is None:
             continue
         _key, label, field = match
+        picked: str | None
         if field in ("from_location", "to_location"):
             picked = _choose_location(locations, label, values[field])
-            if picked is not None:
-                values[field] = picked
+        elif field == "product_id":
+            picked = _choose_from_rows(
+                _product_rows(config.build_config(data_dir, key)),
+                title="Which product?",
+                current=values["product_id"],
+                new_hint="new product",
+            )
+        elif field == "unit":
+            picked = _choose_from_rows(
+                _unit_rows(
+                    ledger.observed_product_units(data_dir, key),
+                    config.build_config(data_dir, key),
+                    values["product_id"] or "",
+                ),
+                title="Which unit?",
+                current=values["unit"],
+                new_hint="new unit",
+            )
         else:
+            # The amount is a number, not a value to choose from a list.
             values[field] = typer.prompt(label, default=values[field] or "")
+            continue
+        if picked is not None:
+            values[field] = picked
 
 
 def _edit_fields_by_walkthrough(write: ProposedWrite) -> dict[str, str | None]:
@@ -883,7 +971,7 @@ def _prompt_edit(data_dir: Path, key: bytes, plan: AgentPlan) -> AgentPlan:
         return plan
     write = plan.writes[index]
     values = (
-        _edit_fields_by_menu(write, locations)
+        _edit_fields_by_menu(data_dir, key, write, locations)
         if prompt_ui.interactive()
         else _edit_fields_by_walkthrough(write)
     )

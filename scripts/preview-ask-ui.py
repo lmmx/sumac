@@ -297,6 +297,50 @@ def scene_location_picker() -> None:
     )
 
 
+def scene_value_pickers() -> None:
+    """The unit and product fields: an existing value to reuse, or the typed
+    text as a new one — unlike a location, either may legitimately be new."""
+    from collections import Counter
+
+    from sumac.cli import _product_rows, _unit_rows
+
+    observed = {
+        "Strawberry Jam": Counter({"jar": 12}),
+        "Homemade Ragu": Counter({"tub": 8}),
+        "Tinned Tomatoes": Counter({"tin": 31, "can": 2}),
+    }
+    rows = _unit_rows(observed, CFG, "Strawberry Jam")
+    render.console.print(prompt_ui._pick_view(rows, 0, "", "Which unit?", len(rows)))
+
+    render.console.print()
+    typed = "sachet"
+    visible = prompt_ui._visible_rows(rows, typed, True, "new unit")
+    render.console.print(
+        prompt_ui._pick_view(
+            visible,
+            len(visible) - 1,
+            typed,
+            "Which unit?",
+            len(rows),
+            "↑/↓ move · type to filter or add · enter choose · esc cancel",
+        )
+    )
+
+    render.console.print()
+    products = _product_rows(CFG)
+    visible = prompt_ui._visible_rows(products, "tom", True, "new product")
+    render.console.print(
+        prompt_ui._pick_view(
+            visible,
+            0,
+            "tom",
+            "Which product?",
+            len(products),
+            "↑/↓ move · type to filter or add · enter choose · esc cancel",
+        )
+    )
+
+
 def _menu(options: list[prompt_ui.Option], cursor: int) -> None:
     """The arrow-key menu drawn at one cursor position."""
     render.console.print()
@@ -315,6 +359,7 @@ SCENES = {
     "checklist": scene_checklist,
     "edit": scene_edit,
     "location-picker": scene_location_picker,
+    "value-pickers": scene_value_pickers,
 }
 
 

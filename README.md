@@ -117,8 +117,11 @@ before you accept:
 On a terminal the decision is an arrow-key menu (`↑`/`↓`, Enter, or the option's own letter; Esc
 rejects); piped or scripted, it prints the same options and reads a typed line. On a plan with
 more than one change, `p` opens a checklist to apply only some of them, and `e` picks a change and
-then the one field to change — a location field opens the layout to pick from, filtered as you
-type, since a location has to be one that exists. Anything you type that
+then the one field to change. Product, unit and location fields open a picker over what the vault
+already holds, filtered as you type — locations are the layout (a location has to be one that
+exists), products the registry, and units every unit ever recorded, the ones already used for that
+product first. Products and units also take a value that isn't in the list: type it and the picker
+offers it as new, which is what `sumac add` would do with it anyway. Anything you type that
 isn't an option is feedback the agent revises the plan with.
 
 ```sh

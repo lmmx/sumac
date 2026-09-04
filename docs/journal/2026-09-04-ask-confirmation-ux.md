@@ -320,6 +320,54 @@ tests for what it introduces.
 
 ---
 
+# 2026-09-04: Picking a Unit or a Product, or Typing a New One
+
+## Current State
+
+- `prompt_ui.pick` takes `allow_new` and `new_hint`; `_visible_rows` appends a row carrying the
+  filter text itself when `allow_new` is set, the filter is non-empty, and no existing row has that
+  exact value.
+- The added row goes last, and the cursor resets to the top of the matches on every keystroke — so
+  typing a value that already exists selects the existing row with one Enter, and a partial match
+  ("jarful" against a "jar" row) needs one arrow-down to reach the new one
+  (`test_a_partial_match_still_reaches_the_new_row`, tests/test_prompt_ui_pty.py).
+- With nothing matching, the added row is the only row and is already under the cursor, so typing a
+  genuinely new unit and pressing Enter is one uninterrupted action; `pick` with an empty list and
+  `allow_new` still takes a value, which is what a vault with nothing recorded yet needs.
+- `pick` without `allow_new` never invents a row, which is what keeps the location picker to the
+  closed set `decide.resolve_location` will accept
+  (`test_without_allow_new_a_typed_value_is_not_offered`, tests/test_prompt_ui_pty.py).
+- `cli._unit_rows(observed, cfg, product_id)` lists every unit the vault has used
+  (`ledger.observed_product_units`) plus every registered canonical unit and conversion key, ordered
+  with the units already used for `product_id` first and the rest by total frequency — a unit is
+  reused far more often than invented, so the handful a household actually says should not need
+  typing. Each row notes `already used for <product>` or `<n> uses`.
+- `cli._product_rows(cfg)` lists every unretired registered product with the unit it is tracked in,
+  ordered by id; the display name is in `search`, so filtering finds a product by either.
+- `cli._edit_fields_by_menu` routes `product_id` and `unit` through `_choose_from_rows`
+  (`allow_new=True`), the two location fields through `_choose_location` (`allow_new` unset), and
+  `amount` through `typer.prompt` — a number is not a value to choose from a list.
+- The unit rows are built from `values["product_id"]` at the moment the unit row is chosen, so
+  editing the product first and the unit second offers the new product's units.
+- `_edit_fields_by_walkthrough` is unchanged: off a terminal every field is still typed.
+- `scripts/preview-ask-ui.py` gains a `value-pickers` scene showing the unit list, a typed new unit,
+  and a product filter that offers both a match and a new value.
+- `pytest` reports 410 passing tests repo-wide; `ruff format --check .`, `ruff check .`, and
+  `ty check` each report no findings.
+
+## Missing
+
+- `_edit_fields_by_menu` calls `config.build_config` (and, for units,
+  `ledger.observed_product_units`, which folds every record in the log) each time a field is chosen,
+  rather than once per edit — unmeasured against a real vault's log size.
+- A picked product does not adjust the unit: choosing "Strawberry Jam" leaves a `packet` unit in
+  place, to be caught by `decide`'s unconvertible-unit warning at re-validation rather than by the
+  picker offering that product's own unit.
+- `sumac add` still takes typed values for every field; the pickers exist only inside `sumac ask`'s
+  edit menu.
+
+---
+
 # 2026-09-04: Editing a Location by Picking It
 
 ## Current State

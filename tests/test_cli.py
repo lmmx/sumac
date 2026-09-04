@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections import Counter
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -15,6 +16,7 @@ from typer.testing import CliRunner
 from sumac import ledger, llm, models, paths, prompt_ui, queue, store
 from sumac import vault as sumac_vault
 from sumac.cli import _decision_options, _editable_fields, _set_rust_log, app
+from sumac.config import Config
 from sumac.errors import RetireNonemptyError, VaultExistsError
 from sumac.models import ChangeKind
 
@@ -1392,4 +1394,116 @@ def test_ask_edit_cancelling_the_location_picker_keeps_the_current_one(
     result = _run(data_dir, "ask", "consume 1 jar of jam")
 
     assert result.exit_code == 0, result.output
+    assert "Recorded consumption of 1 jar jam" in result.output
+
+
+def test_unit_rows_lead_with_the_units_already_used_for_the_product() -> None:
+    """A write in one of the product's own units converts; one in any other
+    is recorded as a separately-tracked quantity with a warning."""
+    from sumac.cli import _unit_rows
+
+    products = {"jam": models.Product(id="jam", name="Jam", unit="jar")}
+    cfg = Config(
+        known_locations={},
+        active_locations={},
+        known_products=products,
+        active_products=products,
+        anomalies=(),
+    )
+    observed = {
+        "jam": Counter({"jar": 3}),
+        "milk": Counter({"l": 40, "carton": 2}),
+    }
+
+    rows = _unit_rows(observed, cfg, "jam")
+
+    assert [row.value for row in rows] == ["jar", "l", "carton"]
+    assert "already used for jam" in rows[0].label
+    assert "40 uses" in rows[1].label
+
+
+def test_unit_rows_include_a_registered_unit_never_yet_written() -> None:
+    from sumac.cli import _unit_rows
+
+    products = {
+        "rice": models.Product(id="rice", name="Rice", unit="jug", conversions={"bag": Decimal(2)})
+    }
+    cfg = Config(
+        known_locations={},
+        active_locations={},
+        known_products=products,
+        active_products=products,
+        anomalies=(),
+    )
+
+    rows = _unit_rows({}, cfg, "rice")
+
+    assert sorted(row.value for row in rows) == ["bag", "jug"]
+
+
+def test_product_rows_show_the_unit_and_skip_retired() -> None:
+    from sumac.cli import _product_rows
+
+    products = {
+        "jam": models.Product(id="jam", name="Strawberry Jam", unit="jar"),
+        "old": models.Product(id="old", name="Old", unit="ct", retired=True),
+    }
+    cfg = Config(
+        known_locations={},
+        active_locations={},
+        known_products=products,
+        active_products={"jam": products["jam"]},
+        anomalies=(),
+    )
+
+    rows = _product_rows(cfg)
+
+    assert [row.value for row in rows] == ["jam"]
+    assert rows[0].label == "jam  (jar)"
+    assert "Strawberry Jam" in rows[0].search  # the display name filters too
+
+
+def test_ask_edit_picks_a_product_and_allows_a_new_one(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "add", "purchase", "jam", "3", "jar", "--to", "pantry")
+    _patch_agent_runner(monkeypatch, [_consumption_plan(amount="1")])
+    _patch_menu(monkeypatch, selections=["e", "p", "d", "a"])
+    seen: list[tuple[str, bool]] = []
+
+    def fake_pick(rows, *, title, current=None, allow_new=False, new_hint="new"):
+        seen.append((title, allow_new))
+        return "jam"
+
+    monkeypatch.setattr(prompt_ui, "pick", fake_pick)
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam")
+
+    assert result.exit_code == 0, result.output
+    assert seen == [("Which product?", True)]
+
+
+def test_ask_edit_picks_a_unit_and_allows_a_new_one(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "add", "purchase", "jam", "3", "jar", "--to", "pantry")
+    _patch_agent_runner(monkeypatch, [_consumption_plan(amount="1")])
+    _patch_menu(monkeypatch, selections=["e", "u", "d", "a"])
+    offered: list[list[str]] = []
+
+    def fake_pick(rows, *, title, current=None, allow_new=False, new_hint="new"):
+        offered.append([row.value for row in rows])
+        assert allow_new is True
+        return "jar"
+
+    monkeypatch.setattr(prompt_ui, "pick", fake_pick)
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam")
+
+    assert result.exit_code == 0, result.output
+    assert offered == [["jar"]]  # the only unit this vault has ever used
     assert "Recorded consumption of 1 jar jam" in result.output

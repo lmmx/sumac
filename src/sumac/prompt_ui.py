@@ -278,7 +278,9 @@ class Row:
         return needle in (self.search or self.label).lower()
 
 
-def _pick_view(rows: list[Row], cursor: int, filter_text: str, title: str, total: int) -> Group:
+def _pick_view(
+    rows: list[Row], cursor: int, filter_text: str, title: str, total: int, hint: str = ""
+) -> Group:
     start = 0
     if len(rows) > _PICK_HEIGHT:
         start = max(0, min(cursor - _PICK_HEIGHT // 2, len(rows) - _PICK_HEIGHT))
@@ -303,31 +305,67 @@ def _pick_view(rows: list[Row], cursor: int, filter_text: str, title: str, total
         parts.append(Text(f"  ↓ {len(rows) - start - _PICK_HEIGHT} more", style="dim"))
     if not rows:
         parts.append(Text("  (nothing matches)", style="yellow"))
-    parts.append(Text("↑/↓ move · type to filter · enter choose · esc cancel", style="dim"))
+    parts.append(Text(hint or "↑/↓ move · type to filter · enter choose · esc cancel", style="dim"))
     return Group(*parts)
 
 
-def pick(rows: list[Row], *, title: str, current: str | None = None) -> str | None:
+def _visible_rows(rows: list[Row], filter_text: str, allow_new: bool, new_hint: str) -> list[Row]:
+    """The rows a filter leaves, plus — when `allow_new` and the filter names
+    something not already in the list — one standing for the typed text
+    itself.
+
+    Last, not first: the existing values are what the list is for, and the
+    cursor resets to the top on every keystroke, so typing a value that does
+    exist still selects it with one Enter. When nothing matches, the new row
+    is the only row and therefore already under the cursor, which is what
+    makes typing a genuinely new unit or product a single uninterrupted
+    action."""
+    needle = filter_text.lower()
+    matches = [row for row in rows if row.matches(needle)] if filter_text else list(rows)
+    if allow_new and filter_text and not any(row.value == filter_text for row in rows):
+        matches.append(Row(value=filter_text, label=f'+ "{filter_text}"  ({new_hint})'))
+    return matches
+
+
+def pick(
+    rows: list[Row],
+    *,
+    title: str,
+    current: str | None = None,
+    allow_new: bool = False,
+    new_hint: str = "new",
+) -> str | None:
     """One value from a long list, filtered as you type — the counterpart to
     `select`, which is for a handful of fixed options each with its own
     accelerator key. Here the list is data, not a menu: no accelerators
     (every printable key is filter text instead), a scrolling window, and the
     cursor starting on `current` if it is in the list.
 
+    `allow_new` adds a row for whatever has been typed when it is not already
+    in the list, so a value the vault has never seen is still reachable —
+    which is the difference between a product or a unit (either may
+    legitimately be new; `decide` registers one on first use) and a location
+    (a closed set `decide` rejects anything outside).
+
     Returns `None` when cancelled, and — like `multiselect` — when there is
     no terminal to read keypresses from: a caller wanting a value off a
     terminal asks for one its own way."""
-    if not interactive() or not rows:
+    if not interactive() or (not rows and not allow_new):
         return None
 
     filter_text = ""
-    visible = list(rows)
+    footer = (
+        "↑/↓ move · type to filter or add · enter choose · esc cancel"
+        if allow_new
+        else "↑/↓ move · type to filter · enter choose · esc cancel"
+    )
+    visible = _visible_rows(rows, filter_text, allow_new, new_hint)
     cursor = next((i for i, row in enumerate(visible) if row.value == current), 0)
 
     with (
         raw_mode(),
         Live(
-            _pick_view(visible, cursor, filter_text, title, len(rows)),
+            _pick_view(visible, cursor, filter_text, title, len(rows), footer),
             console=console,
             auto_refresh=False,
         ) as live,
@@ -348,11 +386,11 @@ def pick(rows: list[Row], *, title: str, current: str | None = None) -> str | No
                     break
             elif key in BACKSPACE:
                 filter_text = filter_text[:-1]
-                visible = [row for row in rows if row.matches(filter_text.lower())]
+                visible = _visible_rows(rows, filter_text, allow_new, new_hint)
                 cursor = 0
             elif len(key) == 1 and key >= " ":
                 filter_text += key
-                visible = [row for row in rows if row.matches(filter_text.lower())]
+                visible = _visible_rows(rows, filter_text, allow_new, new_hint)
                 cursor = 0
             live.update(_pick_view(visible, cursor, filter_text, title, len(rows)), refresh=True)
 
