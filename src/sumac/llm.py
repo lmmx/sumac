@@ -480,6 +480,36 @@ PROMPT_VARIANTS: tuple[PromptVariant, ...] = (
             "looked up yet."
         ),
     ),
+    # v2 fixed a restart-the-search failure but plausibly traded it for a
+    # different one on a different scenario — "if you already have what you
+    # need, act now" apparently read as license to skip a still-required
+    # second search before assuming a product is new. v3/v4 test two ways
+    # of keeping the "don't restart" fix without granting that license,
+    # phrased kind-agnostically (this fires for REMOVE too, which has no
+    # search-twice-before-assuming-new policy — a wording that names that
+    # policy directly would be wrong on a REMOVE-triggered nudge).
+    PromptVariant(
+        "nudge-v3",
+        empty_plan_nudge=(
+            "This request needs a change to inventory, but no change has been made yet. "
+            "Continue from the conversation above rather than starting over — don't "
+            "repeat a search you already made. If this request's own instructions "
+            "require you to gather more information before acting on an item (for "
+            "example, before assuming an unfamiliar product doesn't exist), do that "
+            "now; otherwise make the change for that item now."
+        ),
+    ),
+    PromptVariant(
+        "nudge-v4",
+        empty_plan_nudge=(
+            "No inventory change has been made yet for this request — do not restart "
+            "it. Continue from the tool results already in this conversation. For each "
+            "item the request needs to affect: if you don't yet have enough information "
+            "to act on it correctly, get that information now, following this request's "
+            "own instructions for what's required first; if you do, make its inventory "
+            "change now."
+        ),
+    ),
 )
 
 _PROMPT_VARIANTS_BY_NAME: dict[str, PromptVariant] = {v.name: v for v in PROMPT_VARIANTS}
