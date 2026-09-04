@@ -153,3 +153,82 @@ def test_a_non_ascii_keypress_is_read_as_one_character(terminal: int) -> None:
     with prompt_ui.raw_mode():
         os.write(terminal, "é".encode())
         assert prompt_ui.read_key() == "é"
+
+
+ROWS = [
+    prompt_ui.Row("fridge", "Fridge  (fridge)", "Fridge fridge"),
+    prompt_ui.Row("fridge-door", "Fridge > Door  (fridge-door)", "Fridge > Door fridge-door"),
+    prompt_ui.Row("hob-left", "Hob Left > Top  (hob-left)", "Hob Left > Top hob-left"),
+    prompt_ui.Row("pantry", "Pantry  (pantry)", "Pantry pantry"),
+]
+
+
+def test_pick_returns_the_row_under_the_cursor(
+    terminal: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
+    _type(terminal, b"\x1b[B", b"\r")
+
+    assert prompt_ui.pick(ROWS, title="Where?") == "fridge-door"
+
+
+def test_pick_starts_on_the_current_value(terminal: int, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Opening the picker on the location the write already names means
+    Enter alone changes nothing."""
+    monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
+    _type(terminal, b"\r")
+
+    assert prompt_ui.pick(ROWS, title="Where?", current="hob-left") == "hob-left"
+
+
+def test_typing_filters_the_list(terminal: int, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A household's layout runs to dozens of locations; scrolling to one is
+    not the interaction, typing a few letters of it is."""
+    monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
+    _type(terminal, b"h", b"o", b"b", b"\r")
+
+    assert prompt_ui.pick(ROWS, title="Where?") == "hob-left"
+
+
+def test_the_filter_matches_the_id_as_well_as_the_path(
+    terminal: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
+    _type(terminal, b"f", b"r", b"i", b"d", b"g", b"e", b"-", b"d", b"\r")
+
+    assert prompt_ui.pick(ROWS, title="Where?") == "fridge-door"
+
+
+def test_backspace_widens_the_filter_again(terminal: int, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
+    _type(terminal, b"p", b"a", b"n", b"\x7f", b"\x7f", b"\x7f", b"\r")
+
+    assert prompt_ui.pick(ROWS, title="Where?") == "fridge"
+
+
+def test_enter_on_an_empty_filter_result_does_nothing(
+    terminal: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing matches, so Enter cannot choose — backspacing brings the list
+    back rather than the picker having exited on a phantom row."""
+    monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
+    _type(terminal, b"z", b"\r", b"\x7f", b"\r")
+
+    assert prompt_ui.pick(ROWS, title="Where?") == "fridge"
+
+
+def test_escape_cancels_the_picker(terminal: int, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
+    _type(terminal, b"\x1b")
+
+    assert prompt_ui.pick(ROWS, title="Where?") is None
+
+
+def test_pick_returns_none_without_a_terminal() -> None:
+    assert prompt_ui.pick(ROWS, title="Where?") is None
+
+
+def test_pick_of_an_empty_list_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
+
+    assert prompt_ui.pick([], title="Where?") is None

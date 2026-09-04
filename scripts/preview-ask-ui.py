@@ -283,6 +283,20 @@ def scene_edit() -> None:
     )
 
 
+def scene_location_picker() -> None:
+    """`e`'s location field: the layout, filtered as you type, instead of a
+    free-text box you can put an unconfigured location into."""
+    from sumac.cli import _location_rows
+
+    rows = _location_rows(LOCATIONS)
+    render.console.print(prompt_ui._pick_view(rows, 2, "", "Which location for to?", len(rows)))
+    render.console.print()
+    filtered = [row for row in rows if row.matches("fri")]
+    render.console.print(
+        prompt_ui._pick_view(filtered, 1, "fri", "Which location for to?", len(rows))
+    )
+
+
 def _menu(options: list[prompt_ui.Option], cursor: int) -> None:
     """The arrow-key menu drawn at one cursor position."""
     render.console.print()
@@ -300,6 +314,7 @@ SCENES = {
     "typed": scene_typed,
     "checklist": scene_checklist,
     "edit": scene_edit,
+    "location-picker": scene_location_picker,
 }
 
 

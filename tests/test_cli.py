@@ -12,7 +12,7 @@ from sealedlog import Vault
 from sealedlog.errors import WrongPassphraseError
 from typer.testing import CliRunner
 
-from sumac import ledger, llm, paths, prompt_ui, queue, store
+from sumac import ledger, llm, models, paths, prompt_ui, queue, store
 from sumac import vault as sumac_vault
 from sumac.cli import _decision_options, _editable_fields, _set_rust_log, app
 from sumac.errors import RetireNonemptyError, VaultExistsError
@@ -1331,3 +1331,65 @@ def test_an_existing_rust_log_is_never_overridden(monkeypatch: pytest.MonkeyPatc
     _set_rust_log(verbose=True)
 
     assert os.environ["RUST_LOG"] == "mistralrs_core::gguf::chat_template=off,info"
+
+
+def test_edit_location_rows_are_ordered_by_path_and_skip_retired() -> None:
+    """The order `sumac config show --locations-only` shows, so a container
+    and what nests under it stay together."""
+    from sumac.cli import _location_rows
+
+    locations = {
+        "pantry": models.Location(id="pantry", name="Pantry"),
+        "fridge": models.Location(id="fridge", name="Fridge"),
+        "fridge-door": models.Location(id="fridge-door", name="Door", parent_id="fridge"),
+        "old": models.Location(id="old", name="Old Shelf", retired=True),
+    }
+
+    rows = _location_rows(locations)
+
+    assert [row.value for row in rows] == ["fridge", "fridge-door", "pantry"]
+    assert "Fridge > Door" in rows[1].label
+    assert "fridge-door" in rows[1].search
+
+
+def test_ask_edit_picks_a_location_instead_of_typing_one(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Locations are a closed set — `decide` rejects an unconfigured one and
+    there is no auto-registration to fall back on — so the edit menu offers
+    the layout rather than a free-text field."""
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "config", "add-location", "Fridge", "--id", "fridge")
+    _run(data_dir, "add", "purchase", "jam", "3", "jar", "--to", "fridge")
+    _patch_agent_runner(monkeypatch, [_consumption_plan(amount="1")])
+    _patch_menu(monkeypatch, selections=["e", "f", "d", "a"])
+    picked: list[str | None] = []
+
+    def fake_pick(rows: list[prompt_ui.Row], *, title: str, current: str | None = None) -> str:
+        picked.append(current)
+        return "fridge"
+
+    monkeypatch.setattr(prompt_ui, "pick", fake_pick)
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam")
+
+    assert result.exit_code == 0, result.output
+    assert picked == ["pantry"]  # opened on the location the write already named
+    assert "Recorded consumption of 1 jar jam" in result.output
+
+
+def test_ask_edit_cancelling_the_location_picker_keeps_the_current_one(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "add", "purchase", "jam", "3", "jar", "--to", "pantry")
+    _patch_agent_runner(monkeypatch, [_consumption_plan(amount="1")])
+    _patch_menu(monkeypatch, selections=["e", "f", "d", "a"])
+    monkeypatch.setattr(prompt_ui, "pick", lambda *a, **k: None)
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam")
+
+    assert result.exit_code == 0, result.output
+    assert "Recorded consumption of 1 jar jam" in result.output

@@ -713,6 +713,39 @@ def _choose_write_to_edit(plan: AgentPlan, locations: dict[str, models.Location]
     return int(answer) if answer.isdigit() else None
 
 
+def _location_rows(locations: dict[str, models.Location]) -> list[prompt_ui.Row]:
+    """Every active location, as `config show --locations-only` orders them —
+    by display path, so a container and everything nested under it stay
+    together. Typing filters on the path *and* the id, since either is a
+    reasonable thing to half-remember."""
+    rows = [
+        prompt_ui.Row(
+            value=loc.id,
+            label=f"{config.location_path(locations, loc.id)}  ({loc.id})",
+            search=f"{config.location_path(locations, loc.id)} {loc.id}",
+        )
+        for loc in locations.values()
+        if not loc.retired
+    ]
+    return sorted(rows, key=lambda row: row.label)
+
+
+def _choose_location(
+    locations: dict[str, models.Location], field: str, current: str | None
+) -> str | None:
+    """A location picked from the layout, not typed. Locations are a closed
+    set — `decide.resolve_location` rejects one that is not configured, and
+    unlike a product there is no auto-registration to fall back on — so
+    offering the list is both possible and the only way to be sure the answer
+    resolves. `None` when cancelled or when there is no terminal to pick on,
+    which leaves the field as it was."""
+    rows = _location_rows(locations)
+    if not rows:
+        render.print_error("No locations configured — nothing to pick from.")
+        return None
+    return prompt_ui.pick(rows, title=f"Which location for {field}?", current=current)
+
+
 def _edit_fields_by_menu(
     write: ProposedWrite, locations: dict[str, models.Location]
 ) -> dict[str, str | None] | None:
@@ -755,8 +788,15 @@ def _edit_fields_by_menu(
         if answer in ("c", "r"):
             return None
         match = next((row for row in fields if row[0] == answer), None)
-        if match is not None:
-            values[match[2]] = typer.prompt(match[1], default=values[match[2]] or "")
+        if match is None:
+            continue
+        _key, label, field = match
+        if field in ("from_location", "to_location"):
+            picked = _choose_location(locations, label, values[field])
+            if picked is not None:
+                values[field] = picked
+        else:
+            values[field] = typer.prompt(label, default=values[field] or "")
 
 
 def _edit_fields_by_walkthrough(write: ProposedWrite) -> dict[str, str | None]:

@@ -27,7 +27,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 
 import typer
-from rich.console import Group
+from rich.console import Group, RenderableType
 from rich.live import Live
 from rich.table import Table
 from rich.text import Text
@@ -254,6 +254,111 @@ def select(
     if chosen.prompt_for_text:
         return typer.prompt(chosen.text_prompt).strip()
     return chosen.key
+
+
+# How many rows of a long list are on screen at once. The rest scroll under
+# the cursor, with a count of what is off each end — a list of every location
+# in a household runs to dozens, and a menu taller than the terminal loses its
+# own title off the top.
+_PICK_HEIGHT = 12
+BACKSPACE = ("\x7f", "\b")
+
+
+@dataclass(frozen=True, slots=True)
+class Row:
+    """One row of a `pick` list. `value` is what `pick` returns, `label` what
+    is shown, and `search` what typing filters against — the path *and* the
+    id of a location, say, so either finds it."""
+
+    value: str
+    label: str
+    search: str = ""
+
+    def matches(self, needle: str) -> bool:
+        return needle in (self.search or self.label).lower()
+
+
+def _pick_view(rows: list[Row], cursor: int, filter_text: str, title: str, total: int) -> Group:
+    start = 0
+    if len(rows) > _PICK_HEIGHT:
+        start = max(0, min(cursor - _PICK_HEIGHT // 2, len(rows) - _PICK_HEIGHT))
+    window = rows[start : start + _PICK_HEIGHT]
+
+    table = Table(show_header=False, box=None, padding=(0, 1, 0, 0))
+    for i, row in enumerate(window, start=start):
+        selected = i == cursor
+        table.add_row(
+            Text("❯" if selected else " ", style="bold cyan"),
+            Text(row.label, style="bold" if selected else ""),
+        )
+
+    parts: list[RenderableType] = [Text(title, style="bold")]
+    typed = f"filter: {filter_text}" if filter_text else "type to filter"
+    shown = f"{len(rows)} of {total}" if len(rows) != total else f"{total}"
+    parts.append(Text(f"{typed}   [{shown}]", style="dim"))
+    if start:
+        parts.append(Text(f"  ↑ {start} more", style="dim"))
+    parts.append(table)
+    if start + _PICK_HEIGHT < len(rows):
+        parts.append(Text(f"  ↓ {len(rows) - start - _PICK_HEIGHT} more", style="dim"))
+    if not rows:
+        parts.append(Text("  (nothing matches)", style="yellow"))
+    parts.append(Text("↑/↓ move · type to filter · enter choose · esc cancel", style="dim"))
+    return Group(*parts)
+
+
+def pick(rows: list[Row], *, title: str, current: str | None = None) -> str | None:
+    """One value from a long list, filtered as you type — the counterpart to
+    `select`, which is for a handful of fixed options each with its own
+    accelerator key. Here the list is data, not a menu: no accelerators
+    (every printable key is filter text instead), a scrolling window, and the
+    cursor starting on `current` if it is in the list.
+
+    Returns `None` when cancelled, and — like `multiselect` — when there is
+    no terminal to read keypresses from: a caller wanting a value off a
+    terminal asks for one its own way."""
+    if not interactive() or not rows:
+        return None
+
+    filter_text = ""
+    visible = list(rows)
+    cursor = next((i for i, row in enumerate(visible) if row.value == current), 0)
+
+    with (
+        raw_mode(),
+        Live(
+            _pick_view(visible, cursor, filter_text, title, len(rows)),
+            console=console,
+            auto_refresh=False,
+        ) as live,
+    ):
+        while True:
+            try:
+                key = read_key()
+            except (KeyboardInterrupt, EOFError):
+                key = CTRL_C
+            if key in UP:
+                cursor = (cursor - 1) % len(visible) if visible else 0
+            elif key in DOWN:
+                cursor = (cursor + 1) % len(visible) if visible else 0
+            elif key in (ESC, CTRL_C):
+                return None
+            elif key in ENTER:
+                if visible:
+                    break
+            elif key in BACKSPACE:
+                filter_text = filter_text[:-1]
+                visible = [row for row in rows if row.matches(filter_text.lower())]
+                cursor = 0
+            elif len(key) == 1 and key >= " ":
+                filter_text += key
+                visible = [row for row in rows if row.matches(filter_text.lower())]
+                cursor = 0
+            live.update(_pick_view(visible, cursor, filter_text, title, len(rows)), refresh=True)
+
+    chosen = visible[cursor]
+    console.print(f"[cyan]❯[/cyan] {chosen.label}")
+    return chosen.value
 
 
 @dataclass(frozen=True, slots=True)

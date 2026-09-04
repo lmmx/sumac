@@ -117,7 +117,8 @@ before you accept:
 On a terminal the decision is an arrow-key menu (`↑`/`↓`, Enter, or the option's own letter; Esc
 rejects); piped or scripted, it prints the same options and reads a typed line. On a plan with
 more than one change, `p` opens a checklist to apply only some of them, and `e` picks a change and
-then the one field to retype. Anything you type that
+then the one field to change — a location field opens the layout to pick from, filtered as you
+type, since a location has to be one that exists. Anything you type that
 isn't an option is feedback the agent revises the plan with.
 
 ```sh

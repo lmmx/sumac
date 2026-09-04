@@ -320,6 +320,51 @@ tests for what it introduces.
 
 ---
 
+# 2026-09-04: Editing a Location by Picking It
+
+## Current State
+
+- `e`'s location fields took free text, so correcting a wrongly-chosen location meant typing an id
+  from memory — the same act that produced the wrong location in the first place, and the one input
+  in the edit menu that can be wrong in a way `decide` rejects outright.
+- Locations are a closed set: `decide.resolve_location` rejects one that is not configured, and
+  unlike a product there is no auto-registration to fall back on. Products keep free text for that
+  reason; locations do not need it.
+- `prompt_ui.Row(value, label, search)` and `prompt_ui.pick(rows, *, title, current)` present a long
+  list: arrows move, printable keys filter (`search` is matched, falling back to `label`), backspace
+  widens the filter, Enter chooses, Escape returns `None`. Distinct from `select`, which is a
+  handful of fixed options each carrying its own accelerator key — in `pick` every printable key is
+  filter text instead.
+- `pick` shows `_PICK_HEIGHT` (12) rows at a time around the cursor, with `↑ n more` / `↓ n more`
+  counts and a `[shown of total]` header — a household's layout runs past a terminal's height.
+- `pick` returns `None` when nothing matches the filter and Enter is pressed, rather than choosing a
+  row that is not there (`test_enter_on_an_empty_filter_result_does_nothing`,
+  tests/test_prompt_ui_pty.py, backspaces afterwards and chooses from the restored list).
+- `cli._location_rows` builds the rows from `config.location_path`, ordered by path, retired
+  locations excluded — the order `sumac config show --locations-only` shows, so a container and
+  everything nested under it stay together. `search` carries both the path and the id.
+- `cli._choose_location` is called from `_edit_fields_by_menu` for `from_location`/`to_location`,
+  opening on the location the write already names (`current`), and leaves the field unchanged when
+  cancelled. Every other field still opens `typer.prompt`.
+- `_edit_fields_by_walkthrough` is unchanged, so the non-TTY path still types a location id.
+- `scripts/preview-ask-ui.py` gains a `location-picker` scene, drawn unfiltered and filtered.
+- `pytest` reports 400 passing tests repo-wide, nine of them driving `pick` over a real pty;
+  `ruff format --check .`, `ruff check .`, and `ty check` each report no findings.
+
+## Missing
+
+- The product field is still free text. A vault of ~469 products is a worse list to scroll than the
+  locations, but a product may legitimately be new — `decide` auto-registers one — so a picker there
+  needs a "type a new name" row that the location picker does not.
+- Nothing offers the picker outside `e`: `sumac add --to` still takes a typed id or display path.
+- `pick`'s filter is a plain case-insensitive substring over path and id — no fuzzy or
+  out-of-order matching, so "fridge door" finds `Fridge > Door` and "door fridge" does not.
+- The layout itself is what made "the top shelf of the fridge" ambiguous in the run that prompted
+  this — a shelf *above* the fridge and the top shelf *inside* it are different places with similar
+  names — and nothing here distinguishes them; the picker only makes the choice visible.
+
+---
+
 # 2026-09-04: No Way to Look Up a Location
 
 ## Current State
