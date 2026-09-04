@@ -26,8 +26,8 @@
     "evals/test_remove.py::test_partial",
     "evals/test_add.py::test_basmati_rice_in_different_unit"
   ],
-  "total_duration_s": 66.27454886303167,
-  "mean_tokens_per_sec": 69.44104924977785,
+  "total_duration_s": 60.78575479306164,
+  "mean_tokens_per_sec": 65.99379170998418,
   "log_file": "epoch-01.log.jsonl",
   "results": [
     {
@@ -48,8 +48,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 2.9145305549900513,
-        "tokens_per_sec": 68.60254021147273
+        "duration_s": 2.9984263209917117,
+        "tokens_per_sec": 66.6901893427528
       }
     },
     {
@@ -70,8 +70,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 3.4054132479941472,
-        "tokens_per_sec": 71.07386710014154
+        "duration_s": 3.5685352470027283,
+        "tokens_per_sec": 67.9928734931776
       }
     },
     {
@@ -88,8 +88,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 2.168269493005937,
-        "tokens_per_sec": 72.1247568213261
+        "duration_s": 1.7662258630152792,
+        "tokens_per_sec": 64.70940915063467
       }
     },
     {
@@ -105,8 +105,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 5.970632807991933,
-        "tokens_per_sec": 76.39499975477742
+        "duration_s": 4.441593374009244,
+        "tokens_per_sec": 72.27488102658745
       }
     },
     {
@@ -127,8 +127,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 3.071656707994407,
-        "tokens_per_sec": 69.14344814537284
+        "duration_s": 3.2058486249879934,
+        "tokens_per_sec": 66.33663233232646
       }
     },
     {
@@ -144,8 +144,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 2.7692236570001114,
-        "tokens_per_sec": 76.5714277020928
+        "duration_s": 2.89612187500461,
+        "tokens_per_sec": 73.40116347747882
       }
     },
     {
@@ -162,8 +162,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 1.1633229780127294,
-        "tokens_per_sec": 61.524335847770935
+        "duration_s": 1.2280296480166726,
+        "tokens_per_sec": 58.36236848346303
       }
     },
     {
@@ -181,8 +181,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 1.3180180640192702,
-        "tokens_per_sec": 62.9032268344922
+        "duration_s": 1.3800047480035573,
+        "tokens_per_sec": 60.13878084238733
       }
     },
     {
@@ -203,8 +203,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 5.600948103994597,
-        "tokens_per_sec": 72.18243546253966
+        "duration_s": 5.23226166999666,
+        "tokens_per_sec": 69.40253406549003
       }
     },
     {
@@ -220,8 +220,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 0.4594586059974972,
-        "tokens_per_sec": 62.068965177048405
+        "duration_s": 0.4729856070189271,
+        "tokens_per_sec": 60.53811526508998
       }
     },
     {
@@ -243,8 +243,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 3.224128546018619,
-        "tokens_per_sec": 71.66230379910176
+        "duration_s": 3.354789814009564,
+        "tokens_per_sec": 69.16064143217238
       }
     },
     {
@@ -260,8 +260,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 0.45728656701976433,
-        "tokens_per_sec": 62.7906966299673
+        "duration_s": 0.4785875120142009,
+        "tokens_per_sec": 60.000001589457234
       }
     },
     {
@@ -283,8 +283,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 3.3962865020148456,
-        "tokens_per_sec": 69.09430439867623
+        "duration_s": 3.7011062420206144,
+        "tokens_per_sec": 66.9706457066685
       }
     },
     {
@@ -302,8 +302,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 1.3717116120096762,
-        "tokens_per_sec": 63.56589041552245
+        "duration_s": 1.4544945069937967,
+        "tokens_per_sec": 59.94151913065059
       }
     },
     {
@@ -324,8 +324,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 3.157305191998603,
-        "tokens_per_sec": 68.21236465692566
+        "duration_s": 3.152859397989232,
+        "tokens_per_sec": 63.18956751739425
       }
     },
     {
@@ -342,8 +342,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 1.032772196980659,
-        "tokens_per_sec": 79.83623595862925
+        "duration_s": 1.09978248400148,
+        "tokens_per_sec": 75.07218446576182
       }
     },
     {
@@ -359,8 +359,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 0.4626292329921853,
-        "tokens_per_sec": 61.78489611503887
+        "duration_s": 0.4759036439936608,
+        "tokens_per_sec": 60.53811526508998
       }
     },
     {
@@ -381,8 +381,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 3.3003168250143062,
-        "tokens_per_sec": 68.79999934387207
+        "duration_s": 3.2010596969921608,
+        "tokens_per_sec": 62.8910108561117
       }
     },
     {
@@ -407,8 +407,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 6.144364815991139,
-        "tokens_per_sec": 71.12326957557207
+        "duration_s": 6.305665024992777,
+        "tokens_per_sec": 67.43448543394945
       }
     },
     {
@@ -416,10 +416,10 @@
       "category": "add",
       "note": null,
       "verdict": {
-        "passed": true,
+        "passed": false,
         "checks": {
           "classification": true,
-          "tool:sumac_find_inventory": true,
+          "tool:sumac_find_inventory": false,
           "writes": true,
           "kind": true,
           "product": true,
@@ -427,11 +427,13 @@
           "unit": true,
           "location": true
         },
-        "failures": []
+        "failures": [
+          "expected 'sumac_find_inventory' to be called, wasn't"
+        ]
       },
       "metrics": {
-        "duration_s": 4.01579592001508,
-        "tokens_per_sec": 73.70360688748544
+        "duration_s": 3.2283654189959634,
+        "tokens_per_sec": 71.66230310024605
       }
     },
     {
@@ -452,8 +454,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 3.0250563379959203,
-        "tokens_per_sec": 66.34078091344429
+        "duration_s": 3.06451184101752,
+        "tokens_per_sec": 63.23024062753573
       }
     },
     {
@@ -461,22 +463,20 @@
       "category": "add",
       "note": null,
       "verdict": {
-        "passed": false,
+        "passed": true,
         "checks": {
           "classification": true,
           "writes": true,
           "kind": true,
-          "product": false,
+          "product": true,
           "amount": true,
           "unit": true
         },
-        "failures": [
-          "expected product 'Basmati Rice', got 'Basmati Rice Bag'"
-        ]
+        "failures": []
       },
       "metrics": {
-        "duration_s": 7.84542089398019,
-        "tokens_per_sec": 78.19873174384267
+        "duration_s": 4.078596231993288,
+        "tokens_per_sec": 71.92575501522616
       }
     }
   ]

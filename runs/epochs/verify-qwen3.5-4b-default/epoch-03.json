@@ -1,153 +1,78 @@
 {
-  "model": "qwen3.5-9b",
+  "model": "qwen3.5-4b",
   "prompt_variant": "default",
-  "seed": 4,
+  "seed": 3,
   "scenario_order": [
-    "evals/test_remove.py::test_move_vague_asks_or_acts",
-    "evals/test_find.py::test_missing_item",
-    "evals/test_find.py::test_existing_item",
-    "evals/test_remove.py::test_partial",
-    "evals/test_remove.py::test_move_explicit",
-    "evals/test_find.py::test_uses_only_find_tool",
-    "evals/test_reject.py::test_joke_with_inventory_word",
-    "evals/test_add.py::test_odd_destination_respected",
-    "evals/test_remove.py::test_all",
+    "evals/test_add.py::test_existing_item_indirect_location",
     "evals/test_find.py::test_shared_word_picks_right_product",
     "evals/test_reject.py::test_gibberish",
-    "evals/test_add.py::test_multiple_products_with_omitted_amounts",
+    "evals/test_add.py::test_odd_destination_respected",
+    "evals/test_find.py::test_existing_item",
     "evals/test_add.py::test_duplicate_search_bounded",
-    "evals/test_add.py::test_existing_item_explicit_location",
-    "evals/test_add.py::test_existing_item_indirect_location",
-    "evals/test_add.py::test_missing_item_discovers_new_product",
-    "evals/test_add.py::test_basmati_rice_in_different_unit",
-    "evals/test_reject.py::test_out_of_domain_weather",
+    "evals/test_remove.py::test_all",
     "evals/test_find.py::test_quantity",
+    "evals/test_find.py::test_uses_only_find_tool",
     "evals/test_add.py::test_discriminator_variant_not_confused",
+    "evals/test_add.py::test_multiple_products_with_omitted_amounts",
+    "evals/test_remove.py::test_move_explicit",
+    "evals/test_remove.py::test_move_vague_asks_or_acts",
+    "evals/test_add.py::test_existing_item_explicit_location",
     "evals/test_add.py::test_ambiguous_product_asks_or_acts",
+    "evals/test_add.py::test_missing_item_discovers_new_product",
+    "evals/test_reject.py::test_out_of_domain_weather",
+    "evals/test_find.py::test_missing_item",
+    "evals/test_add.py::test_basmati_rice_in_different_unit",
+    "evals/test_reject.py::test_joke_with_inventory_word",
+    "evals/test_remove.py::test_partial",
     "evals/test_add.py::test_product_with_omitted_amount"
   ],
-  "total_duration_s": 62.79405901307473,
-  "mean_tokens_per_sec": 64.43747601825925,
-  "log_file": "epoch-04.log.jsonl",
+  "total_duration_s": 43.235543884919025,
+  "mean_tokens_per_sec": 89.68165564157141,
+  "log_file": "epoch-03.log.jsonl",
   "results": [
     {
-      "scenario": "remove.move_vague_asks_or_acts",
-      "category": "remove",
-      "note": "branch=act",
-      "verdict": {
-        "passed": true,
-        "checks": {
-          "classification": true,
-          "outcome": true
-        },
-        "failures": []
-      },
-      "metrics": {
-        "duration_s": 3.526390398008516,
-        "tokens_per_sec": 64.01435674915919
-      }
-    },
-    {
-      "scenario": "find.missing_item",
-      "category": "find",
+      "scenario": "add.existing_item_indirect_location",
+      "category": "add",
       "note": null,
       "verdict": {
         "passed": true,
         "checks": {
           "classification": true,
           "tool:sumac_find_inventory": true,
-          "writes": true
+          "writes": true,
+          "kind": true,
+          "product": true,
+          "amount": true,
+          "unit": true,
+          "location": true
         },
         "failures": []
       },
       "metrics": {
-        "duration_s": 1.2708922489837278,
-        "tokens_per_sec": 56.34987546501431
+        "duration_s": 2.802570536005078,
+        "tokens_per_sec": 94.91006702511649
       }
     },
     {
-      "scenario": "find.existing_item",
+      "scenario": "find.shared_word_picks_right_product",
       "category": "find",
       "note": null,
       "verdict": {
         "passed": true,
         "checks": {
           "classification": true,
-          "tool:sumac_find_inventory": true,
           "writes": true,
           "reply": true
         },
         "failures": []
       },
       "metrics": {
-        "duration_s": 1.1202399260073435,
-        "tokens_per_sec": 77.50472602017955
+        "duration_s": 1.25913242099341,
+        "tokens_per_sec": 84.04074680774247
       }
     },
     {
-      "scenario": "remove.partial",
-      "category": "remove",
-      "note": null,
-      "verdict": {
-        "passed": true,
-        "checks": {
-          "classification": true,
-          "writes": true,
-          "kind": true,
-          "product": true,
-          "amount": true,
-          "unit": true,
-          "location": true
-        },
-        "failures": []
-      },
-      "metrics": {
-        "duration_s": 2.958668627019506,
-        "tokens_per_sec": 69.75089036029873
-      }
-    },
-    {
-      "scenario": "remove.move_explicit",
-      "category": "remove",
-      "note": null,
-      "verdict": {
-        "passed": true,
-        "checks": {
-          "classification": true,
-          "writes": true,
-          "kind": true,
-          "product": true,
-          "amount": true,
-          "unit": true,
-          "location": true
-        },
-        "failures": []
-      },
-      "metrics": {
-        "duration_s": 2.9859840940043796,
-        "tokens_per_sec": 70.84948858710773
-      }
-    },
-    {
-      "scenario": "find.uses_only_find_tool",
-      "category": "find",
-      "note": null,
-      "verdict": {
-        "passed": true,
-        "checks": {
-          "classification": true,
-          "writes": true,
-          "tool_scope": true
-        },
-        "failures": []
-      },
-      "metrics": {
-        "duration_s": 1.449244096991606,
-        "tokens_per_sec": 57.05925327327929
-      }
-    },
-    {
-      "scenario": "reject.joke_with_inventory_word",
+      "scenario": "reject.gibberish",
       "category": "reject",
       "note": null,
       "verdict": {
@@ -159,8 +84,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 0.49751278400071897,
-        "tokens_per_sec": 57.56929494124971
+        "duration_s": 0.3404161669895984,
+        "tokens_per_sec": 85.98725827375084
       }
     },
     {
@@ -181,8 +106,50 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 3.7433858640142716,
-        "tokens_per_sec": 64.5616015181624
+        "duration_s": 3.2321624879841693,
+        "tokens_per_sec": 95.74824322815925
+      }
+    },
+    {
+      "scenario": "find.existing_item",
+      "category": "find",
+      "note": null,
+      "verdict": {
+        "passed": true,
+        "checks": {
+          "classification": true,
+          "tool:sumac_find_inventory": true,
+          "writes": true,
+          "reply": true
+        },
+        "failures": []
+      },
+      "metrics": {
+        "duration_s": 0.9402051809884142,
+        "tokens_per_sec": 85.15535216965883
+      }
+    },
+    {
+      "scenario": "add.duplicate_search_bounded",
+      "category": "add",
+      "note": null,
+      "verdict": {
+        "passed": true,
+        "checks": {
+          "classification": true,
+          "tool:sumac_find_inventory:bound": true,
+          "writes": true,
+          "kind": true,
+          "product": true,
+          "amount": true,
+          "unit": true,
+          "location": true
+        },
+        "failures": []
+      },
+      "metrics": {
+        "duration_s": 2.8814264459942933,
+        "tokens_per_sec": 97.19626124909543
       }
     },
     {
@@ -203,12 +170,31 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 3.3069314490130637,
-        "tokens_per_sec": 61.799552383045445
+        "duration_s": 2.141880850016605,
+        "tokens_per_sec": 88.63294704853485
       }
     },
     {
-      "scenario": "find.shared_word_picks_right_product",
+      "scenario": "find.quantity",
+      "category": "find",
+      "note": null,
+      "verdict": {
+        "passed": true,
+        "checks": {
+          "classification": true,
+          "tool:sumac_find_inventory": true,
+          "writes": true,
+          "reply": true
+        },
+        "failures": []
+      },
+      "metrics": {
+        "duration_s": 0.9780060469929595,
+        "tokens_per_sec": 86.37873638979853
+      }
+    },
+    {
+      "scenario": "find.uses_only_find_tool",
       "category": "find",
       "note": null,
       "verdict": {
@@ -216,30 +202,37 @@
         "checks": {
           "classification": true,
           "writes": true,
-          "reply": true
+          "tool_scope": true
         },
         "failures": []
       },
       "metrics": {
-        "duration_s": 2.238203219982097,
-        "tokens_per_sec": 63.033174037804855
+        "duration_s": 0.9208414389868267,
+        "tokens_per_sec": 81.7757003423855
       }
     },
     {
-      "scenario": "reject.gibberish",
-      "category": "reject",
+      "scenario": "add.discriminator_variant_not_confused",
+      "category": "add",
       "note": null,
       "verdict": {
-        "passed": true,
+        "passed": false,
         "checks": {
           "classification": true,
-          "writes": true
+          "writes": true,
+          "kind": true,
+          "product": true,
+          "amount": false,
+          "unit": true,
+          "location": true
         },
-        "failures": []
+        "failures": [
+          "expected amount '2', got Decimal('4')"
+        ]
       },
       "metrics": {
-        "duration_s": 0.5192816919879988,
-        "tokens_per_sec": 54.87804726466479
+        "duration_s": 2.4820186409924645,
+        "tokens_per_sec": 90.67131530924235
       }
     },
     {
@@ -264,19 +257,18 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 6.8427350650017615,
-        "tokens_per_sec": 65.71691239354332
+        "duration_s": 3.4984836309740786,
+        "tokens_per_sec": 88.42493174655043
       }
     },
     {
-      "scenario": "add.duplicate_search_bounded",
-      "category": "add",
+      "scenario": "remove.move_explicit",
+      "category": "remove",
       "note": null,
       "verdict": {
         "passed": true,
         "checks": {
           "classification": true,
-          "tool:sumac_find_inventory:bound": true,
           "writes": true,
           "kind": true,
           "product": true,
@@ -287,8 +279,25 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 3.5218846690258943,
-        "tokens_per_sec": 70.70101858409613
+        "duration_s": 2.4608548829855863,
+        "tokens_per_sec": 91.86351772145052
+      }
+    },
+    {
+      "scenario": "remove.move_vague_asks_or_acts",
+      "category": "remove",
+      "note": "branch=act",
+      "verdict": {
+        "passed": true,
+        "checks": {
+          "classification": true,
+          "outcome": true
+        },
+        "failures": []
+      },
+      "metrics": {
+        "duration_s": 2.0724670570052695,
+        "tokens_per_sec": 100.15649630397562
       }
     },
     {
@@ -309,12 +318,29 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 6.144186524004908,
-        "tokens_per_sec": 67.00767354678906
+        "duration_s": 2.485040500003379,
+        "tokens_per_sec": 90.27777932854487
       }
     },
     {
-      "scenario": "add.existing_item_indirect_location",
+      "scenario": "add.ambiguous_product_asks_or_acts",
+      "category": "add",
+      "note": "branch=act",
+      "verdict": {
+        "passed": true,
+        "checks": {
+          "classification": true,
+          "outcome": true
+        },
+        "failures": []
+      },
+      "metrics": {
+        "duration_s": 2.932599898020271,
+        "tokens_per_sec": 96.3589561404951
+      }
+    },
+    {
+      "scenario": "add.missing_item_discovers_new_product",
       "category": "add",
       "note": null,
       "verdict": {
@@ -332,33 +358,43 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 3.24358287799987,
-        "tokens_per_sec": 71.59127855841716
+        "duration_s": 3.2284051080059726,
+        "tokens_per_sec": 94.04283784615265
       }
     },
     {
-      "scenario": "add.missing_item_discovers_new_product",
-      "category": "add",
+      "scenario": "reject.out_of_domain_weather",
+      "category": "reject",
       "note": null,
       "verdict": {
-        "passed": false,
+        "passed": true,
         "checks": {
           "classification": true,
-          "tool:sumac_find_inventory": false,
-          "writes": true,
-          "kind": true,
-          "product": true,
-          "amount": true,
-          "unit": true,
-          "location": true
+          "writes": true
         },
-        "failures": [
-          "expected 'sumac_find_inventory' to be called, wasn't"
-        ]
+        "failures": []
       },
       "metrics": {
-        "duration_s": 3.411680172983324,
-        "tokens_per_sec": 67.8018578103514
+        "duration_s": 0.34105233498848975,
+        "tokens_per_sec": 85.98725827375084
+      }
+    },
+    {
+      "scenario": "find.missing_item",
+      "category": "find",
+      "note": null,
+      "verdict": {
+        "passed": true,
+        "checks": {
+          "classification": true,
+          "tool:sumac_find_inventory": true,
+          "writes": true
+        },
+        "failures": []
+      },
+      "metrics": {
+        "duration_s": 0.9006396769837011,
+        "tokens_per_sec": 80.91787496698304
       }
     },
     {
@@ -378,12 +414,12 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 3.9122361350164283,
-        "tokens_per_sec": 72.21476637175007
+        "duration_s": 2.6742119579866994,
+        "tokens_per_sec": 92.51809909619604
       }
     },
     {
-      "scenario": "reject.out_of_domain_weather",
+      "scenario": "reject.joke_with_inventory_word",
       "category": "reject",
       "note": null,
       "verdict": {
@@ -395,32 +431,13 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 0.5435524240019731,
-        "tokens_per_sec": 52.63157777325418
+        "duration_s": 0.343351896997774,
+        "tokens_per_sec": 85.44303404226704
       }
     },
     {
-      "scenario": "find.quantity",
-      "category": "find",
-      "note": null,
-      "verdict": {
-        "passed": true,
-        "checks": {
-          "classification": true,
-          "tool:sumac_find_inventory": true,
-          "writes": true,
-          "reply": true
-        },
-        "failures": []
-      },
-      "metrics": {
-        "duration_s": 1.5565605779993348,
-        "tokens_per_sec": 53.24231960603812
-      }
-    },
-    {
-      "scenario": "add.discriminator_variant_not_confused",
-      "category": "add",
+      "scenario": "remove.partial",
+      "category": "remove",
       "note": null,
       "verdict": {
         "passed": true,
@@ -436,25 +453,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 3.054211729002418,
-        "tokens_per_sec": 66.414315476905
-      }
-    },
-    {
-      "scenario": "add.ambiguous_product_asks_or_acts",
-      "category": "add",
-      "note": "branch=act",
-      "verdict": {
-        "passed": true,
-        "checks": {
-          "classification": true,
-          "outcome": true
-        },
-        "failures": []
-      },
-      "metrics": {
-        "duration_s": 3.9365593020047527,
-        "tokens_per_sec": 66.9869221811342
+        "duration_s": 2.170982625015313,
+        "tokens_per_sec": 88.70168585300723
       }
     },
     {
@@ -475,8 +475,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 3.0101351360208355,
-        "tokens_per_sec": 65.94556949945856
+        "duration_s": 2.148794100008672,
+        "tokens_per_sec": 87.8073249517131
       }
     }
   ]

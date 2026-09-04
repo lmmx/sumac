@@ -1,5 +1,5 @@
 {
-  "model": "qwen3.5-9b",
+  "model": "qwen3.5-4b",
   "prompt_variant": "default",
   "seed": 4,
   "scenario_order": [
@@ -26,8 +26,8 @@
     "evals/test_add.py::test_ambiguous_product_asks_or_acts",
     "evals/test_add.py::test_product_with_omitted_amount"
   ],
-  "total_duration_s": 62.79405901307473,
-  "mean_tokens_per_sec": 64.43747601825925,
+  "total_duration_s": 41.770593911001924,
+  "mean_tokens_per_sec": 91.51173480708705,
   "log_file": "epoch-04.log.jsonl",
   "results": [
     {
@@ -43,8 +43,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 3.526390398008516,
-        "tokens_per_sec": 64.01435674915919
+        "duration_s": 2.3816933360067196,
+        "tokens_per_sec": 94.07507680635194
       }
     },
     {
@@ -61,8 +61,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 1.2708922489837278,
-        "tokens_per_sec": 56.34987546501431
+        "duration_s": 0.8870609060104471,
+        "tokens_per_sec": 81.21211945189593
       }
     },
     {
@@ -80,8 +80,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 1.1202399260073435,
-        "tokens_per_sec": 77.50472602017955
+        "duration_s": 0.7512238179915585,
+        "tokens_per_sec": 107.71470292821269
       }
     },
     {
@@ -102,8 +102,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 2.958668627019506,
-        "tokens_per_sec": 69.75089036029873
+        "duration_s": 2.0637643089867197,
+        "tokens_per_sec": 100.31347938640786
       }
     },
     {
@@ -124,8 +124,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 2.9859840940043796,
-        "tokens_per_sec": 70.84948858710773
+        "duration_s": 2.158943304006243,
+        "tokens_per_sec": 100.39959870176203
       }
     },
     {
@@ -142,8 +142,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 1.449244096991606,
-        "tokens_per_sec": 57.05925327327929
+        "duration_s": 0.9274225809786003,
+        "tokens_per_sec": 81.96721433902121
       }
     },
     {
@@ -159,8 +159,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 0.49751278400071897,
-        "tokens_per_sec": 57.56929494124971
+        "duration_s": 0.340591954998672,
+        "tokens_per_sec": 85.44303404226704
       }
     },
     {
@@ -181,8 +181,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 3.7433858640142716,
-        "tokens_per_sec": 64.5616015181624
+        "duration_s": 3.2975030489906203,
+        "tokens_per_sec": 93.99477866031927
       }
     },
     {
@@ -203,8 +203,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 3.3069314490130637,
-        "tokens_per_sec": 61.799552383045445
+        "duration_s": 2.163402373989811,
+        "tokens_per_sec": 87.56218882103474
       }
     },
     {
@@ -221,8 +221,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 2.238203219982097,
-        "tokens_per_sec": 63.033174037804855
+        "duration_s": 1.2452690589998383,
+        "tokens_per_sec": 85.78856047940934
       }
     },
     {
@@ -238,8 +238,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 0.5192816919879988,
-        "tokens_per_sec": 54.87804726466479
+        "duration_s": 0.35960036498727277,
+        "tokens_per_sec": 80.83832543066141
       }
     },
     {
@@ -264,8 +264,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 6.8427350650017615,
-        "tokens_per_sec": 65.71691239354332
+        "duration_s": 3.5248357429809403,
+        "tokens_per_sec": 88.01956030626113
       }
     },
     {
@@ -287,8 +287,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 3.5218846690258943,
-        "tokens_per_sec": 70.70101858409613
+        "duration_s": 2.321870885003591,
+        "tokens_per_sec": 96.47495414057035
       }
     },
     {
@@ -309,8 +309,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 6.144186524004908,
-        "tokens_per_sec": 67.00767354678906
+        "duration_s": 2.5012188280234113,
+        "tokens_per_sec": 93.88458238199388
       }
     },
     {
@@ -332,8 +332,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 3.24358287799987,
-        "tokens_per_sec": 71.59127855841716
+        "duration_s": 2.6953441519872285,
+        "tokens_per_sec": 99.6810212737843
       }
     },
     {
@@ -341,10 +341,10 @@
       "category": "add",
       "note": null,
       "verdict": {
-        "passed": false,
+        "passed": true,
         "checks": {
           "classification": true,
-          "tool:sumac_find_inventory": false,
+          "tool:sumac_find_inventory": true,
           "writes": true,
           "kind": true,
           "product": true,
@@ -352,13 +352,11 @@
           "unit": true,
           "location": true
         },
-        "failures": [
-          "expected 'sumac_find_inventory' to be called, wasn't"
-        ]
+        "failures": []
       },
       "metrics": {
-        "duration_s": 3.411680172983324,
-        "tokens_per_sec": 67.8018578103514
+        "duration_s": 3.213499915000284,
+        "tokens_per_sec": 94.13735392256821
       }
     },
     {
@@ -378,8 +376,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 3.9122361350164283,
-        "tokens_per_sec": 72.21476637175007
+        "duration_s": 2.469243310013553,
+        "tokens_per_sec": 98.78154819444973
       }
     },
     {
@@ -395,8 +393,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 0.5435524240019731,
-        "tokens_per_sec": 52.63157777325418
+        "duration_s": 0.36742664701887406,
+        "tokens_per_sec": 79.17888778953372
       }
     },
     {
@@ -414,8 +412,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 1.5565605779993348,
-        "tokens_per_sec": 53.24231960603812
+        "duration_s": 1.0506980000063777,
+        "tokens_per_sec": 80.246913344045
       }
     },
     {
@@ -436,8 +434,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 3.054211729002418,
-        "tokens_per_sec": 66.414315476905
+        "duration_s": 2.1786823089933023,
+        "tokens_per_sec": 93.05760899088102
       }
     },
     {
@@ -453,8 +451,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 3.9365593020047527,
-        "tokens_per_sec": 66.9869221811342
+        "duration_s": 2.853223391022766,
+        "tokens_per_sec": 96.65287668344874
       }
     },
     {
@@ -475,8 +473,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 3.0101351360208355,
-        "tokens_per_sec": 65.94556949945856
+        "duration_s": 2.018075675005093,
+        "tokens_per_sec": 93.83377968103558
       }
     }
   ]

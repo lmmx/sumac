@@ -26,8 +26,8 @@
     "evals/test_add.py::test_missing_item_discovers_new_product",
     "evals/test_add.py::test_existing_item_indirect_location"
   ],
-  "total_duration_s": 69.96897910998086,
-  "mean_tokens_per_sec": 65.2013820706557,
+  "total_duration_s": 64.74755502000335,
+  "mean_tokens_per_sec": 61.106799203446485,
   "log_file": "epoch-02.log.jsonl",
   "results": [
     {
@@ -48,8 +48,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 3.1694824130099732,
-        "tokens_per_sec": 66.97767506111339
+        "duration_s": 3.354476000997238,
+        "tokens_per_sec": 63.24732470706465
       }
     },
     {
@@ -65,8 +65,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 3.0394975270028226,
-        "tokens_per_sec": 74.59044917532331
+        "duration_s": 3.179147043003468,
+        "tokens_per_sec": 71.07273454366265
       }
     },
     {
@@ -83,8 +83,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 2.065572527993936,
-        "tokens_per_sec": 68.27515143036761
+        "duration_s": 1.828368173999479,
+        "tokens_per_sec": 62.57242138687852
       }
     },
     {
@@ -102,8 +102,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 1.4053735709749162,
-        "tokens_per_sec": 62.16831046021994
+        "duration_s": 1.5033181059989147,
+        "tokens_per_sec": 58.44618562037335
       }
     },
     {
@@ -111,18 +111,20 @@
       "category": "add",
       "note": null,
       "verdict": {
-        "passed": false,
+        "passed": true,
         "checks": {
           "classification": true,
-          "writes": false
+          "writes": true,
+          "kind": true,
+          "product": true,
+          "amount": true,
+          "unit": true
         },
-        "failures": [
-          "expected exactly one write, got ()"
-        ]
+        "failures": []
       },
       "metrics": {
-        "duration_s": 6.531495571020059,
-        "tokens_per_sec": 73.88204985072063
+        "duration_s": 4.349358905979898,
+        "tokens_per_sec": 66.87666531036132
       }
     },
     {
@@ -138,8 +140,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 0.4767360409896355,
-        "tokens_per_sec": 59.73451431411503
+        "duration_s": 0.5137251889973413,
+        "tokens_per_sec": 55.78512426921965
       }
     },
     {
@@ -160,8 +162,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 3.350534870987758,
-        "tokens_per_sec": 66.56151384515296
+        "duration_s": 4.656337344000349,
+        "tokens_per_sec": 62.74065739374092
       }
     },
     {
@@ -177,8 +179,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 0.4830123209976591,
-        "tokens_per_sec": 59.34065763047178
+        "duration_s": 0.49717678301385604,
+        "tokens_per_sec": 57.93991531919343
       }
     },
     {
@@ -200,8 +202,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 3.6545352459943388,
-        "tokens_per_sec": 66.99393647950335
+        "duration_s": 3.9129854159837123,
+        "tokens_per_sec": 64.11638012573658
       }
     },
     {
@@ -222,8 +224,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 3.115360646013869,
-        "tokens_per_sec": 64.08952249877792
+        "duration_s": 3.3607189999893308,
+        "tokens_per_sec": 62.48037788858898
       }
     },
     {
@@ -241,8 +243,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 1.4039881899952888,
-        "tokens_per_sec": 59.00151299763369
+        "duration_s": 1.4460123250028118,
+        "tokens_per_sec": 57.14285799123305
       }
     },
     {
@@ -263,8 +265,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 5.612093042989727,
-        "tokens_per_sec": 69.34786681490573
+        "duration_s": 3.269874746009009,
+        "tokens_per_sec": 58.671824665347394
       }
     },
     {
@@ -281,8 +283,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 1.41499791899696,
-        "tokens_per_sec": 58.86792505793234
+        "duration_s": 1.5154359480075072,
+        "tokens_per_sec": 54.69845840273886
       }
     },
     {
@@ -303,8 +305,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 3.306539202982094,
-        "tokens_per_sec": 64.76434656211488
+        "duration_s": 3.4411199089954607,
+        "tokens_per_sec": 58.62492404661244
       }
     },
     {
@@ -320,8 +322,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 0.49332089500967413,
-        "tokens_per_sec": 57.93991531919343
+        "duration_s": 0.5224798549897969,
+        "tokens_per_sec": 54.87804726466479
       }
     },
     {
@@ -346,8 +348,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 8.336784752988024,
-        "tokens_per_sec": 67.13603297190505
+        "duration_s": 7.6655514820013195,
+        "tokens_per_sec": 64.49842157911925
       }
     },
     {
@@ -363,8 +365,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 5.874935075000394,
-        "tokens_per_sec": 72.90922183190138
+        "duration_s": 3.5398332760087214,
+        "tokens_per_sec": 67.29914031211717
       }
     },
     {
@@ -385,8 +387,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 3.288420405006036,
-        "tokens_per_sec": 73.23313070136797
+        "duration_s": 3.304937462002272,
+        "tokens_per_sec": 72.67534269573957
       }
     },
     {
@@ -403,8 +405,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 1.2872888669953682,
-        "tokens_per_sec": 55.280527487330815
+        "duration_s": 1.3377995650225785,
+        "tokens_per_sec": 53.34394916103437
       }
     },
     {
@@ -425,8 +427,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 3.51387854598579,
-        "tokens_per_sec": 63.75939929631562
+        "duration_s": 3.62243057199521,
+        "tokens_per_sec": 60.68524960881423
       }
     },
     {
@@ -434,10 +436,10 @@
       "category": "add",
       "note": null,
       "verdict": {
-        "passed": true,
+        "passed": false,
         "checks": {
           "classification": true,
-          "tool:sumac_find_inventory": true,
+          "tool:sumac_find_inventory": false,
           "writes": true,
           "kind": true,
           "product": true,
@@ -445,11 +447,13 @@
           "unit": true,
           "location": true
         },
-        "failures": []
+        "failures": [
+          "expected 'sumac_find_inventory' to be called, wasn't"
+        ]
       },
       "metrics": {
-        "duration_s": 4.531822500022827,
-        "tokens_per_sec": 65.26806584843337
+        "duration_s": 3.9903761009918526,
+        "tokens_per_sec": 57.96717798790071
       }
     },
     {
@@ -471,8 +475,8 @@
         "failures": []
       },
       "metrics": {
-        "duration_s": 3.6133089790237136,
-        "tokens_per_sec": 64.3086799196252
+        "duration_s": 3.936091817013221,
+        "tokens_per_sec": 58.58640219568072
       }
     }
   ]
