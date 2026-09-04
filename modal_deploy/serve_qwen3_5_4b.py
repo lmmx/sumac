@@ -210,8 +210,6 @@ class Server:
             # No multimodal input anywhere in sumac's tool-calling loop.
             "--limit-mm-per-prompt",
             json.dumps({"image": 0, "video": 0, "audio": 0}),
-            "--speculative-config",
-            '{"method":"mtp","num_speculative_tokens":2}',
         ]
         cmd += ["--enforce-eager" if FAST_BOOT else "--no-enforce-eager"]
 
