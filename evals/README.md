@@ -165,8 +165,8 @@ automatically from the real `AgentRunner` it built, no `evaluate_*` call needed 
 `messages` is the raw conversation the domain loop sent/received, including a plain-text-only
 round that produces no `trace` entry at all; `classify_messages` is the separate classifier
 round's own exchange, captured even when it rejects. None of this is shown in the console summary
-(too verbose for a table), but all of it is present in `--eval-json` output, which is where to
-actually look when a scenario's `checks` say *that* it failed but not *why*. See
+(too verbose for a table); `--eval-json`'s `.log.jsonl` sidecar (see "Reading the output" below)
+is where to actually look when a scenario's `checks` say *that* it failed but not *why*. See
 docs/journal/2026-09-04-trace-and-verdict-redesign.md for what each field closes.
 
 ### Reading the output
@@ -197,12 +197,18 @@ throughput (`EvalResult.tokens_per_sec`, from `mistralrs`' own per-round `Usage`
 tokens/summed generation-time across every round a scenario ran, not an average of per-round
 rates, which would over-weight short rounds), then every failing scenario with its specific failed
 checks, then how the ask-or-act scenarios resolved. `--eval-json PATH` additionally writes the
-same data as JSON: each scenario's one-shot judgment under `verdict` (`passed`/`checks`/
-`failures`), its performance numbers under `metrics` (`duration_s`/`tokens_per_sec`), and its
-execution record under `log` (`trace`/`messages`/`classify_messages`/`usage_history`/`terminal`/
-`nudge_fired`) — kept apart because a verdict is computed once after the run while a log is an
-ordered record of what happened during it — plus top-level `total_duration_s`/`mean_tokens_per_sec`
-— one run's worth; see "Comparing models" above for turning several of these into one table.
+same data as two files: `PATH` itself carries each scenario's one-shot judgment under `verdict`
+(`passed`/`checks`/`failures`) and performance numbers under `metrics` (`duration_s`/
+`tokens_per_sec`), plus top-level `total_duration_s`/`mean_tokens_per_sec` and `log_file` (the
+sidecar's own filename) — one run's worth; see "Comparing models" above for turning several of
+these into one table. The execution record — `trace`/`messages`/`classify_messages`/
+`usage_history`/`terminal`/`nudge_fired` — goes to `log_file` instead: a `.jsonl` sidecar next to
+`PATH` (`<stem>.log.jsonl`), one JSON object per line, each carrying its own `scenario` to join
+back against `PATH`'s `results[]`. Split into two files, not one nested `log` key, because a
+single scenario's `messages` conversation can run to hundreds of lines — bundled into `PATH`
+itself, that dominates the file and makes `verdict`/`metrics` (the part read every time) expensive
+to even open; as a separate line-delimited file, one scenario's log can be `grep`/`jq -c`'d out
+without touching the rest.
 
 ## Safety rails
 

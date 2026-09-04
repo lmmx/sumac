@@ -301,6 +301,80 @@ def _print_summary(results: list[EvalResult]) -> None:
         print(f"\nask-vs-act branches: {dict(branches)}")
 
 
+def _build_eval_payload(
+    *,
+    model_name: str,
+    variant_name: str,
+    seed: int | None,
+    scenario_order: list[str] | None,
+    log_file_name: str,
+    results: list[EvalResult],
+) -> dict:
+    """The verdict/metrics half of `--eval-json`'s output — everything a
+    reader wants on every pass (did it pass, how long did it take), kept
+    small and cheap to parse whole. Paired with `_log_lines`, which builds
+    the execution-record half written to the `.jsonl` sidecar named here as
+    `log_file`; factored apart from `pytest_sessionfinish` so both halves
+    are unit-testable without a real model or pytest session — see
+    `tests/test_eval_conftest.py`."""
+    rates = [r.tokens_per_sec for r in results if r.tokens_per_sec is not None]
+    return {
+        "model": model_name,
+        "prompt_variant": variant_name,
+        "seed": seed,
+        # The reproducible per-epoch shuffle `pytest_collection_modifyitems`
+        # applied — `None` when `seed` was `None`, since nothing was
+        # shuffled. Recorded so an epoch's exact scenario order is
+        # recoverable without re-deriving it from the seed alone.
+        "scenario_order": scenario_order,
+        "total_duration_s": sum(r.duration_s for r in results),
+        "mean_tokens_per_sec": sum(rates) / len(rates) if rates else None,
+        "log_file": log_file_name,
+        "results": [
+            {
+                "scenario": r.scenario,
+                "category": r.category,
+                "note": r.note,
+                # A one-shot judgment computed after the run, by comparing
+                # final state against expectations — the ordered record of
+                # what happened during the run lives in `log_file` instead,
+                # joined back to this entry by `scenario`.
+                "verdict": {
+                    "passed": r.passed,
+                    "checks": r.checks,
+                    "failures": r.failures,
+                },
+                "metrics": {
+                    "duration_s": r.duration_s,
+                    "tokens_per_sec": r.tokens_per_sec,
+                },
+            }
+            for r in results
+        ],
+    }
+
+
+def _log_lines(results: list[EvalResult]) -> list[dict]:
+    """One dict per scenario, each written as one line of the `.jsonl`
+    sidecar `_build_eval_payload` points `log_file` at — the execution
+    record a single scenario's `messages` conversation can run to hundreds
+    of lines for, which is exactly why it doesn't live in the same file as
+    `verdict`/`metrics` any more. `scenario` is the join key back to
+    `_build_eval_payload`'s `results[]`."""
+    return [
+        {
+            "scenario": r.scenario,
+            "trace": r.trace,
+            "messages": r.messages,
+            "classify_messages": r.classify_messages,
+            "usage_history": r.usage_history,
+            "terminal": r.terminal,
+            "nudge_fired": r.nudge_fired,
+        }
+        for r in results
+    ]
+
+
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     config = session.config
     results: list[EvalResult] = getattr(config, "_eval_results", [])
@@ -312,51 +386,27 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     if json_path:
         from sumac import llm
 
-        model_name = config.getoption("--eval-model") or llm.DEFAULT_MODEL_PRESET.name
-        variant_name = config.getoption("--eval-prompt-variant") or llm.DEFAULT_PROMPT_VARIANT.name
-        rates = [r.tokens_per_sec for r in results if r.tokens_per_sec is not None]
-        payload = {
-            "model": model_name,
-            "prompt_variant": variant_name,
-            "seed": config.getoption("--eval-seed"),
-            # The reproducible per-epoch shuffle `pytest_collection_modifyitems`
-            # applied — `None` when `--eval-seed` was `None`, since nothing was
-            # shuffled. Recorded so an epoch's exact scenario order is
-            # recoverable without re-deriving it from the seed alone.
-            "scenario_order": getattr(config, "_eval_scenario_order", None),
-            "total_duration_s": sum(r.duration_s for r in results),
-            "mean_tokens_per_sec": sum(rates) / len(rates) if rates else None,
-            "results": [
-                {
-                    "scenario": r.scenario,
-                    "category": r.category,
-                    "note": r.note,
-                    # A one-shot judgment computed after the run, by
-                    # comparing final state against expectations — kept
-                    # apart from "log" below, which is an ordered record of
-                    # what happened during the run. See
-                    # docs/journal/2026-09-04-trace-and-verdict-redesign.md.
-                    "verdict": {
-                        "passed": r.passed,
-                        "checks": r.checks,
-                        "failures": r.failures,
-                    },
-                    "metrics": {
-                        "duration_s": r.duration_s,
-                        "tokens_per_sec": r.tokens_per_sec,
-                    },
-                    "log": {
-                        "trace": r.trace,
-                        "messages": r.messages,
-                        "classify_messages": r.classify_messages,
-                        "usage_history": r.usage_history,
-                        "terminal": r.terminal,
-                        "nudge_fired": r.nudge_fired,
-                    },
-                }
-                for r in results
-            ],
-        }
         out = Path(json_path)
         out.parent.mkdir(parents=True, exist_ok=True)
+        # A single scenario's `messages` conversation dominated this file
+        # once it existed — a 25-scenario epoch ran to 2,700+ lines, nearly
+        # all of it "log" content nobody was reading in the same pass as
+        # `verdict`/`metrics`. Splitting the log out to a `.jsonl` sidecar,
+        # one line per scenario, means `verdict`/`metrics` stay in a file
+        # small enough to read whole, and a specific scenario's log can be
+        # grepped or streamed out of the sidecar without parsing the rest.
+        # See docs/journal/2026-09-04-trace-and-verdict-redesign.md.
+        log_path = out.parent / f"{out.stem}.log.jsonl"
+        payload = _build_eval_payload(
+            model_name=config.getoption("--eval-model") or llm.DEFAULT_MODEL_PRESET.name,
+            variant_name=config.getoption("--eval-prompt-variant")
+            or llm.DEFAULT_PROMPT_VARIANT.name,
+            seed=config.getoption("--eval-seed"),
+            scenario_order=getattr(config, "_eval_scenario_order", None),
+            log_file_name=log_path.name,
+            results=results,
+        )
         out.write_text(json.dumps(payload, indent=2))
+        with log_path.open("w") as f:
+            for line in _log_lines(results):
+                f.write(json.dumps(line) + "\n")

@@ -303,3 +303,44 @@ epoch-benchmark designs.
   literal and `report.jq`; (c) the A-versus-B RNG decision, after its one measurement.
 - (a) alone reopens the original `add.multiple_products_with_omitted_amounts` question; (b) and (c)
   are not prerequisites for it.
+
+---
+
+# 2026-09-04: Trace/Verdict Redesign — Sequencing Complete
+
+## Context
+
+(a), (b), and (c) from "Sequencing" above are implemented — `AgentRunner.messages`/
+`classify_messages`/`usage_history`/`terminal`/`nudge_fired` (`src/sumac/llm.py`), the
+`verdict`/`metrics`/`log` payload reshape (`evals/conftest.py`, `evals/report.jq`,
+`evals/epoch_report.py`), and the RNG-cascade shuffle (below).
+
+## The A-versus-B measurement, run
+
+- `scripts/measure-runner-load.sh qwen3.5-9b`: one warm-cache `_build_runner` load, 2.66s: 25
+  loads (one per scenario, option B) — 66.5s.
+- Against a `qwen3.5-9b` full-suite epoch's own recorded ~84s (`scripts/run-nudge-overnight.sh`'s
+  comment, git history commit `5735eaf`), 66.5s is ~79% overhead.
+- Decision: option A. `evals/conftest.py`'s `pytest_collection_modifyitems` reproducibly shuffles
+  `pytest.mark.model` items via `random.Random(seed).shuffle`, keyed on `--eval-seed`; the
+  resulting node-id order is recorded as `scenario_order` in `--eval-json`'s output, at the session
+  level (not per-scenario). `_shuffle_model_scenarios` is the pure, independently-tested half of
+  the hook (`tests/test_eval_conftest.py`).
+- Verified live: `pytest evals --eval-seed 1 --collect-only -q` run twice gives identical
+  collection order; `--eval-seed 2` gives a different one; non-`model`-marked items
+  (`test_fixtures.py`, `test_termination.py`) stay in their original position every time.
+
+## Considered, not built: a per-scenario debug mode (option B)
+
+- Raised as a follow-up: a second, explicitly separate run mode — one freshly-constructed,
+  freshly-seeded `mistralrs.Runner` per scenario attempt (`hash(scenario_id, epoch)`), gated to
+  make sense only for a narrow, single-scenario selection (a `-k`-scoped debug session), never the
+  full suite. The per-load cost (~2.7s, per the measurement above) is immaterial at that scale and
+  prohibitive at full-suite scale, which is what keeps it a separate mode rather than a replacement
+  for option A.
+- Cannot reproduce one specific scenario's outcome from an option-A epoch — that scenario's RNG
+  stream position under A depends on the shuffle and everything that ran before it that session; a
+  `hash(scenario_id, epoch)`-seeded Runner has no way to land on that same position. Useful for
+  fresh, independent per-scenario investigation ("does this scenario fail reliably, seed by seed"),
+  not for replaying a specific benchmark run's failure.
+- Not implemented this session — recorded here as a live option for later, not a decision.
