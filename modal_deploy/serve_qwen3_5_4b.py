@@ -109,7 +109,7 @@ TOOL_CALL_PARSER = "qwen3_xml"
 # journal entry's "boot vs. throughput tradeoff" section. Flip to True
 # while iterating on this deployment's own configuration, where fast
 # restarts matter more than steady-state speed.
-FAST_BOOT = True  # measured: full compile ran past several minutes on a first boot —
+FAST_BOOT = False  # measured: full compile ran past several minutes on a first boot —
 # see the comment above; flip back to False deliberately (and bump
 # serve_qwen3_5_4b.py's own @app.server(startup_timeout=...) well past
 # whatever that full sweep actually measures) once steady-state throughput
@@ -133,11 +133,11 @@ GPU = "L4:1"
 vllm_image = (
     modal.Image.from_registry("nvidia/cuda:12.9.0-devel-ubuntu22.04", add_python="3.12")
     .entrypoint([])
-    # 0.21.0 (this file's first version) was already several releases
-    # stale and logged a Transformers-v4-deprecated warning — confirmed via
-    # PyPI that 0.28.0 is current as of this writing; re-check before
-    # trusting this blindly on a much later date.
-    .uv_pip_install("vllm==0.28.0")
+    .uv_pip_install(
+        # Fastest to use nightly releases
+        "vllm",
+        extra_index_url="https://wheels.vllm.ai/nightly",
+    )
     .env(
         {
             "HF_XET_HIGH_PERFORMANCE": "1",  # faster model transfers
@@ -205,6 +205,8 @@ class Server:
             # No multimodal input anywhere in sumac's tool-calling loop.
             "--limit-mm-per-prompt",
             json.dumps({"image": 0, "video": 0, "audio": 0}),
+            "--speculative-config",
+            '{"method":"qwen3_next_mtp","num_speculative_tokens":2}',
         ]
         cmd += ["--enforce-eager" if FAST_BOOT else "--no-enforce-eager"]
 
