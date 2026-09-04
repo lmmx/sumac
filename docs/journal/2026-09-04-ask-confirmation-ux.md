@@ -320,6 +320,58 @@ tests for what it introduces.
 
 ---
 
+# 2026-09-04: No Way to Look Up a Location
+
+## Current State
+
+- Two real runs of `sumac ask "add a packet of ham to the top shelf of the fridge"` show the same
+  sequence: `sumac_discover_inventory(to_location="top shelf of the fridge")` rejected
+  `unknown_location`, then `sumac_find_inventory(query="fridge")` seventeen times, each returning
+  zero products, until the round cap. One run then wrote to
+  `fridge-main-shelf-3-bottle-rack` — a location id that appears in the same trace's earlier
+  `sumac_find_inventory(query="milk")` result and nowhere else; the other gave up and asked the
+  person for a valid identifier.
+- `ledger.search_inventory` matches products and only products, so `query="fridge"` returning
+  nothing was correct — no product is called that. `sumac_find_inventory` was the only search tool,
+  which left no path from a place named in words to a location id except guessing one and being
+  rejected.
+- `decide._resolve_location`'s `Rejected` carries `suggestions=near_matches(value,
+  active_locations)`; difflib's 0.6 cutoff scores a phrase like "top shelf of the fridge" against no
+  id at all, so the rejection reaching the model was empty of candidates
+  (`test_an_unknown_location_rejection_names_real_candidates`, tests/test_llm.py, asserts
+  `suggestions == "[]"` for exactly that input).
+- `config.search_locations(locations, query)` returns every active location whose id, name, or
+  display path contains `query`, ordered by path — matching the path is what makes a query for a
+  container find what nests inside it ("Shelf 1" names nothing about a fridge; its path does).
+- `AgentRunner._sumac_find_inventory` returns `{"products": [...], "locations": [...],
+  "location_match_count": n}`; `locations` carries `location_id` and `location_path`, capped at
+  `_MAX_LOCATION_MATCHES` (20) with the full count alongside. `_FIND_INVENTORY_SCHEMA`'s description
+  states that searching a place is how a phrase becomes a `location_id`.
+- `AgentRunner._propose_write` adds `known_locations` to an `unknown_location` rejection's detail —
+  the locations whose id or path shares a word with the rejected value, or the whole layout capped
+  at 20 when none does, so the reply is never "not that one" with no indication of what would be.
+- `AgentRunner._searched` records each search result within one `propose`/`revise` call; an
+  identical repeat returns the same payload with `repeated_query: true` and a hint saying so,
+  mirroring `_propose_write`'s existing `already_proposed`. Cleared alongside `_trace` at the top of
+  `propose` and `revise`.
+- `pytest` reports 388 passing tests repo-wide; `ruff format --check .`, `ruff check .`, and
+  `ty check` each report no findings.
+
+## Missing
+
+- No real-model run confirms any of this changes the outcome — the six new tests drive the tool
+  callbacks directly, and the failure they were written from is a model's reaction to what the tools
+  return, which only a real run can show.
+- `evals/` has no scenario for a request naming a location in plain words rather than by id, so the
+  suite would not have caught this and does not yet measure the fix.
+- `sumac find` (`cli.py`) still searches products only; `config.search_locations` is called from
+  `llm.py` alone, though `sumac config show`'s tree is the closest existing equivalent.
+- Nothing bounds how many times a *different* search may run — the repeat guard only catches an
+  identical query, and `MAX_TOOL_ROUNDS` remains the only cap on a model varying its wording each
+  time.
+
+---
+
 # 2026-09-04: A Valid Location Shown as a New One
 
 ## Current State

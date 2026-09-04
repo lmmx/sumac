@@ -1381,3 +1381,135 @@ def test_the_same_write_named_two_ways_is_only_proposed_once(
 
     assert result["status"] == "already_proposed"
     assert len(agent._pending) == 1
+
+
+# --- finding a location, not just a product ----------------------------
+
+
+def _seed_fridge_layout(data_dir: Path, key: bytes, osuser: str) -> None:
+    for loc_id, name, parent in (
+        ("fridge", "Fridge", None),
+        ("fridge-main", "Main Shelves", "fridge"),
+        ("fridge-main-shelf-1", "Shelf 1", "fridge-main"),
+        ("pantry", "Pantry", None),
+    ):
+        config.add_location(data_dir, key, osuser, Location(id=loc_id, name=name, parent_id=parent))
+
+
+def test_searching_a_place_returns_locations_not_only_products(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    """A real run searched "fridge" seventeen times and got nothing each
+    time: `ledger.search_inventory` matches products, and no product is
+    called that. With no way to reach a location id, the model eventually
+    used one it had seen in an unrelated result."""
+    _seed_fridge_layout(data_dir, key, osuser)
+    agent, _fake = _make_agent([], data_dir, key)
+
+    result = json.loads(
+        agent.tool_callbacks["sumac_find_inventory"]("sumac_find_inventory", {"query": "fridge"})
+    )
+
+    assert result["products"] == []
+    assert [loc["location_id"] for loc in result["locations"]] == [
+        "fridge",
+        "fridge-main",
+        "fridge-main-shelf-1",
+    ]
+    assert result["location_match_count"] == 3
+
+
+def test_a_location_search_matches_the_path_not_only_the_name(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    """ "Shelf 1" is named without reference to the fridge; only its path
+    says where it is, which is what a query for the container has to match."""
+    _seed_fridge_layout(data_dir, key, osuser)
+    agent, _fake = _make_agent([], data_dir, key)
+
+    result = json.loads(
+        agent.tool_callbacks["sumac_find_inventory"]("sumac_find_inventory", {"query": "fridge"})
+    )
+
+    assert "fridge-main-shelf-1" in [loc["location_id"] for loc in result["locations"]]
+
+
+def test_a_repeated_search_comes_back_labelled_as_one(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    _seed_pantry_with_jam(data_dir, key, osuser)
+    agent, _fake = _make_agent([], data_dir, key)
+    call = agent.tool_callbacks["sumac_find_inventory"]
+
+    first = json.loads(call("sumac_find_inventory", {"query": "jam"}))
+    second = json.loads(call("sumac_find_inventory", {"query": "jam"}))
+
+    assert "repeated_query" not in first
+    assert second["repeated_query"] is True
+    assert second["products"] == first["products"]
+
+
+def test_a_repeat_is_scoped_to_one_propose_call(data_dir: Path, key: bytes, osuser: str) -> None:
+    """`propose` clears it alongside the trace, so the same question asked
+    about a later request is a fresh one."""
+    _seed_pantry_with_jam(data_dir, key, osuser)
+    agent, _fake = _make_agent([ScriptedResponse(content="done")], data_dir, key)
+    agent.tool_callbacks["sumac_find_inventory"]("sumac_find_inventory", {"query": "jam"})
+
+    agent.propose("where is the jam?")
+    result = json.loads(
+        agent.tool_callbacks["sumac_find_inventory"]("sumac_find_inventory", {"query": "jam"})
+    )
+
+    assert "repeated_query" not in result
+
+
+def test_an_unknown_location_rejection_names_real_candidates(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    """`decide`'s own `suggestions` are `near_matches` over ids, which a
+    phrase never scores against — so the rejection used to be a dead end."""
+    _seed_fridge_layout(data_dir, key, osuser)
+    agent, _fake = _make_agent([], data_dir, key)
+
+    result = json.loads(
+        agent.tool_callbacks["sumac_discover_inventory"](
+            "sumac_discover_inventory",
+            {
+                "product_id": "Ham",
+                "amount": "1",
+                "unit": "packet",
+                "to_location": "top shelf of the fridge",
+            },
+        )
+    )
+
+    assert result["reason"] == "unknown_location"
+    assert result["detail"]["suggestions"] == "[]"
+    assert [c["location_id"] for c in result["detail"]["known_locations"]] == [
+        "fridge",
+        "fridge-main",
+        "fridge-main-shelf-1",
+    ]
+
+
+def test_candidates_fall_back_to_the_whole_layout_when_nothing_shares_a_word(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    """Never "not that one" with no indication of what would be."""
+    _seed_fridge_layout(data_dir, key, osuser)
+    agent, _fake = _make_agent([], data_dir, key)
+
+    result = json.loads(
+        agent.tool_callbacks["sumac_discover_inventory"](
+            "sumac_discover_inventory",
+            {"product_id": "Ham", "amount": "1", "unit": "packet", "to_location": "garage"},
+        )
+    )
+
+    assert [c["location_id"] for c in result["detail"]["known_locations"]] == [
+        "fridge",
+        "fridge-main",
+        "fridge-main-shelf-1",
+        "pantry",
+    ]

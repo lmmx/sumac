@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -225,8 +226,16 @@ _FIND_INVENTORY_SCHEMA = {
     "function": {
         "name": "sumac_find_inventory",
         "description": (
-            "Search current inventory by product name, case-insensitive. "
-            'Returns {"products": [...]}, one entry per distinct product '
+            "Search current inventory by product name, and the location "
+            "layout by location name, case-insensitive. "
+            'Returns {"products": [...], "locations": [...]}. '
+            '"locations" holds every place whose name or path matched — each '
+            'with "location_id" and "location_path" — and is how a place '
+            'named in plain words ("the fridge", "the top shelf") becomes a '
+            "location_id you can pass to another tool. Search for the place "
+            "before writing to it if you do not already have its id from a "
+            "result in this conversation. "
+            '"products" has one entry per distinct product '
             "name that matched — never one row per location. Each entry "
             'has "product_id" (its exact spelling as stored), '
             '"is_exact_match" (true only when the product\'s name exactly '
@@ -729,6 +738,33 @@ _REJECTION_HINT = (
 )
 
 
+# One search result can name a lot of shelves; the count comes back in full
+# even when the list is cut, so a too-broad query reads as one to narrow
+# rather than as the whole layout.
+_MAX_LOCATION_MATCHES = 20
+
+
+def _location_candidates(cfg: config.Config, value: str, limit: int = 20) -> list[dict[str, str]]:
+    """Locations worth offering after `value` failed to resolve: those whose
+    id or display path shares a word with it, or — when nothing does — the
+    first `limit` of them, so the reply is never "not that one" with no
+    indication of what would be."""
+    words = {w for w in re.split(r"\W+", value.lower()) if len(w) > 2}
+    everything = [
+        {"location_id": loc_id, "location_path": config.location_path(cfg.known_locations, loc_id)}
+        for loc_id in sorted(cfg.active_locations)
+    ]
+    matching = [
+        candidate
+        for candidate in everything
+        if any(
+            word in candidate["location_id"].lower() or word in candidate["location_path"].lower()
+            for word in words
+        )
+    ]
+    return (matching or everything)[:limit]
+
+
 def _rejected(reason: str, detail: dict) -> str:
     """Every rejected tool result carries its own retry guidance, rather
     than a prompt stating it unconditionally on every request regardless
@@ -987,6 +1023,10 @@ class AgentRunner:
         self._allowed: frozenset[str] = frozenset()
         self._pending: list[ProposedWrite] = []
         self._trace: list[ToolCallRecord] = []
+        # Searches already answered in the current `propose`/`revise` call,
+        # so an identical repeat comes back labelled rather than looking
+        # like a fresh result.
+        self._searched: dict[str, dict] = {}
         self._trace_history: list[ToolCallRecord] = []
         self._classify_messages: list[dict[str, str]] | None = None
         self._usage_history: list[dict[str, float | int]] = []
@@ -1114,6 +1154,23 @@ class AgentRunner:
         `search_inventory`'s tier order (exact, then whole-word, then
         substring) without naming the tiers themselves."""
         query = str(args.get("query", ""))
+        if query in self._searched:
+            # A real run searched "fridge" seventeen times in a row, each
+            # time getting the same empty result, until the round cap
+            # stopped it. Repeating the answer is not enough on its own —
+            # it is what the model already had — so the answer comes back
+            # labelled as the repeat it is.
+            return json.dumps(
+                {
+                    **self._searched[query],
+                    "repeated_query": True,
+                    "hint": (
+                        "This exact search already ran in this request and returned this same "
+                        "result. Running it again returns nothing new. Act on what it returned, "
+                        "or explain in plain text what you could not find."
+                    ),
+                }
+            )
         inventory = ledger.build_inventory(self._data_dir, self._key)
         locations = ledger.load_locations_or_empty(self._data_dir, self._key)
         products: dict[str, dict] = {}
@@ -1134,7 +1191,21 @@ class AgentRunner:
                     "unit": m.quantity.unit,
                 }
             )
-        return json.dumps({"products": list(products.values())})
+        # Location matches alongside product matches: `query` is whatever the
+        # person's sentence named, and a phrase like "the fridge" is a place,
+        # not a product. Without this the only way to learn a location id was
+        # to guess one, be rejected, and guess again.
+        matched = config.search_locations(locations, query)
+        result = {
+            "products": list(products.values()),
+            "locations": [
+                {"location_id": loc.id, "location_path": config.location_path(locations, loc.id)}
+                for loc in matched[:_MAX_LOCATION_MATCHES]
+            ],
+            "location_match_count": len(matched),
+        }
+        self._searched[query] = result
+        return json.dumps(result)
 
     def _propose_write(self, name: str, args: dict) -> str:
         # A real LFM2.5 run produced `_amount` instead of `amount` — the
@@ -1182,7 +1253,21 @@ class AgentRunner:
                 cfg=cfg,
             )
         except Rejected as e:
-            return _rejected(e.reason, {k: str(v) for k, v in e.detail.items()})
+            # `object` values, not `str`: every `decide` detail stringifies,
+            # but the candidate list below is structured on purpose — a
+            # model reading `"[{'location_id': ...}]"` as one string has to
+            # parse it back out of a Python repr.
+            detail: dict[str, object] = {k: str(v) for k, v in e.detail.items()}
+            if e.reason == "unknown_location":
+                # `decide`'s own `suggestions` are `near_matches` over ids,
+                # which a phrase ("top shelf of the fridge") never comes
+                # close enough to match. The candidates below are what a
+                # person would offer instead: the locations whose path shares
+                # a word with what was asked for.
+                detail["known_locations"] = _location_candidates(
+                    cfg, str(e.detail.get("value", ""))
+                )
+            return _rejected(e.reason, detail)
 
         # The ids `decide_change` just resolved these to, not the strings the
         # model supplied. `decide.resolve_location` accepts a display path
@@ -1480,6 +1565,7 @@ class AgentRunner:
 
     def propose(self, prompt: str) -> AgentPlan:
         self._trace = []
+        self._searched = {}
         kind = self._classify(prompt)
         self._kind = kind
         if kind is QueryKind.REJECT:
@@ -1501,6 +1587,7 @@ class AgentRunner:
             )
         self._messages.append({"role": "user", "content": feedback})
         self._trace = []
+        self._searched = {}
         plan = self._maybe_self_review(self._maybe_force_action(self._run_loop()))
         return replace(plan, trace=tuple(self._trace))
 
