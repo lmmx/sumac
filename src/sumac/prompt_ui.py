@@ -19,8 +19,11 @@ of the package.
 
 from __future__ import annotations
 
+import os
 import select as _select
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 import typer
@@ -40,12 +43,36 @@ except ImportError:  # pragma: no cover - Windows
     _RAW_MODE_AVAILABLE = False
 
 
-UP = "\x1b[A"
-DOWN = "\x1b[B"
+# Both cursor-key encodings: a terminal in normal mode sends `ESC [ A`, and one
+# in application-cursor mode (`DECCKM`, which tmux and some terminals turn on)
+# sends `ESC O A` for the same key. Accepting only the first is another way for
+# an arrow key to silently do nothing.
+UP = ("\x1b[A", "\x1bOA")
+DOWN = ("\x1b[B", "\x1bOB")
 ENTER = ("\r", "\n")
 ESC = "\x1b"
 CTRL_C = "\x03"
 SPACE = " "
+
+# A read that returned exactly this much of an escape sequence has more of it
+# still coming — a terminal usually delivers all three bytes in one burst, but
+# over ssh or a slow link they can arrive split across reads.
+_PARTIAL_ESCAPES = (b"\x1b", b"\x1b[", b"\x1bO")
+_ESCAPE_TIMEOUT = 0.05
+
+
+def _utf8_continuation_bytes(lead: int) -> int:
+    """How many bytes follow a UTF-8 lead byte. No menu key is non-ASCII, so
+    this only keeps such a keypress from arriving as replacement characters
+    and, worse, leaving its continuation bytes in the buffer to be read as
+    keys of their own."""
+    if lead >= 0xF0:
+        return 3
+    if lead >= 0xE0:
+        return 2
+    if lead >= 0xC0:
+        return 1
+    return 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,31 +100,80 @@ def interactive() -> bool:
     if not _RAW_MODE_AVAILABLE:
         return False
     try:
-        return sys.stdin.isatty() and sys.stdout.isatty()
-    except (AttributeError, ValueError):  # a closed or non-file-like stream
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            return False
+        # Probes what `raw_mode` will need before promising a menu: an
+        # `isatty()` that says yes over a stdin whose attributes cannot
+        # actually be read would otherwise reach `tty.setcbreak` and raise
+        # there, mid-decision, instead of falling back to the typed prompt.
+        termios.tcgetattr(sys.stdin.fileno())
+    except (AttributeError, ValueError, OSError, termios.error):
         return False
+    return True
 
 
-def read_key() -> str:
-    """One keypress, with the three-byte arrow sequences returned whole.
+@contextmanager
+def raw_mode() -> Iterator[None]:
+    """Puts the terminal in single-keypress mode for the length of one menu,
+    not one keypress.
 
-    An `\\x1b` that begins an escape sequence and a bare Escape keypress are
-    the same first byte, distinguished only by whether more bytes are already
-    waiting — hence the zero-length `select` poll rather than a blocking read
-    of the next two bytes, which would swallow the keypress after a bare
-    Escape."""
+    Held across the whole loop on purpose: restoring canonical mode between
+    reads means a keystroke arriving while the menu is redrawing is echoed to
+    the screen and line-buffered by the tty, so fast keypresses corrupt the
+    `Live` region and go missing until Enter.
+
+    `tty.setcbreak`, not `tty.setraw`: `setraw` also clears `OPOST`, which is
+    what turns `\n` into `\r\n` on the way out — every line `Live` redraws
+    inside a `setraw` block staircases across the screen. `setcbreak` clears
+    only `ECHO`/`ICANON`, which is all a single-keypress read needs. It also
+    leaves `ISIG` on, so Ctrl-C stays a `KeyboardInterrupt` rather than
+    arriving as a `\x03` byte — `select`/`multiselect` catch it and treat it
+    the same way."""
     fd = sys.stdin.fileno()
     saved = termios.tcgetattr(fd)
     try:
-        tty.setraw(fd)
-        ch = sys.stdin.read(1)
-        if ch == ESC and _select.select([sys.stdin], [], [], 0.05)[0]:
-            ch += sys.stdin.read(1)
-            if ch == "\x1b[":
-                ch += sys.stdin.read(1)
+        # TCSAFLUSH discards whatever is already sitting in the input queue as
+        # the mode changes — deliberate here, and the safer of the two: model
+        # inference runs for seconds before a plan appears, and anything typed
+        # into that wait was not a decision about a plan nobody had seen yet.
+        # A stray Enter from before the preview must not accept it.
+        tty.setcbreak(fd, termios.TCSAFLUSH)
+        yield
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, saved)
-    return ch
+
+
+def read_key() -> str:
+    """One keypress, with an escape sequence returned whole. Call inside
+    `raw_mode()`.
+
+    Reads the file descriptor with `os.read`, not `sys.stdin.read`. That is
+    the whole point of this function: `sys.stdin` is a buffered
+    `TextIOWrapper`, and `sys.stdin.read(1)` on a terminal pulls every byte
+    already available into Python's own buffer before returning the first
+    one. An arrow key's three bytes arrive in a single burst, so after
+    returning `\x1b` the remaining `[B` sits in the wrapper's buffer where
+    `select.select` — which polls the file descriptor — cannot see it. The
+    sequence then reads as a bare Escape, which `select()` answers as
+    "reject", so pressing Down silently discarded the plan and returned to
+    the shell. Found by a real run, not by a test: every test in
+    `tests/test_prompt_ui.py` monkeypatched this function out. `tests/
+    test_prompt_ui_pty.py` now drives it over a real pty instead.
+
+    One byte at a time, extended only for an escape sequence or a multi-byte
+    UTF-8 character. Reading a larger chunk would be fewer syscalls and is
+    wrong: two keypresses already waiting in the tty buffer — typed quickly,
+    or arriving while the menu redrew — would come back merged into one
+    string that matches no key, and both would be dropped. The poll covers an
+    escape sequence split across reads, as one can be over a slow link."""
+    fd = sys.stdin.fileno()
+    data = os.read(fd, 1)
+    if data == ESC.encode():
+        while data in _PARTIAL_ESCAPES and _select.select([fd], [], [], _ESCAPE_TIMEOUT)[0]:
+            data += os.read(fd, 1)
+    elif data and (extra := _utf8_continuation_bytes(data[0])):
+        data += os.read(fd, extra)
+    return data.decode("utf-8", errors="replace")
 
 
 def _menu(options: list[Option], cursor: int, title: str | None, hint: str) -> Group:
@@ -142,15 +218,18 @@ def select(
 
     cursor = _index_of(options, default)
     hint = "↑/↓ move · enter choose · esc reject"
-    with Live(_menu(options, cursor, title, hint), console=console, auto_refresh=False) as live:
+    with (
+        raw_mode(),
+        Live(_menu(options, cursor, title, hint), console=console, auto_refresh=False) as live,
+    ):
         while True:
             try:
                 key = read_key()
             except (KeyboardInterrupt, EOFError):
                 key = CTRL_C
-            if key in (UP, "k"):
+            if key in UP or key == "k":
                 cursor = (cursor - 1) % len(options)
-            elif key in (DOWN, "j"):
+            elif key in DOWN or key == "j":
                 cursor = (cursor + 1) % len(options)
             elif key in (ESC, CTRL_C):
                 # Same answer a typed "r" gives: reject this proposal and
@@ -214,17 +293,20 @@ def multiselect(choices: list[Choice], *, title: str) -> list[int] | None:
 
     checked = [c.checked for c in choices]
     cursor = 0
-    with Live(
-        _checklist(choices, checked, cursor, title), console=console, auto_refresh=False
-    ) as live:
+    with (
+        raw_mode(),
+        Live(
+            _checklist(choices, checked, cursor, title), console=console, auto_refresh=False
+        ) as live,
+    ):
         while True:
             try:
                 key = read_key()
             except (KeyboardInterrupt, EOFError):
                 key = CTRL_C
-            if key in (UP, "k"):
+            if key in UP or key == "k":
                 cursor = (cursor - 1) % len(choices)
-            elif key in (DOWN, "j"):
+            elif key in DOWN or key == "j":
                 cursor = (cursor + 1) % len(choices)
             elif key == SPACE:
                 checked[cursor] = not checked[cursor]

@@ -318,13 +318,62 @@ tests for what it introduces.
 - `pytest` reports 354 passing tests repo-wide; `ruff format --check .`, `ruff check .`, and
   `ty check` each report no findings.
 
+---
+
+# 2026-09-04: Arrow Keys Read as Escape — Fixed
+
+## Current State
+
+- The first real-terminal run of `prompt_ui.select` exited on the Down arrow: `read_key` returned a
+  bare `"\x1b"`, which `select` answers as `"r"` (reject), ending the request with nothing written.
+- Cause: `sys.stdin` is a buffered `TextIOWrapper`, and `sys.stdin.read(1)` on a terminal decodes
+  every byte already available into the wrapper's own buffer before returning the first — a Down
+  arrow's `\x1b[B` arrives in one burst, so after `"\x1b"` came back the `"[B"` sat in Python's
+  buffer while `select.select`, which polls the file descriptor, saw nothing pending. Reproduced
+  directly against a `pty.openpty()` pair before the fix was written.
+- `prompt_ui.read_key` reads the file descriptor with `os.read(fd, 1)` instead, extending the read
+  only for an escape sequence (polling `_ESCAPE_TIMEOUT` per byte while the accumulated bytes are
+  still a prefix in `_PARTIAL_ESCAPES`) or a multi-byte UTF-8 character
+  (`_utf8_continuation_bytes`).
+- `read_key` reads one byte rather than a chunk — a chunked read returns two keypresses already in
+  the tty buffer as one merged string that matches no option, dropping both
+  (`test_two_keypresses_arriving_together_are_read_separately`, tests/test_prompt_ui_pty.py).
+- `prompt_ui.UP` and `prompt_ui.DOWN` are tuples carrying both cursor-key encodings — `ESC [ A`/`B`
+  and the application-cursor-mode `ESC O A`/`B` a terminal in DECCKM (tmux among others) sends.
+- `prompt_ui.raw_mode` is a context manager held across a whole `select`/`multiselect` loop rather
+  than re-entered per keypress: restoring canonical mode between reads let a keystroke arriving
+  during a redraw be echoed and line-buffered by the tty.
+- `raw_mode` calls `tty.setcbreak(fd, termios.TCSAFLUSH)`, not `tty.setraw` — `setraw` also clears
+  `OPOST`, which is what maps `\n` to `\r\n` on output, so every line `rich.live.Live` redrew
+  inside it would staircase. `TCSAFLUSH` discards input queued before the mode change, so a
+  keystroke typed during the seconds of model inference before a plan appeared is not counted as a
+  decision about it.
+- `prompt_ui.interactive` probes `termios.tcgetattr(sys.stdin.fileno())` alongside the two
+  `isatty()` checks, so a stdin that claims to be a terminal but has no readable attributes falls
+  back to the typed prompt instead of raising inside `raw_mode` mid-decision.
+- `tests/test_prompt_ui_pty.py` (12 tests) drives `read_key`, `select`, and `multiselect` over a
+  `pty.openpty()` pair with `os.fdopen(slave, "r")` as `sys.stdin` — the same buffered wrapper the
+  bug lived in. Four of them fail against the previous `read_key`, verified by reinstating it.
+- `tests/test_prompt_ui.py`'s scripted-keypress tests stub `raw_mode` to `contextlib.nullcontext`
+  alongside `interactive`/`read_key`: pytest's captured stdin has no terminal attributes to set,
+  and those tests are about what a keypress means, not how it is read.
+- `pytest` reports 367 passing tests repo-wide; `ruff format --check .`, `ruff check .`, and
+  `ty check` each report no findings.
+
+## Missing
+
+- No test covers `select`'s `Live` redraw itself — the pty tests assert what `select` returns, not
+  what it drew.
+- `multiselect` still has no non-TTY path (unchanged from the entry above).
+
 ## Missing
 
 - No real-model run exercises any of this — every test drives a scripted `SendsCompletions` or a
   `_FakeAgentRunner`, and no `sumac ask` invocation against a real GGUF is recorded in this entry.
 - No test drives `prompt_ui` against a real terminal: `interactive()` is monkeypatched to True and
   `read_key` replaced, so `termios.tcgetattr`/`tty.setraw` and the `rich.live.Live` redraw are
-  exercised by no test.
+  exercised by no test — the arrow-key failure that gap allowed, and the pty tests added for it,
+  are recorded in the entry below.
 - `prompt_ui.multiselect` has no non-TTY path — `cli._decide_prompt` omits the `p` option entirely
   when `interactive()` is False, so a pipe and a script cannot apply a subset of a compound plan.
 - `llm._effects` projects each write against the inventory that write's own `_propose_write` call

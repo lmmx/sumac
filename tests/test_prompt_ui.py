@@ -11,6 +11,7 @@ what `select`/`multiselect` return, which is the whole of their contract to
 from __future__ import annotations
 
 from collections.abc import Iterator
+from contextlib import nullcontext
 
 import pytest
 
@@ -18,7 +19,12 @@ from sumac import prompt_ui
 
 
 def _keys(monkeypatch: pytest.MonkeyPatch, *presses: str) -> None:
+    """Drives the menu's logic with the terminal itself stubbed out: pytest's
+    stdin has no attributes to put in key mode, and what these tests are about
+    is what a keypress *means*, not how it is read. `tests/
+    test_prompt_ui_pty.py` covers the reading, over a real pty."""
     monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
+    monkeypatch.setattr(prompt_ui, "raw_mode", nullcontext)
     stream: Iterator[str] = iter(presses)
     monkeypatch.setattr(prompt_ui, "read_key", lambda: next(stream))
 
@@ -56,12 +62,12 @@ def test_enter_takes_the_default_row(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_arrow_down_then_enter_takes_the_next_row(monkeypatch: pytest.MonkeyPatch) -> None:
-    _keys(monkeypatch, prompt_ui.DOWN, "\r")
+    _keys(monkeypatch, prompt_ui.DOWN[0], "\r")
     assert prompt_ui.select(OPTIONS, default="a") == "r"
 
 
 def test_arrow_up_wraps_to_the_last_row(monkeypatch: pytest.MonkeyPatch) -> None:
-    _keys(monkeypatch, prompt_ui.UP, "\r")
+    _keys(monkeypatch, prompt_ui.UP[0], "\r")
     monkeypatch.setattr(prompt_ui.typer, "prompt", lambda *a, **k: "try again with the jam")
 
     assert prompt_ui.select(OPTIONS, default="a") == "try again with the jam"
@@ -92,7 +98,7 @@ def test_ctrl_c_rejects(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_choosing_the_text_row_returns_what_was_typed(monkeypatch: pytest.MonkeyPatch) -> None:
-    _keys(monkeypatch, prompt_ui.DOWN, prompt_ui.DOWN, prompt_ui.DOWN, "\r")
+    _keys(monkeypatch, prompt_ui.DOWN[0], prompt_ui.DOWN[0], prompt_ui.DOWN[0], "\r")
     monkeypatch.setattr(prompt_ui.typer, "prompt", lambda *a, **k: "  it's the other jam  ")
 
     assert prompt_ui.select(OPTIONS, default="a") == "it's the other jam"
@@ -115,12 +121,12 @@ def test_multiselect_starts_with_everything_checked(monkeypatch: pytest.MonkeyPa
 
 
 def test_space_unchecks_the_row_under_the_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
-    _keys(monkeypatch, prompt_ui.DOWN, " ", "\r")
+    _keys(monkeypatch, prompt_ui.DOWN[0], " ", "\r")
     assert prompt_ui.multiselect(CHOICES, title="t") == [0, 2]
 
 
 def test_n_then_space_selects_exactly_one(monkeypatch: pytest.MonkeyPatch) -> None:
-    _keys(monkeypatch, "n", prompt_ui.DOWN, prompt_ui.DOWN, " ", "\r")
+    _keys(monkeypatch, "n", prompt_ui.DOWN[0], prompt_ui.DOWN[0], " ", "\r")
     assert prompt_ui.multiselect(CHOICES, title="t") == [2]
 
 
