@@ -325,9 +325,9 @@ three recorded failure modes checkable without a judge:
 ```python
 @dataclass(frozen=True, slots=True)
 class TraceExpectation:
-    called: tuple[str, ...] = ()          # never-searched
+    called: tuple[str, ...] = ()  # never-searched
     not_called: tuple[str, ...] = ()
-    max_calls: Mapping[str, int] = ()     # duplicate-search
+    max_calls: Mapping[str, int] = ()  # duplicate-search
     reply_mentions: tuple[str, ...] = ()  # wrong-product-from-unranked-results
     reply_before: tuple[tuple[str, str], ...] = ()
     reply_amount: tuple[Decimal, str] | None = None
@@ -1058,8 +1058,8 @@ that scored at or above 82% and dropping every one at or below 50%:
 
 ```python
 MODEL_PRESETS: tuple[ModelPreset, ...] = (
-    ModelPreset("qwen3.5-4b", ...),   # default — 95%
-    ModelPreset("qwen3.5-2b", ...),   # 82%
+    ModelPreset("qwen3.5-4b", ...),  # default — 95%
+    ModelPreset("qwen3.5-2b", ...),  # 82%
     ModelPreset("lfm2.5-2.6b", ...),  # 82%
 )
 ```

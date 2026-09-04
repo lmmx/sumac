@@ -115,9 +115,14 @@ def test_discriminator_variant_not_confused(agent, cfg, result) -> None:
     plan = agent.propose("Add 2 more packs of Unsalted Butter, with the existing stock")
     evaluate_classification(result, plan, QueryKind.ADD)
     evaluate_write(
-        result, plan, cfg,
-        kind=ChangeKind.DISCOVERY, product_id="Unsalted Butter",
-        amount="2", unit="packs", to_location="freezer-drawer-2",
+        result,
+        plan,
+        cfg,
+        kind=ChangeKind.DISCOVERY,
+        product_id="Unsalted Butter",
+        amount="2",
+        unit="packs",
+        to_location="freezer-drawer-2",
     )
     assert result.passed, result.failures
 ```
