@@ -127,7 +127,15 @@ sumac ask "where is the rice?" --stats              # per-round token counts and
 sumac ask "find the butter" --stats --trace        # both, i.e. what was printed unconditionally before
 ```
 
-`--debug` (raw per-round request/response dumps) implies `--stats`.
+`--debug` (raw per-round request/response dumps) implies `--stats`, and also restores mistral.rs's
+own load logs — the DType, tokenizer, device map and the whole GGUF chat template — which are
+otherwise suppressed. They're Rust `tracing` output filtered by `RUST_LOG`, so set that yourself for
+anything finer, and sumac won't override it:
+
+```sh
+RUST_LOG=info sumac ask "find the butter"                              # all of it, without --debug
+RUST_LOG=mistralrs_core::gguf::chat_template=off,info sumac ask "..."  # everything but the template
+```
 
 To iterate on the review screens themselves without loading a model:
 

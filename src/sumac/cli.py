@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from dataclasses import replace as dataclass_replace
@@ -68,11 +69,36 @@ def _key(data_dir: Path) -> bytes:
     return get_key(_load_vault(data_dir))
 
 
-def _import_llm():  # noqa: ANN202
+# mistral.rs logs through Rust's `tracing` with an `EnvFilter` built from
+# `RUST_LOG` (confirmed against the built extension: it carries the `RUST_LOG`
+# string and `tracing_subscriber::filter::env` symbols from `mistralrs_core`).
+# Every line it prints on a successful load — the DType, the tokenizer, the
+# device map, the version, and the entire GGUF chat template verbatim, a
+# screen of Jinja on its own — is INFO, so `warn` drops all of it and still
+# shows anything that actually went wrong.
+QUIET_RUST_LOG = "warn"
+VERBOSE_RUST_LOG = "info"
+
+
+def _set_rust_log(verbose: bool) -> None:
+    """Chooses how much mistral.rs itself prints. Must run before the
+    extension module is first imported — the filter is built once, when the
+    Rust side installs its subscriber — which is why this sits next to the
+    lazy import rather than anywhere the flag is parsed.
+
+    A `RUST_LOG` already in the environment is never overridden: someone who
+    set it wants exactly what they asked for, including a per-target filter
+    finer than either value here."""
+    if "RUST_LOG" not in os.environ:
+        os.environ["RUST_LOG"] = VERBOSE_RUST_LOG if verbose else QUIET_RUST_LOG
+
+
+def _import_llm(*, verbose: bool = False):  # noqa: ANN202
     """`sumac.llm` imports `mistralrs` at module scope, which is an optional
     dependency (the `ask`/`ask-cuda` groups) — every command that touches
     model presets imports it here, lazily, instead of at the top of this
     module, so the rest of the CLI works without it installed."""
+    _set_rust_log(verbose)
     try:
         from sumac import llm
     except ImportError as e:
@@ -444,7 +470,10 @@ def ask(
     ] = False,
     debug: Annotated[
         bool,
-        typer.Option("--debug", help="Show raw agent request/response diagnostics."),
+        typer.Option(
+            "--debug",
+            help="Show raw agent request/response diagnostics, and mistral.rs's own load logs.",
+        ),
     ] = False,
     data_dir: DataDirOption = Path("data"),
 ) -> None:
@@ -470,7 +499,7 @@ def ask(
     pending and "retry N" revisits one.
     """
     key = _key(data_dir)
-    llm = _import_llm()
+    llm = _import_llm(verbose=debug)
     view = _AskView(trace=trace, stats=stats, debug=debug)
 
     if prompt is None or loop:
@@ -1077,7 +1106,9 @@ def models_pull(
     `sumac ask` relies on, without needing to run `sumac ask` once per
     model and pick it from the "g" regenerate prompt. Already-cached
     presets are skipped."""
-    llm = _import_llm()
+    # The one command whose whole job is a long model load: mistral.rs's own
+    # progress is the only sign it is working, so this keeps it.
+    llm = _import_llm(verbose=True)
     targets = list(llm.MODEL_PRESETS)
     if names:
         try:

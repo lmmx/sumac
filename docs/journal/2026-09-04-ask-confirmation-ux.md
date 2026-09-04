@@ -320,6 +320,42 @@ tests for what it introduces.
 
 ---
 
+# 2026-09-04: mistral.rs's Own Load Logs Quieted
+
+## Current State
+
+- Every `sumac ask` invocation printed mistral.rs's load logs above its own output — the DType, the
+  GGUF tokenizer summary, the device map, the version and git revision, the PTX preload, the
+  modalities, the prefix-caching notice, and the discovered GGUF chat template in full: several
+  hundred lines of Jinja on one line, wider than any terminal.
+- mistral.rs logs through Rust's `tracing` with a filter built from `RUST_LOG` — confirmed against
+  the built extension (`.venv/.../mistralrs.abi3.so` carries the `RUST_LOG` string and
+  `tracing_subscriber::filter::env::builder::Builder` symbols from `mistralrs_core`), not assumed
+  from its documentation.
+- Every line in that load output is `INFO`, so `cli.QUIET_RUST_LOG` is `"warn"` — the level that
+  drops all of it and still shows anything that actually went wrong. `cli.VERBOSE_RUST_LOG` is
+  `"info"`, reproducing the previous output exactly.
+- `cli._set_rust_log(verbose)` sets `RUST_LOG` and is called from `_import_llm`, immediately before
+  `from sumac import llm` — the filter is built once, when the Rust side installs its subscriber, so
+  a value set after the extension is first imported has no effect.
+- `_set_rust_log` never overrides a `RUST_LOG` already in the environment
+  (`test_an_existing_rust_log_is_never_overridden`, tests/test_cli.py), so a per-target filter finer
+  than either level stays available.
+- `sumac ask --debug` passes `verbose=True`, so the flag that shows the raw per-round dumps also
+  restores mistral.rs's own logs; `sumac models pull` passes `verbose=True` unconditionally, since
+  mistral.rs's progress is the only sign a multi-gigabyte download is proceeding.
+- `pytest` reports 374 passing tests repo-wide; `ruff format --check .`, `ruff check .`, and
+  `ty check` each report no findings.
+
+## Missing
+
+- No test observes mistral.rs actually printing less — the three tests assert what `_set_rust_log`
+  puts in the environment, and nothing in the suite loads a real model.
+- `evals/` and the benchmark scripts import `sumac.llm` directly rather than through
+  `cli._import_llm`, so they are unaffected and still print mistral.rs's load logs.
+
+---
+
 # 2026-09-04: `e` Given the Same Menu as Every Other Decision
 
 ## Current State

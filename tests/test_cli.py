@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -13,7 +14,7 @@ from typer.testing import CliRunner
 
 from sumac import ledger, llm, paths, prompt_ui, queue, store
 from sumac import vault as sumac_vault
-from sumac.cli import _decision_options, _editable_fields, app
+from sumac.cli import _decision_options, _editable_fields, _set_rust_log, app
 from sumac.errors import RetireNonemptyError, VaultExistsError
 from sumac.models import ChangeKind
 
@@ -1298,3 +1299,35 @@ def test_edit_menu_offers_only_the_endpoints_a_write_has() -> None:
         "amount",
         "to_location",
     ]
+
+
+# --- mistral.rs's own logging ----------------------------------------------
+
+
+def test_rust_log_defaults_to_warn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every line mistral.rs prints on a successful load is INFO, including
+    the GGUF chat template in full — a screen of Jinja above the answer."""
+    monkeypatch.delenv("RUST_LOG", raising=False)
+
+    _set_rust_log(verbose=False)
+
+    assert os.environ["RUST_LOG"] == "warn"
+
+
+def test_rust_log_is_info_when_verbose(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("RUST_LOG", raising=False)
+
+    _set_rust_log(verbose=True)
+
+    assert os.environ["RUST_LOG"] == "info"
+
+
+def test_an_existing_rust_log_is_never_overridden(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Someone who set it wants exactly what they asked for — including a
+    per-target filter finer than either value this module chooses between."""
+    monkeypatch.setenv("RUST_LOG", "mistralrs_core::gguf::chat_template=off,info")
+
+    _set_rust_log(verbose=False)
+    _set_rust_log(verbose=True)
+
+    assert os.environ["RUST_LOG"] == "mistralrs_core::gguf::chat_template=off,info"
