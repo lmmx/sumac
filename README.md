@@ -137,6 +137,10 @@ RUST_LOG=info sumac ask "find the butter"                              # all of 
 RUST_LOG=mistralrs_core::gguf::chat_template=off,info sumac ask "..."  # everything but the template
 ```
 
+In `--loop` mode the model is loaded once, on the first request, and reused for the rest of the
+session — a fresh conversation per request, the same loaded model behind it. Switching model with
+`g` loads the new one and drops the old.
+
 To iterate on the review screens themselves without loading a model:
 
 ```sh

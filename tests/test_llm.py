@@ -17,6 +17,7 @@ dispatch itself, or a final plain-text reply with no further tool call.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -1212,3 +1213,99 @@ def test_an_auto_registering_write_projects_without_its_config_record(
     assert [(e.location_id, e.before, e.after) for e in write.effects] == [
         ("pantry", None, Decimal(2))
     ]
+
+
+# --- the shared backend ------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _release_shared_runner() -> Iterator[None]:
+    """No cached backend leaks between tests — one holding a fake would be
+    handed to whatever constructed an `AgentRunner` next."""
+    llm.release_shared_runner()
+    yield
+    llm.release_shared_runner()
+
+
+def _count_builds(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Records which model a backend is built for, without building one."""
+    built: list[str] = []
+
+    def fake_build(model: llm.ModelPreset, *, seed: int | None = None) -> object:
+        built.append(model.name)
+        return FakeRunner([])
+
+    monkeypatch.setattr(llm, "_build_runner", fake_build)
+    return built
+
+
+def test_a_second_agent_reuses_the_loaded_model(
+    data_dir: Path, key: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`sumac ask --loop` constructs one `AgentRunner` per request — each is
+    its own conversation — and without reuse each also reloaded the GGUF."""
+    built = _count_builds(monkeypatch)
+
+    llm.AgentRunner(data_dir, key)
+    llm.AgentRunner(data_dir, key)
+
+    assert built == [llm.DEFAULT_MODEL_PRESET.name]
+
+
+def test_switching_model_loads_the_other_one(
+    data_dir: Path, key: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built = _count_builds(monkeypatch)
+    other = llm.MODEL_PRESETS[1]
+
+    llm.AgentRunner(data_dir, key)
+    llm.AgentRunner(data_dir, key, model=other)
+    llm.AgentRunner(data_dir, key, model=other)
+
+    assert built == [llm.DEFAULT_MODEL_PRESET.name, other.name]
+
+
+def test_only_one_backend_is_held_at_a_time(
+    data_dir: Path, key: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two GGUFs resident at once is how switching models mid-session runs a
+    GPU out of memory that fits either alone — so switching back reloads
+    rather than finding the first still cached."""
+    built = _count_builds(monkeypatch)
+    other = llm.MODEL_PRESETS[1]
+
+    llm.AgentRunner(data_dir, key)
+    llm.AgentRunner(data_dir, key, model=other)
+    llm.AgentRunner(data_dir, key)
+
+    assert built == [llm.DEFAULT_MODEL_PRESET.name, other.name, llm.DEFAULT_MODEL_PRESET.name]
+
+
+def test_a_different_seed_is_a_different_backend(
+    data_dir: Path, key: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_build_runner` seeds the whole `mistralrs.Runner`, so a backend
+    built for one seed is not one built for another."""
+    built = _count_builds(monkeypatch)
+
+    llm.AgentRunner(data_dir, key, seed=1)
+    llm.AgentRunner(data_dir, key, seed=1)
+    llm.AgentRunner(data_dir, key, seed=2)
+
+    assert len(built) == 2
+
+
+def test_an_injected_backend_never_builds_or_caches(
+    data_dir: Path, key: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`evals/conftest.py` builds exactly one backend per run and injects it
+    into every scenario's agent; that path must not consult or populate this
+    module's cache."""
+    built = _count_builds(monkeypatch)
+    injected = FakeRunner([])
+
+    agent = llm.AgentRunner(data_dir, key, runner=injected)
+
+    assert agent._runner is injected
+    assert built == []
+    assert llm._SHARED_RUNNER is None

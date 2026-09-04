@@ -320,6 +320,46 @@ tests for what it introduces.
 
 ---
 
+# 2026-09-04: One Model Load Per Session, Not Per Request
+
+## Current State
+
+- `sumac ask --loop` built a fresh `mistralrs.Runner` for every request: `_ask_loop_request`
+  constructs an `AgentRunner` per request (deliberately — each request is its own conversation with
+  no memory of the last), and `AgentRunner.__init__` called `_build_runner` whenever no `runner` was
+  passed, so each request also reloaded the GGUF.
+- `llm.shared_runner(model, seed=None)` returns the most recently built backend when its
+  `(model.name, seed)` matches, and builds one otherwise; `AgentRunner.__init__` calls it instead of
+  `_build_runner` when no `runner` is injected.
+- `llm._SHARED_RUNNER` holds exactly one backend and is cleared before the next is built — two GGUFs
+  resident at once is how switching models mid-session exhausts a GPU that fits either alone.
+  Clearing drops this module's reference only; a caller still holding the previous `AgentRunner`
+  keeps that backend alive until it goes
+  (`test_only_one_backend_is_held_at_a_time`, tests/test_llm.py).
+- `llm.release_shared_runner()` drops the cached backend; nothing in `sumac ask` calls it, since a
+  session ends with the process.
+- An injected `runner` neither consults nor populates the cache, so `evals/conftest.py` — which has
+  built exactly one `base_runner` per run and passed it to every scenario's `AgentRunner` since the
+  eval suite existed — is unaffected
+  (`test_an_injected_backend_never_builds_or_caches`, tests/test_llm.py).
+- Reuse carries mistral.rs's RNG stream position and prefix cache across requests in one session, so
+  a request's sampling depends on what ran before it — the order-dependence
+  `docs/journal/2026-09-04-trace-and-verdict-redesign.md` records for the eval suite, which is why
+  that suite pins a seed and this does not need to.
+- `pytest` reports 379 passing tests repo-wide; `ruff format --check .`, `ruff check .`, and
+  `ty check` each report no findings.
+
+## Missing
+
+- No measurement of the saved latency is recorded — the five tests count `_build_runner` calls
+  against a monkeypatched builder, and nothing in the suite loads a real model.
+- Nothing preloads the model before the first `--loop` prompt, so the first request of a session
+  still pays the load with the person waiting at the prompt.
+- `sumac ask` without `--loop` handles one request per process, so the cache never serves a second
+  caller there.
+
+---
+
 # 2026-09-04: mistral.rs's Own Load Logs Quieted
 
 ## Current State

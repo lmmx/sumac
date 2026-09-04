@@ -829,6 +829,55 @@ def _build_runner(model: ModelPreset, *, seed: int | None = None) -> SendsComple
     return _LocalMistralRsBackend(runner)
 
 
+# The most recently built backend, and what it was built for. `sumac ask
+# --loop` constructs a fresh `AgentRunner` per request on purpose — each
+# request is its own conversation, with no memory of the last — but the model
+# behind it need not be reloaded to get that: `AgentRunner` keeps every piece
+# of per-request state (`_messages`, `_pending`, `_trace`) on itself, and a
+# request carries its whole history in `send_chat_completion_request`, so a
+# backend is stateless as far as this module is concerned. `evals/conftest.py`
+# has shared one `base_runner` across every scenario in a run since the eval
+# suite existed; this is the same reuse for the interactive loop.
+_SHARED_RUNNER: tuple[tuple[str, int | None], SendsCompletions] | None = None
+
+
+def shared_runner(model: ModelPreset, *, seed: int | None = None) -> SendsCompletions:
+    """A backend for `model`, reusing the last one when it matches — so a
+    `--loop` session loads the model once instead of once per request.
+
+    Holds exactly one, and drops it before building the next: two GGUFs
+    resident at once is how switching models mid-session runs a GPU out of
+    memory that fits either alone. Dropping this module's reference is all
+    this can do — a caller still holding the previous `AgentRunner` keeps its
+    backend alive until that goes too.
+
+    Reuse is visible in one way, and it is the same way `evals/` already
+    lives with: mistral.rs's RNG stream and prefix cache carry across
+    requests, so a request's sampling depends on what ran before it in the
+    session (docs/journal/2026-09-04-trace-and-verdict-redesign.md). That
+    costs an interactive session nothing — nobody is comparing two runs of
+    it — and "regenerate" still resamples, since the stream has moved on.
+
+    Not what `AgentRunner` does by default: it still builds its own backend
+    unless handed one, so `evals/` and the benchmark scripts keep deciding
+    for themselves when a model is loaded."""
+    global _SHARED_RUNNER
+    cache_key = (model.name, seed)
+    if _SHARED_RUNNER is not None and _SHARED_RUNNER[0] == cache_key:
+        return _SHARED_RUNNER[1]
+    _SHARED_RUNNER = None
+    _SHARED_RUNNER = (cache_key, _build_runner(model, seed=seed))
+    return _SHARED_RUNNER[1]
+
+
+def release_shared_runner() -> None:
+    """Drops the cached backend. For a caller that knows it is done with the
+    model — nothing in `sumac ask` currently is, since a session ends with
+    the process."""
+    global _SHARED_RUNNER
+    _SHARED_RUNNER = None
+
+
 def _effects(
     inventory: ledger.Inventory,
     cfg: config.Config,
@@ -878,10 +927,12 @@ def _effects(
 class AgentRunner:
     """`data_dir`/`key` are closed over by the tool callbacks below,
     matching `cli.py`'s existing `AgentRunner(data_dir, key)` construction.
-    Pass `runner` to substitute a fake `SendsCompletions` in tests instead
-    of building a real `mistralrs.Runner`. Tool calls are dispatched by
-    this class itself, client-side — see the module docstring — rather
-    than registered on the `Runner`."""
+    Pass `runner` to substitute a fake `SendsCompletions` in tests, or a
+    backend of the caller's own, instead of the shared one this otherwise
+    builds (`shared_runner`) — which is reused across instances rather than
+    loading the model again for each. Tool calls are dispatched by this
+    class itself, client-side — see the module docstring — rather than
+    registered on the `Runner`."""
 
     def __init__(
         self,
@@ -941,8 +992,14 @@ class AgentRunner:
             "sumac_move_inventory": self._sumac_move_inventory,
             "sumac_discover_inventory": self._sumac_discover_inventory,
         }
+        # `shared_runner`, not `_build_runner`: `sumac ask --loop` builds a
+        # fresh `AgentRunner` per request — each request is its own
+        # conversation — and reloading the GGUF for each of them put seconds
+        # of latency in front of a person already waiting. A caller needing
+        # a backend of its own passes one; `evals/conftest.py` builds
+        # exactly one per run that way and has since the suite existed.
         self._runner: SendsCompletions = (
-            runner if runner is not None else _build_runner(model, seed=seed)
+            runner if runner is not None else shared_runner(model, seed=seed)
         )
 
     @property
