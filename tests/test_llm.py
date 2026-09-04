@@ -235,6 +235,19 @@ def test_classify_reject_short_circuits_without_running_domain_loop(
     # sent, since there is no kind to scope one to.
     assert len(fake.requests) == 1
     assert [t.name for t in plan.trace] == ["classify_request"]
+    # No domain loop ever ran, so there's no domain conversation to show —
+    # but the classifier's own exchange survives, rather than being
+    # discarded along with `self._messages`.
+    assert agent.messages is None
+    assert agent.classify_messages is not None
+    assert agent.classify_messages[0] == {
+        "role": "system",
+        "content": agent.prompt_variant.classifier_prompt,
+    }
+    assert agent.classify_messages[1] == {
+        "role": "user",
+        "content": "what's the capital of France?",
+    }
 
 
 def test_revise_after_reject_raises(data_dir: Path, key: bytes, osuser: str) -> None:
@@ -473,6 +486,7 @@ def test_add_request_with_no_writes_forces_one_more_round(
     assert plan.writes[0].product_id == "Widgets"
     # classify + narrated-no-op round + forced round's two rounds + self-review.
     assert len(fake.requests) == 5
+    assert agent.nudge_fired is True
 
 
 def test_add_request_still_producing_no_writes_after_the_forced_round_gives_up(
@@ -493,6 +507,10 @@ def test_add_request_still_producing_no_writes_after_the_forced_round_gives_up(
     assert plan.writes == ()
     assert plan.reply_text == "Still not adding it."
     assert len(fake.requests) == 3
+    # The nudge fired even though it didn't change the outcome — distinct
+    # from "never attempted," which the human's own retry/feedback loop
+    # needs to be able to tell apart.
+    assert agent.nudge_fired is True
 
 
 def test_missing_required_argument_names_what_was_missing_and_received(
@@ -889,7 +907,7 @@ def test_run_loop_appends_lfm_formatted_assistant_message_when_configured(
     reaches `_run_loop`'s message history, not just that `_render_tool_call`
     produces the right string in isolation — `mistralrs.ChatCompletionRequest`
     is an opaque Rust object with no readable `.messages` attribute, so this
-    checks `AgentRunner`'s own accumulated `self._messages` instead."""
+    checks `AgentRunner.messages` (its own accumulated conversation) instead."""
     # A throwaway preset, not a real registry lookup — this test only needs
     # `tool_call_format=LFM` to reach `_run_loop`; it never touches a real
     # GGUF, and the registry itself (`llm.MODEL_PRESETS`) may not carry an
@@ -905,15 +923,94 @@ def test_run_loop_appends_lfm_formatted_assistant_message_when_configured(
 
     agent.propose("where is the jam?")
 
-    assert agent._messages is not None
+    assert agent.messages is not None
     tool_call_messages = [
         m
-        for m in agent._messages
+        for m in agent.messages
         if m["role"] == "assistant" and "<|tool_call_start|>" in m["content"]
     ]
     assert len(tool_call_messages) == 1
     assert "sumac_find_inventory" in tool_call_messages[0]["content"]
     assert "<tool_call>" not in tool_call_messages[0]["content"]
+
+
+def test_messages_is_none_before_propose(data_dir: Path, key: bytes, osuser: str) -> None:
+    agent, _fake = _make_agent([], data_dir, key)
+    assert agent.messages is None
+    assert agent.classify_messages is None
+
+
+def test_nudge_not_fired_when_the_first_round_already_writes(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    config.add_location(data_dir, key, osuser, Location(id="pantry", name="Pantry"))
+    responses = [
+        _classify_round("add"),
+        _tool_round(
+            "sumac_discover_inventory",
+            {"product_id": "Widgets", "amount": "1", "unit": "box", "to_location": "pantry"},
+        ),
+        _final_round("added"),
+        _final_round("confirmed"),
+    ]
+    agent, _fake = _make_agent(responses, data_dir, key)
+
+    agent.propose("add 1 box of widgets to the pantry")
+
+    assert agent.nudge_fired is False
+
+
+def test_terminal_is_round_cap_when_max_tool_rounds_exhausted(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    """A `find`-classified request (never subject to `_maybe_force_action`)
+    that keeps calling a tool and never produces a final reply — `_run_loop`
+    falls through its `for` loop instead of returning early, which
+    `reply_text == ""` alone can't be told apart from a genuine empty
+    text reply."""
+    _seed_pantry_with_jam(data_dir, key, osuser)
+    responses = [_classify_round("find")] + [
+        _tool_round("sumac_find_inventory", {"query": "jam"}) for _ in range(llm.MAX_TOOL_ROUNDS)
+    ]
+    agent, fake = _make_agent(responses, data_dir, key)
+
+    plan = agent.propose("where is the jam?")
+
+    assert plan.reply_text == ""
+    assert agent.terminal == "round_cap"
+    assert len(fake.requests) == 1 + llm.MAX_TOOL_ROUNDS
+
+
+def test_terminal_is_reply_for_an_ordinary_final_round(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    responses = [_classify_round("find"), _final_round("the jam is in the pantry")]
+    agent, _fake = _make_agent(responses, data_dir, key)
+
+    agent.propose("where is the jam?")
+
+    assert agent.terminal == "reply"
+
+
+def test_classify_messages_captures_the_classifier_round(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    responses = [_classify_round("find"), _final_round("the jam is in the pantry")]
+    agent, _fake = _make_agent(responses, data_dir, key)
+
+    agent.propose("where is the jam?")
+
+    assert agent.classify_messages is not None
+    assert agent.classify_messages[0] == {
+        "role": "system",
+        "content": agent.prompt_variant.classifier_prompt,
+    }
+    assert agent.classify_messages[1] == {"role": "user", "content": "where is the jam?"}
+    assert agent.classify_messages[2]["role"] == "assistant"
+    # Distinct from `messages`, which never sees the classifier's own
+    # system prompt — `propose()` replaces it with the kind-specific one.
+    assert agent.messages is not None
+    assert agent.messages[0]["content"] != agent.classify_messages[0]["content"]
 
 
 # --- sampling configuration (docs/journal/2026-09-02-eval-suite.md) ------

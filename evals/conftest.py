@@ -194,6 +194,13 @@ def agent(agent_runner_factory, result):
     result.trace = [
         {"name": t.name, "arguments": t.arguments, "result": t.result} for t in a.trace_history
     ]
+    result.messages = list(a.messages) if a.messages is not None else None
+    result.classify_messages = (
+        list(a.classify_messages) if a.classify_messages is not None else None
+    )
+    result.usage_history = list(a.usage_history)
+    result.terminal = a.terminal
+    result.nudge_fired = a.nudge_fired
 
 
 # --- per-scenario results ---------------------------------------------------
@@ -285,6 +292,11 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
                     "duration_s": r.duration_s,
                     "tokens_per_sec": r.tokens_per_sec,
                     "trace": r.trace,
+                    "messages": r.messages,
+                    "classify_messages": r.classify_messages,
+                    "usage_history": r.usage_history,
+                    "terminal": r.terminal,
+                    "nudge_fired": r.nudge_fired,
                 }
                 for r in results
             ],

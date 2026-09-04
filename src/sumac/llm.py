@@ -689,6 +689,10 @@ class AgentRunner:
         self._pending: list[ProposedWrite] = []
         self._trace: list[ToolCallRecord] = []
         self._trace_history: list[ToolCallRecord] = []
+        self._classify_messages: list[dict[str, str]] | None = None
+        self._usage_history: list[dict[str, float | int]] = []
+        self._terminal: str = "reply"
+        self._nudge_fired: bool = False
         self._completion_tokens = 0
         self._generation_time_sec = 0.0
         self.tool_callbacks: dict[str, Callable[[str, dict], str]] = {
@@ -745,6 +749,53 @@ class AgentRunner:
         fixture) is what scopes it to one scenario's full history, feedback
         rounds included."""
         return tuple(self._trace_history)
+
+    @property
+    def messages(self) -> tuple[dict[str, str], ...] | None:
+        """The full domain-loop conversation `_run_loop` sent/received,
+        across every `propose()`/`revise()` call this instance has made —
+        `None` before `propose()` has run, or after a REJECT-classified
+        request (`propose()` never builds a domain-loop conversation for
+        one; see `classify_messages` for what a REJECT still produces).
+        `trace_history` records each tool call's outcome; this is the raw
+        wire-shaped history — including a plain-text-only reply, which
+        never produces a `ToolCallRecord` — it was recorded from. See
+        docs/journal/2026-09-04-trace-and-verdict-redesign.md."""
+        return tuple(self._messages) if self._messages is not None else None
+
+    @property
+    def classify_messages(self) -> tuple[dict[str, str], ...] | None:
+        """The classifier round's own system/user/assistant messages.
+        `_classify` sends a different system prompt on its own request, so
+        its conversation never becomes part of `self._messages` — `None`
+        before `propose()` has run, populated even when it rejects."""
+        return tuple(self._classify_messages) if self._classify_messages is not None else None
+
+    @property
+    def usage_history(self) -> tuple[dict[str, float | int], ...]:
+        """Per-round token/timing numbers, in request order, across every
+        round this instance has sent (the classifier round tagged
+        `round=0`) — unlike `tokens_per_sec`'s running totals, this keeps
+        each round's own numbers, which reasoning about the RNG stream's
+        position needs and a running total can't reconstruct."""
+        return tuple(self._usage_history)
+
+    @property
+    def terminal(self) -> str:
+        """How the most recently completed `_run_loop` call ended:
+        `"reply"` (a round produced no tool call) or `"round_cap"`
+        (`MAX_TOOL_ROUNDS` exhausted with no final reply) — both currently
+        return `reply_text=""` from `_run_loop`, indistinguishable without
+        this."""
+        return self._terminal
+
+    @property
+    def nudge_fired(self) -> bool:
+        """Whether `_maybe_force_action` appended `empty_plan_nudge` and
+        re-ran the loop, at any point across this instance's calls —
+        previously derivable only by reading `_maybe_force_action`'s guard
+        clause against `checks.writes` after the fact."""
+        return self._nudge_fired
 
     def _record_call(self, record: ToolCallRecord) -> None:
         self._trace.append(record)
@@ -930,6 +981,14 @@ class AgentRunner:
             return
         self._completion_tokens += usage.completion_tokens
         self._generation_time_sec += usage.total_time_sec
+        self._usage_history.append(
+            {
+                "round": round_num,
+                "prompt_tokens": usage.prompt_tokens,
+                "completion_tokens": usage.completion_tokens,
+                "total_time_sec": usage.total_time_sec,
+            }
+        )
 
     def _classify(self, prompt: str) -> QueryKind:
         """One single-purpose call, made before the model sees any domain
@@ -945,12 +1004,23 @@ class AgentRunner:
         self._record_usage(response, 0)
         message = response.choices[0].message
         if not message.tool_calls:
+            messages.append({"role": "assistant", "content": message.content or ""})
+            self._classify_messages = messages
             self._record_call(
                 ToolCallRecord(name="classify_request", arguments={}, result=message.content or "")
             )
             return QueryKind.REJECT
         call = message.tool_calls[0].function
         args = json.loads(call.arguments)
+        messages.append(
+            {
+                "role": "assistant",
+                "content": _render_tool_call(
+                    call.name, args, call.arguments, self._model.tool_call_format
+                ),
+            }
+        )
+        self._classify_messages = messages
         self._record_call(
             ToolCallRecord(name="classify_request", arguments=args, result=json.dumps(args))
         )
@@ -991,6 +1061,7 @@ class AgentRunner:
 
             if not message.tool_calls:
                 self._messages.append({"role": "assistant", "content": message.content or ""})
+                self._terminal = "reply"
                 return AgentPlan(reply_text=message.content or "", writes=tuple(self._pending))
 
             call = message.tool_calls[0].function
@@ -1020,6 +1091,7 @@ class AgentRunner:
         # Round cap reached with no final reply — the accumulated plan (if
         # any) is still returned rather than raised, since the cap is a
         # termination guarantee, not a success condition.
+        self._terminal = "round_cap"
         return AgentPlan(reply_text="", writes=tuple(self._pending))
 
     def _maybe_force_action(self, plan: AgentPlan) -> AgentPlan:
@@ -1038,6 +1110,7 @@ class AgentRunner:
             return plan
         assert self._messages is not None
         self._messages.append({"role": "user", "content": self._prompt_variant.empty_plan_nudge})
+        self._nudge_fired = True
         return self._run_loop()
 
     def _maybe_self_review(self, plan: AgentPlan) -> AgentPlan:
