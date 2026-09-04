@@ -23,7 +23,7 @@
 set -euo pipefail
 
 MODEL=qwen3.5-9b
-EPOCHS=10
+EPOCHS=5
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
