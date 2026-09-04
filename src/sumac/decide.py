@@ -147,15 +147,29 @@ def _resolve_product(
 ) -> _ResolvedProduct:
     """Unknown products auto-register rather than reject — §3.5a: the real
     log is ~469 distinct products, 75% bought only once, so a fixed registry
-    maintained by hand doesn't fit this household's actual usage."""
+    maintained by hand doesn't fit this household's actual usage.
+
+    A known product's write in a unit with no canonical match or
+    `conversions` entry is accepted too, not rejected — the same
+    accept-with-confirmation shape as auto-registration above. A bag and a
+    jug of rice aren't a fixed ratio the way jar-to-grams is, so there's no
+    conversion to demand before recording what was actually said; product
+    identity stays `product_id` in both units. See
+    docs/journal/2026-09-04-basmati-rice-unit-mismatch.md — this used to be
+    `Rejected("unit_unconvertible", ...)`, which just pushed the model into
+    fabricating a second product identity to route around the rejection."""
     if product_id in cfg.active_products:
         result = cfg.convert_with_basis(product_id, amount, unit)
-        if result is None:
-            raise Rejected(
-                "unit_unconvertible", value=unit, expected=cfg.active_products[product_id].unit
-            )
-        canon, basis = result
-        return _ResolvedProduct(canon, basis, (), None)
+        if result is not None:
+            canon, basis = result
+            return _ResolvedProduct(canon, basis, (), None)
+        product = cfg.active_products[product_id]
+        warning = (
+            f"{unit!r} has no registered conversion to {product_id!r}'s canonical "
+            f"unit {product.unit!r} — recording {amount} {unit} as its own "
+            f"tracked quantity rather than converting it."
+        )
+        return _ResolvedProduct(Quantity(amount, unit), None, (), warning)
 
     known = cfg.known_products.get(product_id)
     if known is not None and known.retired:
