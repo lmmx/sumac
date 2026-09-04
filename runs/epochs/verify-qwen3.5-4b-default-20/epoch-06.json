@@ -1,0 +1,481 @@
+{
+  "model": "qwen3.5-4b",
+  "prompt_variant": "default",
+  "seed": 6,
+  "scenario_order": [
+    "evals/test_remove.py::test_move_explicit",
+    "evals/test_find.py::test_shared_word_picks_right_product",
+    "evals/test_find.py::test_quantity",
+    "evals/test_remove.py::test_move_vague_asks_or_acts",
+    "evals/test_add.py::test_duplicate_search_bounded",
+    "evals/test_reject.py::test_joke_with_inventory_word",
+    "evals/test_add.py::test_discriminator_variant_not_confused",
+    "evals/test_remove.py::test_all",
+    "evals/test_reject.py::test_gibberish",
+    "evals/test_find.py::test_uses_only_find_tool",
+    "evals/test_add.py::test_odd_destination_respected",
+    "evals/test_find.py::test_missing_item",
+    "evals/test_add.py::test_product_with_omitted_amount",
+    "evals/test_add.py::test_ambiguous_product_asks_or_acts",
+    "evals/test_find.py::test_existing_item",
+    "evals/test_add.py::test_basmati_rice_in_different_unit",
+    "evals/test_add.py::test_existing_item_explicit_location",
+    "evals/test_add.py::test_existing_item_indirect_location",
+    "evals/test_add.py::test_multiple_products_with_omitted_amounts",
+    "evals/test_reject.py::test_out_of_domain_weather",
+    "evals/test_add.py::test_missing_item_discovers_new_product",
+    "evals/test_remove.py::test_partial"
+  ],
+  "total_duration_s": 45.416650274040876,
+  "mean_tokens_per_sec": 86.49975294234758,
+  "log_file": "epoch-06.log.jsonl",
+  "results": [
+    {
+      "scenario": "remove.move_explicit",
+      "category": "remove",
+      "note": null,
+      "verdict": {
+        "passed": true,
+        "checks": {
+          "classification": true,
+          "writes": true,
+          "kind": true,
+          "product": true,
+          "amount": true,
+          "unit": true,
+          "location": true
+        },
+        "failures": []
+      },
+      "metrics": {
+        "duration_s": 2.4504060419858433,
+        "tokens_per_sec": 87.31899902225106
+      }
+    },
+    {
+      "scenario": "find.shared_word_picks_right_product",
+      "category": "find",
+      "note": null,
+      "verdict": {
+        "passed": true,
+        "checks": {
+          "classification": true,
+          "writes": true,
+          "reply": true
+        },
+        "failures": []
+      },
+      "metrics": {
+        "duration_s": 1.2928031910269056,
+        "tokens_per_sec": 82.08955222257738
+      }
+    },
+    {
+      "scenario": "find.quantity",
+      "category": "find",
+      "note": null,
+      "verdict": {
+        "passed": true,
+        "checks": {
+          "classification": true,
+          "tool:sumac_find_inventory": true,
+          "writes": true,
+          "reply": true
+        },
+        "failures": []
+      },
+      "metrics": {
+        "duration_s": 1.0420288520108443,
+        "tokens_per_sec": 81.50470327054178
+      }
+    },
+    {
+      "scenario": "remove.move_vague_asks_or_acts",
+      "category": "remove",
+      "note": "branch=act",
+      "verdict": {
+        "passed": true,
+        "checks": {
+          "classification": true,
+          "outcome": true
+        },
+        "failures": []
+      },
+      "metrics": {
+        "duration_s": 2.5187152159924153,
+        "tokens_per_sec": 88.2352946467089
+      }
+    },
+    {
+      "scenario": "add.duplicate_search_bounded",
+      "category": "add",
+      "note": null,
+      "verdict": {
+        "passed": true,
+        "checks": {
+          "classification": true,
+          "tool:sumac_find_inventory:bound": true,
+          "writes": true,
+          "kind": true,
+          "product": true,
+          "amount": true,
+          "unit": true,
+          "location": true
+        },
+        "failures": []
+      },
+      "metrics": {
+        "duration_s": 2.6466073009942193,
+        "tokens_per_sec": 88.48484656699108
+      }
+    },
+    {
+      "scenario": "reject.joke_with_inventory_word",
+      "category": "reject",
+      "note": null,
+      "verdict": {
+        "passed": true,
+        "checks": {
+          "classification": true,
+          "writes": true
+        },
+        "failures": []
+      },
+      "metrics": {
+        "duration_s": 0.35757587899570353,
+        "tokens_per_sec": 81.57099692009655
+      }
+    },
+    {
+      "scenario": "add.discriminator_variant_not_confused",
+      "category": "add",
+      "note": null,
+      "verdict": {
+        "passed": true,
+        "checks": {
+          "classification": true,
+          "writes": true,
+          "kind": true,
+          "product": true,
+          "amount": true,
+          "unit": true,
+          "location": true
+        },
+        "failures": []
+      },
+      "metrics": {
+        "duration_s": 2.6516440760169644,
+        "tokens_per_sec": 89.36514175830469
+      }
+    },
+    {
+      "scenario": "remove.all",
+      "category": "remove",
+      "note": null,
+      "verdict": {
+        "passed": true,
+        "checks": {
+          "classification": true,
+          "writes": true,
+          "kind": true,
+          "product": true,
+          "amount": true,
+          "unit": true,
+          "location": true
+        },
+        "failures": []
+      },
+      "metrics": {
+        "duration_s": 2.1316722620103974,
+        "tokens_per_sec": 83.58509498233413
+      }
+    },
+    {
+      "scenario": "reject.gibberish",
+      "category": "reject",
+      "note": null,
+      "verdict": {
+        "passed": true,
+        "checks": {
+          "classification": true,
+          "writes": true
+        },
+        "failures": []
+      },
+      "metrics": {
+        "duration_s": 0.3615537099831272,
+        "tokens_per_sec": 80.11869141456143
+      }
+    },
+    {
+      "scenario": "find.uses_only_find_tool",
+      "category": "find",
+      "note": null,
+      "verdict": {
+        "passed": true,
+        "checks": {
+          "classification": true,
+          "writes": true,
+          "tool_scope": true
+        },
+        "failures": []
+      },
+      "metrics": {
+        "duration_s": 0.9736385860014707,
+        "tokens_per_sec": 77.77777726267591
+      }
+    },
+    {
+      "scenario": "add.odd_destination_respected",
+      "category": "add",
+      "note": null,
+      "verdict": {
+        "passed": true,
+        "checks": {
+          "classification": true,
+          "writes": true,
+          "kind": true,
+          "product": true,
+          "amount": true,
+          "unit": true,
+          "location": true
+        },
+        "failures": []
+      },
+      "metrics": {
+        "duration_s": 3.454350896005053,
+        "tokens_per_sec": 90.99407939576456
+      }
+    },
+    {
+      "scenario": "find.missing_item",
+      "category": "find",
+      "note": null,
+      "verdict": {
+        "passed": true,
+        "checks": {
+          "classification": true,
+          "tool:sumac_find_inventory": true,
+          "writes": true
+        },
+        "failures": []
+      },
+      "metrics": {
+        "duration_s": 0.7775192730186973,
+        "tokens_per_sec": 93.5754182621679
+      }
+    },
+    {
+      "scenario": "add.product_with_omitted_amount",
+      "category": "add",
+      "note": null,
+      "verdict": {
+        "passed": true,
+        "checks": {
+          "classification": true,
+          "writes": true,
+          "kind": true,
+          "product": true,
+          "amount": true,
+          "unit": true,
+          "location": true
+        },
+        "failures": []
+      },
+      "metrics": {
+        "duration_s": 2.227488605014514,
+        "tokens_per_sec": 84.17508432953461
+      }
+    },
+    {
+      "scenario": "add.ambiguous_product_asks_or_acts",
+      "category": "add",
+      "note": "branch=act",
+      "verdict": {
+        "passed": true,
+        "checks": {
+          "classification": true,
+          "outcome": true
+        },
+        "failures": []
+      },
+      "metrics": {
+        "duration_s": 2.9677887099969666,
+        "tokens_per_sec": 87.73822496936555
+      }
+    },
+    {
+      "scenario": "find.existing_item",
+      "category": "find",
+      "note": null,
+      "verdict": {
+        "passed": true,
+        "checks": {
+          "classification": true,
+          "tool:sumac_find_inventory": true,
+          "writes": true,
+          "reply": true
+        },
+        "failures": []
+      },
+      "metrics": {
+        "duration_s": 0.9866295089886989,
+        "tokens_per_sec": 81.31868030667637
+      }
+    },
+    {
+      "scenario": "add.basmati_rice_in_different_unit",
+      "category": "add",
+      "note": null,
+      "verdict": {
+        "passed": true,
+        "checks": {
+          "classification": true,
+          "writes": true,
+          "kind": true,
+          "product": true,
+          "amount": true,
+          "unit": true
+        },
+        "failures": []
+      },
+      "metrics": {
+        "duration_s": 2.744382492004661,
+        "tokens_per_sec": 89.98434865078616
+      }
+    },
+    {
+      "scenario": "add.existing_item_explicit_location",
+      "category": "add",
+      "note": null,
+      "verdict": {
+        "passed": true,
+        "checks": {
+          "classification": true,
+          "writes": true,
+          "kind": true,
+          "product": true,
+          "amount": true,
+          "unit": true,
+          "location": true
+        },
+        "failures": []
+      },
+      "metrics": {
+        "duration_s": 2.8880052200111095,
+        "tokens_per_sec": 91.71597646075026
+      }
+    },
+    {
+      "scenario": "add.existing_item_indirect_location",
+      "category": "add",
+      "note": null,
+      "verdict": {
+        "passed": true,
+        "checks": {
+          "classification": true,
+          "tool:sumac_find_inventory": true,
+          "writes": true,
+          "kind": true,
+          "product": true,
+          "amount": true,
+          "unit": true,
+          "location": true
+        },
+        "failures": []
+      },
+      "metrics": {
+        "duration_s": 2.719930869003292,
+        "tokens_per_sec": 92.59259195763082
+      }
+    },
+    {
+      "scenario": "add.multiple_products_with_omitted_amounts",
+      "category": "add",
+      "note": null,
+      "verdict": {
+        "passed": true,
+        "checks": {
+          "classification": true,
+          "writes": true,
+          "kind:Butter": true,
+          "amount:Butter": true,
+          "unit:Butter": true,
+          "kind:Jam": true,
+          "amount:Jam": true,
+          "unit:Jam": true,
+          "product:butter": true,
+          "product:butter_not_beans": true,
+          "product:jam": true
+        },
+        "failures": []
+      },
+      "metrics": {
+        "duration_s": 4.096795401012059,
+        "tokens_per_sec": 88.46555283961068
+      }
+    },
+    {
+      "scenario": "reject.out_of_domain_weather",
+      "category": "reject",
+      "note": null,
+      "verdict": {
+        "passed": true,
+        "checks": {
+          "classification": true,
+          "writes": true
+        },
+        "failures": []
+      },
+      "metrics": {
+        "duration_s": 0.3600746549782343,
+        "tokens_per_sec": 81.57099692009655
+      }
+    },
+    {
+      "scenario": "add.missing_item_discovers_new_product",
+      "category": "add",
+      "note": null,
+      "verdict": {
+        "passed": true,
+        "checks": {
+          "classification": true,
+          "tool:sumac_find_inventory": true,
+          "writes": true,
+          "kind": true,
+          "product": true,
+          "amount": true,
+          "unit": true,
+          "location": true
+        },
+        "failures": []
+      },
+      "metrics": {
+        "duration_s": 3.2188808049832005,
+        "tokens_per_sec": 93.41755222521321
+      }
+    },
+    {
+      "scenario": "remove.partial",
+      "category": "remove",
+      "note": null,
+      "verdict": {
+        "passed": true,
+        "checks": {
+          "classification": true,
+          "writes": true,
+          "kind": true,
+          "product": true,
+          "amount": true,
+          "unit": true,
+          "location": true
+        },
+        "failures": []
+      },
+      "metrics": {
+        "duration_s": 2.5481587240064982,
+        "tokens_per_sec": 87.39496034700723
+      }
+    }
+  ]
+}
