@@ -827,6 +827,26 @@ def test_add_prompt_directs_searching_for_context_before_guessing_a_location() -
     assert "never guess a location" in text
 
 
+def test_add_amount_delta_variant_states_amount_is_a_delta_not_a_total() -> None:
+    """A real qwen3.5-4b trace (docs/journal/2026-09-04-basmati-rice-unit-
+    mismatch.md's sibling failure, add.discriminator_variant_not_confused)
+    worked out the correct resulting total in its own reply text but passed
+    that total as sumac_discover_inventory's amount instead of the delta —
+    decide.py/the fold already add the delta to what's on record, so the
+    total double-counts it. Guards the `add-amount-delta` PromptVariant
+    candidate's wording, and that `default` is untouched — this is an
+    opt-in variant, not yet promoted."""
+    variant = llm.prompt_variant("add-amount-delta")
+    text = " ".join(variant.prompt_by_kind[llm.QueryKind.ADD].split())
+    assert "not the total" in text
+    assert "grand total" in text
+    assert text != " ".join(llm._ADD_PROMPT.split())
+
+    default_text = " ".join(llm.DEFAULT_PROMPT_VARIANT.prompt_by_kind[llm.QueryKind.ADD].split())
+    assert default_text == " ".join(llm._ADD_PROMPT.split())
+    assert "total" not in default_text
+
+
 def test_rejected_hint_travels_with_the_rejection_not_the_prompt() -> None:
     """The original single-prompt design told the model how to react to a
     "rejected" tool result unconditionally, on every request — a real

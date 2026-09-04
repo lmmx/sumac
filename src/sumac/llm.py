@@ -393,6 +393,46 @@ Call one tool at a time; when nothing more is needed, answer in plain text
 with no further tool call.
 """
 
+# `add-amount-delta` PromptVariant candidate (not yet default) — see
+# docs/journal/2026-09-04-basmati-rice-unit-mismatch.md's sibling failure,
+# add.discriminator_variant_not_confused: a real qwen3.5-4b trace worked out
+# the correct resulting total in its own reply text ("added 2 more, total is
+# now 4") but then passed that total as sumac_discover_inventory's amount
+# instead of the delta actually requested — decide.py/the fold already add
+# the delta to what's on record, so passing the total double-counts it.
+# Deliberately no worked numeric example (see
+# docs/journal/2026-09-01-ask-agent-design.md's worked-example-bias finding:
+# a concrete instance in the prompt teaches the model that one instance, not
+# the general rule) — states the invariant abstractly instead.
+_ADD_PROMPT_AMOUNT_DELTA = """\
+You are a household grocery inventory assistant. You have two tools,
+sumac_find_inventory and sumac_discover_inventory.
+
+If the person's wording ties the location to something already in
+inventory — "the same place as", "with the other X", "existing stock",
+"the usual spot" — call sumac_find_inventory for that other product
+first and use its location; never guess a location string from their
+own wording in this case.
+
+Before assuming a product is new, search for it twice if the first search
+finds nothing: once with the full name, then with the brand dropped and
+only the product itself kept — not the other way round (after "Heinz
+Baked Beans" finds nothing, search "Baked Beans", not "Heinz"). A
+different brand of the same basic product is stock to add to, not a new
+product. Use sumac_discover_inventory to record the new or additional
+stock once that broader search also finds nothing plausible, using a new
+product_id in this catalog's own style — Title Case, brand name if the
+person gave one, no underscores (e.g. "Heinz Baked Beans", not
+"heinz_baked_beans").
+
+sumac_discover_inventory's amount is the quantity this request is adding
+by itself, not the total that will exist once it's applied to what's
+already on record — don't work out the new grand total and pass that.
+
+Call one tool at a time; when nothing more is needed, answer in plain text
+with no further tool call.
+"""
+
 _REMOVE_PROMPT = """\
 You are a household grocery inventory assistant. You have three tools:
 sumac_find_inventory, sumac_consume_inventory, and sumac_move_inventory.
@@ -467,6 +507,10 @@ class PromptVariant:
 
 PROMPT_VARIANTS: tuple[PromptVariant, ...] = (
     PromptVariant("default"),  # every field defaults — reproduces current behavior exactly
+    PromptVariant(
+        "add-amount-delta",
+        prompt_by_kind={**_PROMPT_BY_KIND, QueryKind.ADD: _ADD_PROMPT_AMOUNT_DELTA},
+    ),
     # nudge-v2/v3/v4 (a series of `empty_plan_nudge` rewordings aimed at a
     # diagnosed 9B failure) were tried and rolled back — see
     # docs/journal/2026-09-04-trace-and-verdict-redesign.md for why: the
