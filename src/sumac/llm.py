@@ -47,8 +47,8 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Callable
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
@@ -393,6 +393,46 @@ Call one tool at a time; when nothing more is needed, answer in plain text
 with no further tool call.
 """
 
+# `add-amount-delta` PromptVariant candidate (not yet default) — see
+# docs/journal/2026-09-04-basmati-rice-unit-mismatch.md's sibling failure,
+# add.discriminator_variant_not_confused: a real qwen3.5-4b trace worked out
+# the correct resulting total in its own reply text ("added 2 more, total is
+# now 4") but then passed that total as sumac_discover_inventory's amount
+# instead of the delta actually requested — decide.py/the fold already add
+# the delta to what's on record, so passing the total double-counts it.
+# Deliberately no worked numeric example (see
+# docs/journal/2026-09-01-ask-agent-design.md's worked-example-bias finding:
+# a concrete instance in the prompt teaches the model that one instance, not
+# the general rule) — states the invariant abstractly instead.
+_ADD_PROMPT_AMOUNT_DELTA = """\
+You are a household grocery inventory assistant. You have two tools,
+sumac_find_inventory and sumac_discover_inventory.
+
+If the person's wording ties the location to something already in
+inventory — "the same place as", "with the other X", "existing stock",
+"the usual spot" — call sumac_find_inventory for that other product
+first and use its location; never guess a location string from their
+own wording in this case.
+
+Before assuming a product is new, search for it twice if the first search
+finds nothing: once with the full name, then with the brand dropped and
+only the product itself kept — not the other way round (after "Heinz
+Baked Beans" finds nothing, search "Baked Beans", not "Heinz"). A
+different brand of the same basic product is stock to add to, not a new
+product. Use sumac_discover_inventory to record the new or additional
+stock once that broader search also finds nothing plausible, using a new
+product_id in this catalog's own style — Title Case, brand name if the
+person gave one, no underscores (e.g. "Heinz Baked Beans", not
+"heinz_baked_beans").
+
+sumac_discover_inventory's amount is the quantity this request is adding
+by itself, not the total that will exist once it's applied to what's
+already on record — don't work out the new grand total and pass that.
+
+Call one tool at a time; when nothing more is needed, answer in plain text
+with no further tool call.
+"""
+
 _REMOVE_PROMPT = """\
 You are a household grocery inventory assistant. You have three tools:
 sumac_find_inventory, sumac_consume_inventory, and sumac_move_inventory.
@@ -446,6 +486,54 @@ _EMPTY_PLAN_NUDGE = (
 )
 
 
+# --- Prompt variants -----------------------------------------------------------
+# The same problem `ModelPreset` solves for "which model" — comparing options
+# without editing the source and reverting it back — applies to the prompt
+# text itself. `PromptVariant` is that same registry/lookup/default shape
+# applied to a second, independent axis. Each field here is referenced at
+# exactly one call site in `AgentRunner` (`classifier_prompt` in `_classify`,
+# `prompt_by_kind` in `propose()`, `empty_plan_nudge` in `_maybe_force_action`)
+# — a new variant genuinely cannot miss updating a use site, because there's
+# only ever the one. See docs/journal/2026-09-02-eval-suite.md.
+
+
+@dataclass(frozen=True, slots=True)
+class PromptVariant:
+    name: str
+    classifier_prompt: str = CLASSIFIER_PROMPT
+    prompt_by_kind: dict[QueryKind, str] = field(default_factory=lambda: dict(_PROMPT_BY_KIND))
+    empty_plan_nudge: str = _EMPTY_PLAN_NUDGE
+
+
+PROMPT_VARIANTS: tuple[PromptVariant, ...] = (
+    PromptVariant("default"),  # every field defaults — reproduces current behavior exactly
+    PromptVariant(
+        "add-amount-delta",
+        prompt_by_kind={**_PROMPT_BY_KIND, QueryKind.ADD: _ADD_PROMPT_AMOUNT_DELTA},
+    ),
+    # nudge-v2/v3/v4 (a series of `empty_plan_nudge` rewordings aimed at a
+    # diagnosed 9B failure) were tried and rolled back — see
+    # docs/journal/2026-09-04-trace-and-verdict-redesign.md for why: the
+    # comparison was confounded (mistralrs.Runner's RNG stream position
+    # drifts based on everything that ran earlier in the same session, so
+    # two different-wording sessions aren't cleanly comparable) and the
+    # trace format couldn't show what was actually sent to the model or
+    # what it replied when a round produced no tool call, so the apparent
+    # per-scenario effects couldn't be verified against what really
+    # happened. Revisit once that's fixed, not before.
+)
+
+_PROMPT_VARIANTS_BY_NAME: dict[str, PromptVariant] = {v.name: v for v in PROMPT_VARIANTS}
+
+
+def prompt_variant(name: str) -> PromptVariant:
+    """Raises `KeyError` for an unknown name — same contract as `model_preset()`."""
+    return _PROMPT_VARIANTS_BY_NAME[name]
+
+
+DEFAULT_PROMPT_VARIANT = PROMPT_VARIANTS[0]
+
+
 # --- Orchestration types ------------------------------------------------------
 
 
@@ -478,6 +566,15 @@ class ToolCallRecord:
     name: str
     arguments: dict
     result: str
+    # The pre-parse response body verbatim, when the active backend
+    # provides one — only a remote HTTP backend ever does (local mistral.rs
+    # has no comparable "raw wire format" to capture). What a tool-call
+    # parser mismatch on the serving side is actually diagnosed from: if a
+    # misconfigured parser makes `tool_calls` come back empty because the
+    # model's real call landed as unparsed text, this is the only place
+    # that evidence survives. See
+    # docs/journal/2026-09-04-modal-remote-inference-backend.md.
+    raw_response: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -487,14 +584,76 @@ class AgentPlan:
     trace: tuple[ToolCallRecord, ...] = ()
 
 
+class ChatResponseUsage(Protocol):
+    """The subset of `mistralrs.Usage` (or an equivalent populated by a
+    remote backend) anything in this module ever reads — see the "exact
+    minimal response shape" audit in
+    docs/journal/2026-09-04-modal-remote-inference-backend.md. Declared as
+    read-only `@property` members, not plain attributes: nothing here ever
+    writes one back, and a read-only member is covariant, which is what
+    lets a real `mistralrs.Usage` (and any other concrete field type)
+    satisfy this Protocol structurally without an exact type match."""
+
+    @property
+    def prompt_tokens(self) -> int: ...
+    @property
+    def completion_tokens(self) -> int: ...
+    @property
+    def avg_compl_tok_per_sec(self) -> float: ...
+    @property
+    def total_time_sec(self) -> float: ...
+
+
+class ChatResponseFunctionCall(Protocol):
+    @property
+    def name(self) -> str: ...
+    @property
+    def arguments(self) -> str: ...  # a JSON string, parsed with json.loads
+
+
+class ChatResponseToolCall(Protocol):
+    @property
+    def function(self) -> ChatResponseFunctionCall: ...
+
+
+class ChatResponseMessage(Protocol):
+    @property
+    def content(self) -> str | None: ...
+    @property
+    def tool_calls(self) -> Sequence[ChatResponseToolCall] | None: ...
+
+
+class ChatResponseChoice(Protocol):
+    @property
+    def message(self) -> ChatResponseMessage: ...
+
+
+class ChatResponse(Protocol):
+    """The narrowed response shape every `SendsCompletions` implementation
+    must satisfy structurally. A real `mistralrs.ChatCompletionResponse`
+    already does, with no wrapping; `usage` is `None`-tolerant, matching
+    `_record_usage` below (a fake `SendsCompletions` in tests has none)."""
+
+    @property
+    def choices(self) -> Sequence[ChatResponseChoice]: ...
+    @property
+    def usage(self) -> ChatResponseUsage | None: ...
+
+
 class SendsCompletions(Protocol):
-    """The one `mistralrs.Runner` method `AgentRunner` actually calls — a
-    real `Runner` satisfies this structurally; tests pass a hand-built fake
-    instead, with no real model or GGUF download involved."""
+    """The one method `AgentRunner` actually calls to get a completion —
+    a real `mistralrs.Runner` satisfies this only once wrapped in
+    `_LocalMistralRsBackend` below, since `mistralrs.ChatCompletionRequest`
+    is an opaque PyO3 object no other backend can construct or read back.
+    `request` is therefore the plain dict `_build_request` produces, not
+    that type — see
+    docs/journal/2026-09-04-modal-remote-inference-backend.md for why.
+    Tests pass a hand-built fake instead, with no real model or GGUF
+    download involved."""
 
     def send_chat_completion_request(
-        self, request: mistralrs.ChatCompletionRequest, model_id: str | None = None
-    ) -> mistralrs.ChatCompletionResponse: ...
+        self, request: dict, model_id: str | None = None
+    ) -> ChatResponse: ...
 
 
 def _lfm_literal(value: object) -> str:
@@ -560,7 +719,7 @@ def _rejected(reason: str, detail: dict) -> str:
     )
 
 
-def _round_preview(message: mistralrs.ResponseMessage, limit: int = 100) -> str:
+def _round_preview(message: ChatResponseMessage, limit: int = 100) -> str:
     """What the model actually did this round, truncated — a tool call's
     name and arguments, or its plain-text reply."""
     if message.tool_calls:
@@ -571,7 +730,7 @@ def _round_preview(message: mistralrs.ResponseMessage, limit: int = 100) -> str:
     return text if len(text) <= limit else text[:limit] + "..."
 
 
-def _print_usage(response: mistralrs.ChatCompletionResponse, round_num: int) -> None:
+def _print_usage(response: ChatResponse, round_num: int) -> None:
     """Per-round token/timing numbers from mistral.rs's own `Usage`, labeled
     with `round_num` and a preview of what the round actually produced. A
     no-op for a fake `SendsCompletions` in tests, which has no real
@@ -587,7 +746,45 @@ def _print_usage(response: mistralrs.ChatCompletionResponse, round_num: int) -> 
     )
 
 
-def _build_runner(model: ModelPreset, *, seed: int | None = None) -> mistralrs.Runner:
+class _LocalMistralRsBackend:
+    """Wraps a real `mistralrs.Runner` to satisfy `SendsCompletions`'s
+    plain-dict request contract. The one place, for the local backend, that
+    turns `_build_request`'s dict back into a real
+    `mistralrs.ChatCompletionRequest` — immediately before calling the
+    engine. A Modal-backed `SendsCompletions` instead serializes the same
+    dict to an OpenAI-style JSON body; both backends see identical kwargs.
+    See docs/journal/2026-09-04-modal-remote-inference-backend.md."""
+
+    def __init__(self, runner: mistralrs.Runner) -> None:
+        self._runner = runner
+
+    def send_chat_completion_request(
+        self, request: dict, model_id: str | None = None
+    ) -> mistralrs.ChatCompletionResponse:
+        # `tool_choice` is always the string "auto" today (see
+        # `_build_request`) — the only `mistralrs.ToolChoice` variant besides
+        # `NoTools`, which nothing here ever requests.
+        real_request = mistralrs.ChatCompletionRequest(
+            messages=request["messages"],
+            model=request["model"],
+            tool_schemas=request["tool_schemas"],
+            tool_choice=mistralrs.ToolChoice.Auto,
+            enable_thinking=request["enable_thinking"],
+            temperature=request["temperature"],
+            top_p=request["top_p"],
+            max_tokens=request["max_tokens"],
+        )
+        # `Runner.send_chat_completion_request` also returns a chunk
+        # iterator when `stream=True`; `real_request` never sets it, so
+        # narrowing to the non-streaming shape here is safe for every
+        # request this module actually sends.
+        return cast(
+            mistralrs.ChatCompletionResponse,
+            self._runner.send_chat_completion_request(real_request, model_id=model_id),
+        )
+
+
+def _build_runner(model: ModelPreset, *, seed: int | None = None) -> SendsCompletions:
     # No `tool_callbacks` here — see the module docstring for why:
     # `AgentRunner` dispatches tool calls itself instead (`_run_loop`).
     # `seed` is `None` for interactive `sumac ask` use (no fixed seed — the
@@ -605,7 +802,8 @@ def _build_runner(model: ModelPreset, *, seed: int | None = None) -> mistralrs.R
     # `Which.GGUF` is a nested dataclass, not a `Which` subclass, in the
     # installed 0.9.2 stub — the mismatch below is a stub-modeling gap, not a
     # real one; `Which.GGUF(...)` is mistral.rs's own documented construction.
-    return mistralrs.Runner(which=which, seed=seed)  # ty: ignore[invalid-argument-type]
+    runner = mistralrs.Runner(which=which, seed=seed)  # ty: ignore[invalid-argument-type]
+    return _LocalMistralRsBackend(runner)
 
 
 class AgentRunner:
@@ -622,6 +820,7 @@ class AgentRunner:
         key: bytes,
         *,
         model: ModelPreset = DEFAULT_MODEL_PRESET,
+        prompt_variant: PromptVariant = DEFAULT_PROMPT_VARIANT,
         runner: SendsCompletions | None = None,
         debug: bool = False,
         temperature: float = DEFAULT_TEMPERATURE,
@@ -632,10 +831,20 @@ class AgentRunner:
         self._data_dir = data_dir
         self._key = key
         self._model = model
+        self._prompt_variant = prompt_variant
         self._debug = debug
         self._temperature = temperature
         self._top_p = top_p
         self._max_tokens = max_tokens
+        # Session-level for the local backend (`_build_runner(seed=...)`
+        # seeds the whole `mistralrs.Runner`, not a per-request field — see
+        # `_LocalMistralRsBackend`, which ignores this dict key entirely).
+        # Carried into every request dict anyway so a per-request backend
+        # (Modal) has something to seed with — previously not threaded
+        # through at all, meaning every Modal request ran with vLLM's own
+        # unseeded default and no run was reproducible. See
+        # docs/journal/2026-09-04-modal-remote-inference-backend.md.
+        self._seed = seed
         self._messages: list[dict[str, str]] | None = None
         self._kind: QueryKind | None = None
         self._schemas: list[str] = []
@@ -643,6 +852,10 @@ class AgentRunner:
         self._pending: list[ProposedWrite] = []
         self._trace: list[ToolCallRecord] = []
         self._trace_history: list[ToolCallRecord] = []
+        self._classify_messages: list[dict[str, str]] | None = None
+        self._usage_history: list[dict[str, float | int]] = []
+        self._terminal: str = "reply"
+        self._nudge_fired: bool = False
         self._completion_tokens = 0
         self._generation_time_sec = 0.0
         self.tool_callbacks: dict[str, Callable[[str, dict], str]] = {
@@ -652,13 +865,7 @@ class AgentRunner:
             "sumac_discover_inventory": self._sumac_discover_inventory,
         }
         self._runner: SendsCompletions = (
-            runner
-            if runner is not None
-            # `Runner.send_chat_completion_request` also returns a chunk
-            # iterator when `stream=True`; `_build_request` never sets it, so
-            # narrowing to the non-streaming `SendsCompletions` shape here is
-            # safe for every request this class actually sends.
-            else cast(SendsCompletions, _build_runner(model, seed=seed))
+            runner if runner is not None else _build_runner(model, seed=seed)
         )
 
     @property
@@ -667,6 +874,11 @@ class AgentRunner:
         retry prompt to default to "same model as last time" rather than
         forcing a choice on every retry."""
         return self._model
+
+    @property
+    def prompt_variant(self) -> PromptVariant:
+        """Which `PromptVariant` this instance is running — mirrors `model`."""
+        return self._prompt_variant
 
     @property
     def tokens_per_sec(self) -> float | None:
@@ -694,6 +906,53 @@ class AgentRunner:
         fixture) is what scopes it to one scenario's full history, feedback
         rounds included."""
         return tuple(self._trace_history)
+
+    @property
+    def messages(self) -> tuple[dict[str, str], ...] | None:
+        """The full domain-loop conversation `_run_loop` sent/received,
+        across every `propose()`/`revise()` call this instance has made —
+        `None` before `propose()` has run, or after a REJECT-classified
+        request (`propose()` never builds a domain-loop conversation for
+        one; see `classify_messages` for what a REJECT still produces).
+        `trace_history` records each tool call's outcome; this is the raw
+        wire-shaped history — including a plain-text-only reply, which
+        never produces a `ToolCallRecord` — it was recorded from. See
+        docs/journal/2026-09-04-trace-and-verdict-redesign.md."""
+        return tuple(self._messages) if self._messages is not None else None
+
+    @property
+    def classify_messages(self) -> tuple[dict[str, str], ...] | None:
+        """The classifier round's own system/user/assistant messages.
+        `_classify` sends a different system prompt on its own request, so
+        its conversation never becomes part of `self._messages` — `None`
+        before `propose()` has run, populated even when it rejects."""
+        return tuple(self._classify_messages) if self._classify_messages is not None else None
+
+    @property
+    def usage_history(self) -> tuple[dict[str, float | int], ...]:
+        """Per-round token/timing numbers, in request order, across every
+        round this instance has sent (the classifier round tagged
+        `round=0`) — unlike `tokens_per_sec`'s running totals, this keeps
+        each round's own numbers, which reasoning about the RNG stream's
+        position needs and a running total can't reconstruct."""
+        return tuple(self._usage_history)
+
+    @property
+    def terminal(self) -> str:
+        """How the most recently completed `_run_loop` call ended:
+        `"reply"` (a round produced no tool call) or `"round_cap"`
+        (`MAX_TOOL_ROUNDS` exhausted with no final reply) — both currently
+        return `reply_text=""` from `_run_loop`, indistinguishable without
+        this."""
+        return self._terminal
+
+    @property
+    def nudge_fired(self) -> bool:
+        """Whether `_maybe_force_action` appended `empty_plan_nudge` and
+        re-ran the loop, at any point across this instance's calls —
+        previously derivable only by reading `_maybe_force_action`'s guard
+        clause against `checks.writes` after the fact."""
+        return self._nudge_fired
 
     def _record_call(self, record: ToolCallRecord) -> None:
         self._trace.append(record)
@@ -847,19 +1106,35 @@ class AgentRunner:
 
     # -- request plumbing (client-side loop — see module docstring) ---------
 
-    def _build_request(
-        self, messages: list[dict[str, str]], schemas: list[str]
-    ) -> mistralrs.ChatCompletionRequest:
-        return mistralrs.ChatCompletionRequest(
-            messages=messages,
-            model=self._model.quantized_model_id,
-            tool_schemas=schemas,
-            tool_choice=mistralrs.ToolChoice.Auto,
-            enable_thinking=False,
-            temperature=self._temperature,
-            top_p=self._top_p,
-            max_tokens=self._max_tokens,
-        )
+    def _build_request(self, messages: list[dict[str, str]], schemas: list[str]) -> dict:
+        """A plain dict of every kwarg this module's one request shape ever
+        sends — not a real `mistralrs.ChatCompletionRequest`, which is an
+        opaque PyO3 object no non-mistralrs backend can construct, and which
+        can't be read back once built even by mistral.rs's own code (see
+        docs/journal/2026-09-04-modal-remote-inference-backend.md). Every
+        `SendsCompletions` implementation gets this identical dict;
+        `_LocalMistralRsBackend` is the one place that turns it back into a
+        real `mistralrs.ChatCompletionRequest`, immediately before calling
+        the engine."""
+        return {
+            "messages": messages,
+            "model": self._model.quantized_model_id,
+            "tool_schemas": schemas,
+            # The only value `mistralrs.ToolChoice` this module ever
+            # requests — nothing here ever varies it (see the journal entry
+            # above) — carried as a plain string so a non-mistralrs backend
+            # can pass it straight through without importing `mistralrs`.
+            "tool_choice": "auto",
+            "enable_thinking": False,
+            "temperature": self._temperature,
+            "top_p": self._top_p,
+            "max_tokens": self._max_tokens,
+            # `_LocalMistralRsBackend` ignores this — the local engine is
+            # already seeded once at `Runner` construction, not per
+            # request. A per-request backend (Modal) uses it for whatever
+            # reproducibility a stateless HTTP request can offer.
+            "seed": self._seed,
+        }
 
     def classify(self, prompt: str) -> QueryKind:
         """Public alias for `_classify` — the routing-only entry point an
@@ -868,7 +1143,7 @@ class AgentRunner:
         docs/journal/2026-09-02-eval-suite.md."""
         return self._classify(prompt)
 
-    def _record_usage(self, response: mistralrs.ChatCompletionResponse, round_num: int) -> None:
+    def _record_usage(self, response: ChatResponse, round_num: int) -> None:
         """Prints the round's usage line (`_print_usage`) and folds its
         token/timing numbers into `tokens_per_sec`'s running totals — a
         no-op for the latter beyond the print for a fake `SendsCompletions`
@@ -879,6 +1154,14 @@ class AgentRunner:
             return
         self._completion_tokens += usage.completion_tokens
         self._generation_time_sec += usage.total_time_sec
+        self._usage_history.append(
+            {
+                "round": round_num,
+                "prompt_tokens": usage.prompt_tokens,
+                "completion_tokens": usage.completion_tokens,
+                "total_time_sec": usage.total_time_sec,
+            }
+        )
 
     def _classify(self, prompt: str) -> QueryKind:
         """One single-purpose call, made before the model sees any domain
@@ -886,7 +1169,7 @@ class AgentRunner:
         design journal for why this is a separate step rather than folded
         into one prompt covering every tool."""
         messages = [
-            {"role": "system", "content": CLASSIFIER_PROMPT},
+            {"role": "system", "content": self._prompt_variant.classifier_prompt},
             {"role": "user", "content": prompt},
         ]
         request = self._build_request(messages, [_CLASSIFY_SCHEMA_JSON])
@@ -894,14 +1177,35 @@ class AgentRunner:
         self._record_usage(response, 0)
         message = response.choices[0].message
         if not message.tool_calls:
+            messages.append({"role": "assistant", "content": message.content or ""})
+            self._classify_messages = messages
             self._record_call(
-                ToolCallRecord(name="classify_request", arguments={}, result=message.content or "")
+                ToolCallRecord(
+                    name="classify_request",
+                    arguments={},
+                    result=message.content or "",
+                    raw_response=getattr(response, "raw_body", None),
+                )
             )
             return QueryKind.REJECT
         call = message.tool_calls[0].function
         args = json.loads(call.arguments)
+        messages.append(
+            {
+                "role": "assistant",
+                "content": _render_tool_call(
+                    call.name, args, call.arguments, self._model.tool_call_format
+                ),
+            }
+        )
+        self._classify_messages = messages
         self._record_call(
-            ToolCallRecord(name="classify_request", arguments=args, result=json.dumps(args))
+            ToolCallRecord(
+                name="classify_request",
+                arguments=args,
+                result=json.dumps(args),
+                raw_response=getattr(response, "raw_body", None),
+            )
         )
         try:
             return QueryKind(args.get("kind"))
@@ -940,6 +1244,7 @@ class AgentRunner:
 
             if not message.tool_calls:
                 self._messages.append({"role": "assistant", "content": message.content or ""})
+                self._terminal = "reply"
                 return AgentPlan(reply_text=message.content or "", writes=tuple(self._pending))
 
             call = message.tool_calls[0].function
@@ -953,7 +1258,14 @@ class AgentRunner:
                 # this one call rather than crash or silently dispatch the
                 # wrong domain action.
                 result = _rejected("tool_not_available", {"name": call.name})
-            self._record_call(ToolCallRecord(name=call.name, arguments=args, result=result))
+            self._record_call(
+                ToolCallRecord(
+                    name=call.name,
+                    arguments=args,
+                    result=result,
+                    raw_response=getattr(response, "raw_body", None),
+                )
+            )
             self._messages.append(
                 {
                     "role": "assistant",
@@ -969,6 +1281,7 @@ class AgentRunner:
         # Round cap reached with no final reply — the accumulated plan (if
         # any) is still returned rather than raised, since the cap is a
         # termination guarantee, not a success condition.
+        self._terminal = "round_cap"
         return AgentPlan(reply_text="", writes=tuple(self._pending))
 
     def _maybe_force_action(self, plan: AgentPlan) -> AgentPlan:
@@ -986,7 +1299,8 @@ class AgentRunner:
         if plan.writes or self._kind not in (QueryKind.ADD, QueryKind.REMOVE):
             return plan
         assert self._messages is not None
-        self._messages.append({"role": "user", "content": _EMPTY_PLAN_NUDGE})
+        self._messages.append({"role": "user", "content": self._prompt_variant.empty_plan_nudge})
+        self._nudge_fired = True
         return self._run_loop()
 
     def _maybe_self_review(self, plan: AgentPlan) -> AgentPlan:
@@ -1018,7 +1332,7 @@ class AgentRunner:
         self._schemas = _SCHEMAS_BY_KIND[kind]
         self._allowed = _TOOL_NAMES_BY_KIND[kind]
         self._messages = [
-            {"role": "system", "content": _PROMPT_BY_KIND[kind]},
+            {"role": "system", "content": self._prompt_variant.prompt_by_kind[kind]},
             {"role": "user", "content": prompt},
         ]
         plan = self._maybe_self_review(self._maybe_force_action(self._run_loop()))

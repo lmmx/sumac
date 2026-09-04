@@ -173,14 +173,32 @@ def test_retired_product_rejected() -> None:
     assert exc_info.value.reason == "retired_product"
 
 
-def test_unit_unconvertible_rejected() -> None:
+def test_unconvertible_unit_accepted_as_own_quantity() -> None:
+    """A known product's write in a unit with no registered conversion is
+    accepted with a warning, not rejected — the same accept-with-
+    confirmation shape `_resolve_product`'s auto-registration path already
+    uses for an unknown product. "bag"/"jug" rather than a unit pair like
+    "lb"/"kg" that actually has a fixed physical ratio (just an
+    unregistered one) — a bag and a jug of rice aren't a fixed ratio the
+    way pounds and kilograms are, which is the actual case this fix is
+    for. Product identity stays "Basmati Rice" in both units; nothing is
+    converted, so `nominal_basis` stays `None` just like the
+    already-canonical-unit case. See
+    docs/journal/2026-09-04-basmati-rice-unit-mismatch.md."""
     cfg = _cfg(
         locations={"pantry": Location(id="pantry", name="Pantry")},
-        products={"flour": Product(id="flour", name="Flour", unit="kg")},
+        products={"Basmati Rice": Product(id="Basmati Rice", name="Basmati Rice", unit="jug")},
     )
-    with pytest.raises(Rejected) as exc_info:
-        _decide(product_id="flour", unit="lb", cfg=cfg)
-    assert exc_info.value.reason == "unit_unconvertible"
+    writes, messages = _decide(product_id="Basmati Rice", unit="bag", cfg=cfg)
+    assert len(writes) == 1
+    assert writes[0].obj["payload"]["product_id"] == "Basmati Rice"
+    assert writes[0].obj["payload"]["amount"] == "1"
+    assert writes[0].obj["payload"]["unit"] == "bag"
+    assert writes[0].obj["payload"]["nominal_basis"] is None
+    assert len(messages) == 1
+    assert "bag" in messages[0]
+    assert "Basmati Rice" in messages[0]
+    assert "jug" in messages[0]
 
 
 def test_registered_product_applies_conversion() -> None:

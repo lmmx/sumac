@@ -69,17 +69,23 @@ just that exact node — `sumac status fridge` sums the fridge itself, its door,
 one pass. Query a sub-location directly (e.g. `sumac status fridge-door`) to scope to just that
 node and its own descendants.
 
-## Development
+## Evaluating agent behavior
+
+`sumac ask`'s agent (below) has a behavioural eval suite — a seeded inventory and a set of
+find/add/remove/reject scenarios, run against either a real local model or a deployed Modal
+endpoint. It's how a prompt or model change actually gets checked, not just tried once by hand.
 
 ```sh
-uv run ruff format .
-uv run ruff check .
-uv run ty check
-uv run pytest
+uv run pytest evals -v --eval-model qwen3.5-4b
 ```
 
-An eval suite for `sumac ask`'s agent, run against a real local model, lives in `evals/` — not
-under `src/`, so it doesn't ship. See `evals/README.md`.
+See `evals/README.md` for the full guide (comparing models, comparing prompt variants, reading the
+output) and `docs/MODAL.md` if you want faster iteration against a deployed Modal endpoint instead
+of local inference.
+
+## Development
+
+See `docs/DEVELOPMENT.md`.
 
 ## Optional: natural-language input (`sumac ask`)
 

@@ -86,6 +86,61 @@ runs/NAME.json` loop over every registry preset, finished with `jq -c -s -f eval
 runs/*.json` — the aggregation query from that same comparison, checked in instead of retyped by
 hand each time.
 
+### Comparing prompt variants
+
+Trying a different wording for `CLASSIFIER_PROMPT`/`_FIND_PROMPT`/`_ADD_PROMPT`/`_REMOVE_PROMPT`/
+`_EMPTY_PLAN_NUDGE` doesn't mean editing `src/sumac/llm.py` and reverting it — `PromptVariant`
+(`llm.py`, right after `_EMPTY_PLAN_NUDGE`'s own definition) is the same named-registry pattern
+`ModelPreset` already uses for model choice, applied to prompt text as a second, independent axis.
+Each field is read at exactly one call site in `AgentRunner`, so a new variant can't miss updating
+a use site — there's only ever the one per field.
+
+```python
+# in src/sumac/llm.py, next to PROMPT_VARIANTS's one "default" entry:
+PromptVariant("nudge-v2", empty_plan_nudge=_NUDGE_V2_TEXT)
+```
+
+```sh
+uv run pytest evals --eval-model qwen3.5-4b --eval-prompt-variant nudge-v2 \
+  --eval-json runs/nudge-v2.json
+```
+
+`--eval-prompt-variant` mirrors `--eval-model` exactly (`conftest.py`); `evals/report.jq` and
+`evals/epoch_report.py` both already read the `"prompt_variant"` field `--eval-json` writes
+alongside `"model"` — `epoch_report.py` groups by the pair, labeling a non-default variant as
+`model [variant]` in its tables. No new CLI subcommand and no cross-product orchestration script
+for every model × every variant — with one variant registered, neither would earn its keep yet;
+add them if/when there are enough variants to need listing or a full grid compared at once.
+
+## Running against Modal instead of local `mistralrs`
+
+Local `mistralrs` epochs are slow to iterate against — 20 epochs against the fastest registered
+model is still on the order of 15 minutes for one prompt-wording guess. `--eval-backend modal`
+(default: `local`) runs the same scenarios against a deployed Modal/vLLM endpoint over HTTP
+instead — see `docs/MODAL.md` for deploying one, and
+`docs/journal/2026-09-04-modal-remote-inference-backend.md` for the full design rationale and the
+fidelity risks it deliberately doesn't paper over (quantization mismatch chief among them).
+
+```sh
+export SUMAC_MODAL_ENDPOINT=https://<your-workspace>--sumac-qwen3-5-4b-server.<region>.modal.direct
+uv run pytest evals --eval-backend modal --eval-model qwen3.5-4b
+```
+
+(`--eval-modal-endpoint` works in place of the environment variable if you'd rather pass it per
+invocation.) `--eval-model` still means "which `ModelPreset`" exactly as it does locally —
+`conftest.py`'s `_MODAL_SERVED_MODEL_NAMES` resolves it to whichever `--served-model-name` that
+model's Modal deployment was launched with. Before any scenario runs, a deploy-time gate
+(`sumac.modal_backend.verify_tool_calling`) sends one fixed request through the endpoint and
+confirms tool calls actually round-trip correctly — a misconfigured serving stack fails the whole
+session loudly (`pytest.UsageError`) rather than reading as every scenario failing for a model
+reason.
+
+**Modal is a fast, non-authoritative filter, never a replacement for the local benchmark above.** A
+prompt that scores well on Modal — especially against a quantized deployment, or in few epochs —
+still needs a local `mistralrs` confirming run before being treated as a verified improvement.
+`--eval-json`'s output records which backend produced each epoch, and `epoch_report.py` never folds
+a Modal epoch into the same row as a local one for exactly this reason.
+
 ## What's here
 
 ```
@@ -132,12 +187,16 @@ dimension (`classification`, `product`, `amount`, `unit`, `location`, a `tool:<n
 called, `reply`, `outcome` for the ask-or-act scenarios). The final `assert` is what makes pytest
 report the test PASSED/FAILED by name; the `result` fixture captures the same `EvalResult`
 regardless, so a test that fails partway still shows exactly which checks it got right.
-`duration_s`/`tokens_per_sec`/`trace` aren't checks (nothing to pass or fail) — the `agent` fixture
-fills them in automatically from the real `AgentRunner` it built, no `evaluate_*` call needed for
-any of them. `trace` is every tool call the agent made across the whole scenario (name, arguments,
-result) — not shown in the console summary (too verbose for a table), but present in `--eval-json`
-output, which is where to actually look when a scenario's `checks` say *that* it failed but not
-*why*.
+`duration_s`/`tokens_per_sec`/`trace`/`messages`/`classify_messages`/`usage_history`/`terminal`/
+`nudge_fired` aren't checks (nothing to pass or fail) — the `agent` fixture fills them in
+automatically from the real `AgentRunner` it built, no `evaluate_*` call needed for any of them.
+`trace` is every tool call the agent made across the whole scenario (name, arguments, result);
+`messages` is the raw conversation the domain loop sent/received, including a plain-text-only
+round that produces no `trace` entry at all; `classify_messages` is the separate classifier
+round's own exchange, captured even when it rejects. None of this is shown in the console summary
+(too verbose for a table); `--eval-json`'s `.log.jsonl` sidecar (see "Reading the output" below)
+is where to actually look when a scenario's `checks` say *that* it failed but not *why*. See
+docs/journal/2026-09-04-trace-and-verdict-redesign.md for what each field closes.
 
 ### Reading the output
 
@@ -167,9 +226,18 @@ throughput (`EvalResult.tokens_per_sec`, from `mistralrs`' own per-round `Usage`
 tokens/summed generation-time across every round a scenario ran, not an average of per-round
 rates, which would over-weight short rounds), then every failing scenario with its specific failed
 checks, then how the ask-or-act scenarios resolved. `--eval-json PATH` additionally writes the
-same data as JSON, including each scenario's `duration_s`/`tokens_per_sec` and top-level
-`total_duration_s`/`mean_tokens_per_sec` — one run's worth; see "Comparing models" above for
-turning several of these into one table.
+same data as two files: `PATH` itself carries each scenario's one-shot judgment under `verdict`
+(`passed`/`checks`/`failures`) and performance numbers under `metrics` (`duration_s`/
+`tokens_per_sec`), plus top-level `total_duration_s`/`mean_tokens_per_sec` and `log_file` (the
+sidecar's own filename) — one run's worth; see "Comparing models" above for turning several of
+these into one table. The execution record — `trace`/`messages`/`classify_messages`/
+`usage_history`/`terminal`/`nudge_fired` — goes to `log_file` instead: a `.jsonl` sidecar next to
+`PATH` (`<stem>.log.jsonl`), one JSON object per line, each carrying its own `scenario` to join
+back against `PATH`'s `results[]`. Split into two files, not one nested `log` key, because a
+single scenario's `messages` conversation can run to hundreds of lines — bundled into `PATH`
+itself, that dominates the file and makes `verdict`/`metrics` (the part read every time) expensive
+to even open; as a separate line-delimited file, one scenario's log can be `grep`/`jq -c`'d out
+without touching the rest.
 
 ## Safety rails
 

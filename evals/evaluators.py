@@ -68,6 +68,11 @@ class EvalResult:
     duration_s: float = 0.0
     tokens_per_sec: float | None = None
     trace: list[dict] = field(default_factory=list)
+    messages: list[dict] | None = None
+    classify_messages: list[dict] | None = None
+    usage_history: list[dict] = field(default_factory=list)
+    terminal: str = "reply"
+    nudge_fired: bool = False
 
     @property
     def passed(self) -> bool:
