@@ -161,15 +161,22 @@ def agent_runner_factory(request: pytest.FixtureRequest, inventory: tuple[Path, 
 @pytest.fixture
 def agent(agent_runner_factory, result):
     """A fresh `AgentRunner` per test (via `agent_runner_factory`), with
-    its `tokens_per_sec` folded into this test's `result` on teardown —
-    centralized here instead of the identical one-liner every
-    `test_*.py` file used to define locally. Depending on `result` means
-    this fixture tears down *before* `result`'s own teardown (pytest tears
-    down in reverse dependency order), so the write below always lands
-    before `result` is captured into the session's list."""
+    its `tokens_per_sec` and `trace_history` folded into this test's
+    `result` on teardown — centralized here instead of the identical
+    one-liner every `test_*.py` file used to define locally. Depending on
+    `result` means this fixture tears down *before* `result`'s own
+    teardown (pytest tears down in reverse dependency order), so the write
+    below always lands before `result` is captured into the session's
+    list. `trace_history` (every tool call across every `propose()`/
+    `revise()` call this test made, not just the final one) is what a
+    failing scenario needs to actually be debugged from `--eval-json`
+    output later, rather than just its checks/failures."""
     a = agent_runner_factory()
     yield a
     result.tokens_per_sec = a.tokens_per_sec
+    result.trace = [
+        {"name": t.name, "arguments": t.arguments, "result": t.result} for t in a.trace_history
+    ]
 
 
 # --- per-scenario results ---------------------------------------------------
@@ -258,6 +265,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
                     "note": r.note,
                     "duration_s": r.duration_s,
                     "tokens_per_sec": r.tokens_per_sec,
+                    "trace": r.trace,
                 }
                 for r in results
             ],

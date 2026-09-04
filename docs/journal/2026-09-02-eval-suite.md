@@ -1518,3 +1518,226 @@ consolidation doesn't touch them.
   running a real `AgentRunner` against a real `Usage` object.
 - `qwen3.8-4b-distill` (the one still-unverified addition left in the registry) hasn't been pulled
   or benchmarked yet, tok/s or otherwise.
+
+---
+
+# 2026-09-03: Higher-Bit Quants of qwen3.5-4b
+
+## Context
+
+User wanted to benchmark less-lossy quants of the settled default, prompted by a claim (from a
+Claude conversation elsewhere) that tool-calling token positions take disproportionately more
+distributional damage from 4-bit quantization than prose does, with Q6_K/fp8 suggested as a
+near-lossless alternative worth the <1GB size cost on a 4B model.
+
+Added the three plain K-quants `unsloth/Qwen3.5-4B-GGUF` offers above Q4_K_M — `Q5_K_M` (3.14GB),
+`Q6_K` (3.53GB), `Q8_0` (4.48GB) — all in the same confirmed-loadable dtype family as the existing
+Q4_K_M/Q4_K_S presets (`F32/F16/BF16, Q4_0/Q4_1/Q5_0/Q5_1/Q8_0/Q8_1, Q2_K through Q8_K`, per the
+mistralrs error message from two entries back). Deliberately skipped this same repo's
+`UD-Q5_K_XL`/`UD-Q6_K_XL`/`UD-Q8_K_XL` and plain `IQ4_NL`/`IQ4_XS` — all outside that dtype family
+(`IQ*`-tensor-containing, same failure mode already confirmed for `UD-Q4_K_XL`), so not worth
+registering without evidence they'd load any better at a different bit width.
+
+Not chased: the specific "public nvfp4 quant with KL-divergence 0.1049/1.3375" claim from the
+Claude conversation — NVFP4 isn't a GGUF quantization format at all (it's NVIDIA's own
+TensorRT-LLM-oriented format), so a repo matching that description almost certainly isn't loadable
+through this project's GGUF-only `mistralrs` pipeline regardless of the number's accuracy, which
+wasn't independently verified either. The KV-cache-dtype suggestion and the other three
+directions offered alongside it (best-of-n selection, silent-failure taxonomy, constrained
+decoding) weren't requested this round — the ask was scoped to quant benchmarking only.
+
+## Current State
+
+`MODEL_PRESETS` now holds 4 entries: `qwen3.5-4b` (default, Q4_K_M), `qwen3.5-4b-Q5_K_M`,
+`qwen3.5-4b-Q6_K`, `qwen3.5-4b-Q8_0`.
+
+## Verified this session
+
+`ruff check`/`ruff format --check`/`ty check` on `llm.py`: clean. Filenames/sizes confirmed against
+the real HF file listing (not guessed).
+
+## Missing
+
+Unpulled, unbenchmarked — `sumac models pull` then `scripts/benchmark-models.sh` is the next step,
+same as every addition this session.
+
+---
+
+# 2026-09-03: Quant Question Closed — Q4_K_M Confirmed Best, Registry Back to One
+
+## Context
+
+Real run of the three higher-bit quants added in the previous entry, against the same 22
+scenarios. Result: every one of Q5_K_M/Q6_K/Q8_0 scored *worse* than Q4_K_M (20/22 vs 21/22) and
+*slower* (79-88 tok/s vs 97 tok/s) — higher precision cost both accuracy and throughput here, the
+opposite of the hypothesis that prompted trying them.
+
+Both remaining failures were traced to specific causes, neither a quantization artifact:
+- **Basmati Rice unit mismatch (`bag` expected, `jug` got)** — happens identically on all four
+  quants, including Q4_K_M. Already-documented: `decide._resolve_product` has no bag-to-jug
+  conversion registered, a `decide.py` gap, not a model or quant problem.
+- **Butter amount mismatch (`2` expected, `4` got) — Q5/Q6/Q8 only, not Q4_K_M.** The model's own
+  tool call passed `amount="4"`, and its reply text shows why: it resolved "add 2 more" against the
+  *post-add* total (2 existing + 2 new = 4) instead of the requested delta. A genuine
+  higher-quant-only regression on this specific scenario, not a mistralrs/runtime bug.
+
+## Decision
+
+Quant exploration is closed. `qwen3.5-4b` (`Q4_K_M`) remains the only preset in the registry —
+`qwen3.5-4b-Q5_K_M`, `qwen3.5-4b-Q6_K`, `qwen3.5-4b-Q8_0` removed. Model/quant selection work for
+`sumac ask` is done; the user is moving on to other work.
+
+## Current State
+
+`MODEL_PRESETS` holds one entry again: `qwen3.5-4b`. HF cache cleanup for the three removed quants
+is the user's own action, as with every prior removal this session.
+
+## Verified this session
+
+`ruff check`/`ruff format --check`/`ty check` on `llm.py`: clean.
+
+## Missing
+
+The Basmati Rice bag/jug gap (`decide._resolve_product`) and the higher-quant-only amount
+resolution bug remain unfixed — both out of scope for this suite, noted here in case either is
+revisited later. Neither blocks anything; `qwen3.5-4b` at 21/22 is the shipped answer.
+
+---
+
+# 2026-09-03: Added qwen3.5-9b (Unbenchmarked, Kept for Later)
+
+## Context
+
+User wants a larger same-family model on hand for a future comparison, expecting it to be slower
+but not chasing that trade-off right now. Confirmed `unsloth/Qwen3.5-9B-GGUF`'s `Q4_K_M` filename
+and size against the real HF listing (5.68GB) before adding — same plain-K-quant family already
+proven to load under this `mistralrs`, same architecture/tool-call format as the working default,
+so no new compatibility risk expected.
+
+## Current State
+
+`MODEL_PRESETS`: `qwen3.5-4b` (default) and `qwen3.5-9b`
+(`unsloth/Qwen3.5-9B-GGUF`/`Qwen3.5-9B-Q4_K_M.gguf`, `ToolCallFormat.QWEN`). Not pulled, not run.
+
+## Verified this session
+
+`ruff check`/`ruff format --check`/`ty check` on `llm.py`: clean.
+
+## Missing
+
+Unbenchmarked by design — the user is keeping this on hand rather than comparing now.
+
+---
+
+# 2026-09-03: Repeated-Epoch Comparison (epoch-benchmark.sh, epoch_report.py)
+
+## Context
+
+A real qwen3.5-4b vs qwen3.5-9b run showed the 9B one write short (19/20 vs 20/20) — a
+single-epoch difference too small to tell apart from noise on its own. The user asked for a
+routine to run repeated trials and report a rate rather than a one-off pass/fail, and shared two
+AI-drafted designs (their own ChatGPT conversation, and a from-Claude one) for comparison, asking
+explicitly to be told where either was poor design rather than have it implemented as-is.
+
+This suite already tried something like this once, in much more elaborate form —
+`docs/journal/2026-09-02-eval-suite.md`'s original (pre-reduction) design had `evals/run.py`
+orchestrating epochs and `evals/compare.py` doing a paired McNemar test, observed intraclass
+correlation, a two-way cluster bootstrap, and a realised MDE, all deleted in the reduction pass as
+not earning their complexity at ~22-25 hand-picked scenarios. That same original design had
+already worked out the one piece worth keeping, for a reason neither pasted AI proposal mentioned:
+**one epoch must be one separate `pytest` process at its own explicit `--eval-seed`, not N
+repetitions sharing one loaded model** — `mistralrs.ChatCompletionRequest` has no seed field, only
+`Runner.__init__` does, so a shared Runner's RNG stream position at attempt `k` depends on how
+many tokens every prior attempt generated; reordering or filtering scenarios would silently change
+results under a shared-Runner design. Both pasted proposals defaulted to that unsafe shape (a
+single harness looping N times), just via different external mechanisms.
+
+Two other pieces of the ChatGPT proposal were cut, not merely trimmed, for reasons specific to
+this harness rather than general disagreement with the source: "10 warm-up runs, discarded" is
+MCMC-style burn-in reasoning applied where it doesn't fit — each epoch here is already an
+independent, freshly-seeded draw from a stationary distribution (same model, same temperature)
+from its first token, there is no non-stationary initial state to warm out of. "Paired/interleaved
+run ordering, randomized between repetitions" defends against cache/order effects that don't exist
+here — each epoch is a fully separate process with nothing carried over from the last, so there is
+no shared state for interleaving to protect against.
+
+## Current State
+
+- `scripts/epoch-benchmark.sh N`: for every preset `sumac models list` returns, runs `N` separate
+  `pytest --eval-model NAME --eval-seed K --eval-json runs/epochs/NAME/epoch-KK.json` invocations
+  (`K` = 1..N), reusing the `--eval-seed`/`--eval-json` flags `conftest.py` already had wired up
+  for exactly this (unused for it until now). `|| true` on the pytest line, same reasoning as
+  `benchmark-models.sh`: one epoch's real scenario failures shouldn't abort the rest. Calls `sumac
+  models pull` first.
+- `evals/epoch_report.py` (new, zero new dependencies — stdlib only): reads every
+  `runs/epochs/<model>/epoch-*.json`, groups by each file's own `"model"` field (not directory
+  naming, so a misplaced file still groups correctly), and prints (1) an overall table — epochs,
+  total attempts, pass rate, mean tok/s, mean per-scenario latency, per model; (2) a per-scenario
+  pass-count table (`p/N`) with one column per model — the part that actually answers "did this
+  regression show up consistently, or was that one run noise"; (3) a "disagreeing scenarios"
+  subset, filtered to where the raw pass count differs by more than 1 across models; (4) an
+  "always-failing" subset (every model, every epoch) — the marker for an application bug
+  (`add.basmati_rice_in_different_unit`) rather than a model difference, surfaced separately so it
+  doesn't get read as one. No p-values, confidence intervals, or effect sizes anywhere in the
+  output — plain counts and rates only.
+- `evals/README.md`: new "Is a difference real, or one noisy run?" subsection under "Comparing
+  models" explaining the routine and what was deliberately left out and why; "Deliberately not here
+  (yet)"'s epochs/seeds bullet corrected (they're back, in reduced form) and the file tree updated.
+
+## Verified this session
+
+`ruff check`/`ruff format --check`/`ty check` on `evals/epoch_report.py`: clean. `bash -n
+scripts/epoch-benchmark.sh`: clean. `evals/epoch_report.py` functionally smoke-tested against
+synthetic epoch JSON (10 epochs x 2 models x 3 scenarios, one scenario built to fail identically on
+both models, one built to regress only on the second) — correctly separated the two into
+"always-failing" vs "disagreeing" in the printed output, matching the intended diagnostic split.
+
+## Missing
+
+- Not run against real models this session — `scripts/epoch-benchmark.sh` needs a real GPU/cache,
+  same limitation as everything else here. The next step is literally `scripts/epoch-benchmark.sh
+  10` against the current registry (`qwen3.5-4b`, `qwen3.5-9b`) to find out whether the 9B write
+  regression that prompted this is real.
+
+---
+
+# 2026-09-03: Traces Now Captured in --eval-json
+
+## Context
+
+The 10-epoch qwen3.5-4b vs qwen3.5-9b comparison surfaced two real, consistent per-scenario
+regressions (`add.missing_item_discovers_new_product` 10/10 vs 3/10,
+`add.multiple_products_with_omitted_amounts` 10/10 vs 7/10) — not noise, per `epoch_report.py`'s
+disagreement filter. The obvious next step, diffing the actual failing traces between models, was
+blocked: nothing captured `AgentPlan.trace` anywhere. It existed only in memory for the duration of
+whichever test built it, then was discarded.
+
+## Current State
+
+- `src/sumac/llm.py`: `AgentRunner` gained `trace_history` — every `ToolCallRecord` dispatched
+  across every `propose()`/`revise()` call the instance has made, never reset (same accumulate-
+  don't-reset shape as `tokens_per_sec`'s counters). A new `_record_call` helper appends to both
+  the existing per-call `self._trace` (unchanged — still resets at the top of `propose()`/
+  `revise()`, still what `AgentPlan.trace` is built from) and the new `self._trace_history`;
+  replaces the three direct `self._trace.append(...)` call sites in `_classify`/`_run_loop`.
+- `evals/evaluators.py`: `EvalResult` gained `trace: list[dict]`.
+- `evals/conftest.py`'s `agent` fixture now also writes `result.trace` on teardown (each
+  `ToolCallRecord` flattened to `{"name", "arguments", "result"}`), and the `--eval-json` payload
+  carries it per scenario as `"trace"`. Not printed in the console summary — too verbose for the
+  table — but present in the JSON output, which is where a failing scenario actually gets debugged
+  from now (e.g. pasted to an outside model for comparison, as the user was already doing for the
+  epoch results themselves).
+- `evals/README.md` updated to describe it and where to find it.
+
+## Verified this session
+
+`ruff check`/`ruff format --check`/`ty check` on every edited file: clean. Not exercised against a
+real model or a real `--eval-json` write this session — same limitation as everything else here
+(no GPU, no matching Python ABI in this container).
+
+## Missing
+
+- The actual 4B-vs-9B trace diff for `add.missing_item_discovers_new_product` and
+  `add.multiple_products_with_omitted_amounts` — the reason this was built — hasn't been done yet.
+  Re-running `scripts/epoch-benchmark.sh` now will capture it; the previous 10-epoch run's traces
+  are gone, since this landed after that run finished.

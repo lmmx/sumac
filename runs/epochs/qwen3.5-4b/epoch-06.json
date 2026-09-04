@@ -1,8 +1,8 @@
 {
   "model": "qwen3.5-4b",
-  "seed": null,
-  "total_duration_s": 40.4660830089706,
-  "mean_tokens_per_sec": 98.65673506820859,
+  "seed": 6,
+  "total_duration_s": 66.68354668005486,
+  "mean_tokens_per_sec": 85.62939430076051,
   "results": [
     {
       "scenario": "add.existing_item_explicit_location",
@@ -19,8 +19,8 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.5824529560049996,
-      "tokens_per_sec": 98.92827764570963
+      "duration_s": 2.6879249890043866,
+      "tokens_per_sec": 90.21345109751583
     },
     {
       "scenario": "add.existing_item_indirect_location",
@@ -38,8 +38,8 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.5251425140013453,
-      "tokens_per_sec": 103.79746879821009
+      "duration_s": 2.834223320998717,
+      "tokens_per_sec": 93.4897792502416
     },
     {
       "scenario": "add.missing_item_discovers_new_product",
@@ -57,8 +57,8 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.977688462997321,
-      "tokens_per_sec": 100.32131438435485
+      "duration_s": 3.362395600997843,
+      "tokens_per_sec": 89.74768495158612
     },
     {
       "scenario": "add.discriminator_variant_not_confused",
@@ -75,8 +75,8 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.081192989993724,
-      "tokens_per_sec": 101.02564241524045
+      "duration_s": 2.2190025390009396,
+      "tokens_per_sec": 92.46575208725606
     },
     {
       "scenario": "add.basmati_rice_in_different_unit",
@@ -86,16 +86,16 @@
         "classification": true,
         "writes": true,
         "kind": true,
-        "product": true,
+        "product": false,
         "amount": true,
-        "unit": false
+        "unit": true
       },
       "failures": [
-        "expected unit 'bag', got 'jug'"
+        "expected product 'Basmati Rice', got 'Basmati Rice (Bag)'"
       ],
       "note": null,
-      "duration_s": 2.8018213140021544,
-      "tokens_per_sec": 98.55403325754324
+      "duration_s": 22.21536009000556,
+      "tokens_per_sec": 91.79790956093365
     },
     {
       "scenario": "add.odd_destination_respected",
@@ -112,8 +112,8 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 3.0224647440045374,
-      "tokens_per_sec": 102.99823656977392
+      "duration_s": 3.6166569420020096,
+      "tokens_per_sec": 84.56534671222046
     },
     {
       "scenario": "add.duplicate_search_bounded",
@@ -131,8 +131,8 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.7143069909943733,
-      "tokens_per_sec": 100.98619343635296
+      "duration_s": 2.7672203530091792,
+      "tokens_per_sec": 84.90930075608641
     },
     {
       "scenario": "add.product_with_omitted_amount",
@@ -149,8 +149,8 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 1.9765753410028992,
-      "tokens_per_sec": 93.85113484039373
+      "duration_s": 2.2881117579963757,
+      "tokens_per_sec": 81.92883981092491
     },
     {
       "scenario": "add.multiple_products_with_omitted_amounts",
@@ -171,8 +171,8 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 3.324501450988464,
-      "tokens_per_sec": 96.79487257152502
+      "duration_s": 4.2350123070064,
+      "tokens_per_sec": 82.93541148371646
     },
     {
       "scenario": "add.ambiguous_product_asks_or_acts",
@@ -184,8 +184,8 @@
       },
       "failures": [],
       "note": "branch=act",
-      "duration_s": 3.096162932997686,
-      "tokens_per_sec": 105.06372836091383
+      "duration_s": 4.872963417001301,
+      "tokens_per_sec": 94.05831953089198
     },
     {
       "scenario": "find.existing_item",
@@ -199,8 +199,8 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 0.9152919289917918,
-      "tokens_per_sec": 87.26415197385212
+      "duration_s": 1.0376127310009906,
+      "tokens_per_sec": 77.32497489769348
     },
     {
       "scenario": "find.missing_item",
@@ -213,8 +213,8 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 0.6377833650039975,
-      "tokens_per_sec": 112.98482251404124
+      "duration_s": 0.6889138580008876,
+      "tokens_per_sec": 105.51181013226858
     },
     {
       "scenario": "find.quantity",
@@ -228,8 +228,8 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 0.9458991430001333,
-      "tokens_per_sec": 88.636364116649
+      "duration_s": 1.1172130640043179,
+      "tokens_per_sec": 75.14450741054257
     },
     {
       "scenario": "find.shared_word_picks_right_product",
@@ -242,8 +242,8 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 1.14074223600619,
-      "tokens_per_sec": 92.43697651844087
+      "duration_s": 1.3565467310108943,
+      "tokens_per_sec": 78.63383616960385
     },
     {
       "scenario": "find.uses_only_find_tool",
@@ -256,8 +256,8 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 0.7283376499981387,
-      "tokens_per_sec": 112.09439476780233
+      "duration_s": 0.806579647003673,
+      "tokens_per_sec": 92.83819712311539
     },
     {
       "scenario": "reject.out_of_domain_weather",
@@ -269,8 +269,8 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 0.32379315899743233,
-      "tokens_per_sec": 89.10890997957803
+      "duration_s": 0.3956715070089558,
+      "tokens_per_sec": 73.17073411845091
     },
     {
       "scenario": "reject.gibberish",
@@ -282,8 +282,8 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 0.33190392299729865,
-      "tokens_per_sec": 89.10890997957803
+      "duration_s": 0.3849041730136378,
+      "tokens_per_sec": 75.2089141984491
     },
     {
       "scenario": "reject.joke_with_inventory_word",
@@ -295,8 +295,8 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 0.32572853899910115,
-      "tokens_per_sec": 89.10890997957803
+      "duration_s": 0.3837354499992216,
+      "tokens_per_sec": 74.99999701976787
     },
     {
       "scenario": "remove.partial",
@@ -313,8 +313,8 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.113449483993463,
-      "tokens_per_sec": 95.14169987679998
+      "duration_s": 2.4719725140021183,
+      "tokens_per_sec": 79.31034405329282
     },
     {
       "scenario": "remove.all",
@@ -331,8 +331,8 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 1.8264951710007153,
-      "tokens_per_sec": 102.63929539829248
+      "duration_s": 2.14498238399392,
+      "tokens_per_sec": 86.54797039630145
     },
     {
       "scenario": "remove.move_explicit",
@@ -349,8 +349,8 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.1134334100061096,
-      "tokens_per_sec": 106.43689705714532
+      "duration_s": 2.3626131509954575,
+      "tokens_per_sec": 89.68003558013162
     },
     {
       "scenario": "remove.move_vague_asks_or_acts",
@@ -362,8 +362,8 @@
       },
       "failures": [],
       "note": "branch=act",
-      "duration_s": 1.9609153029887239,
-      "tokens_per_sec": 103.1659370588139
+      "duration_s": 2.433930152998073,
+      "tokens_per_sec": 89.36355827573998
     }
   ]
 }

@@ -108,6 +108,10 @@ MODEL_PRESETS: tuple[ModelPreset, ...] = (
     # See docs/journal/2026-09-02-eval-suite.md
     ModelPreset("qwen3.5-4b", "unsloth/Qwen3.5-4B-GGUF",
                 "Qwen3.5-4B-Q4_K_M.gguf", ToolCallFormat.QWEN),
+    # Same family/tool_call_format, one size up — kept on hand for a later
+    # comparison, not benchmarked yet. See docs/journal/2026-09-02-eval-suite.md.
+    ModelPreset("qwen3.5-9b", "unsloth/Qwen3.5-9B-GGUF",
+                "Qwen3.5-9B-Q4_K_M.gguf", ToolCallFormat.QWEN),
 )  # fmt: skip
 
 _MODEL_PRESETS_BY_NAME: dict[str, ModelPreset] = {p.name: p for p in MODEL_PRESETS}
@@ -638,6 +642,7 @@ class AgentRunner:
         self._allowed: frozenset[str] = frozenset()
         self._pending: list[ProposedWrite] = []
         self._trace: list[ToolCallRecord] = []
+        self._trace_history: list[ToolCallRecord] = []
         self._completion_tokens = 0
         self._generation_time_sec = 0.0
         self.tool_callbacks: dict[str, Callable[[str, dict], str]] = {
@@ -678,6 +683,21 @@ class AgentRunner:
         if self._generation_time_sec <= 0:
             return None
         return self._completion_tokens / self._generation_time_sec
+
+    @property
+    def trace_history(self) -> tuple[ToolCallRecord, ...]:
+        """Every `ToolCallRecord` this instance has dispatched across every
+        `propose()`/`revise()` call it has made so far — unlike
+        `AgentPlan.trace`, which is scoped to just the most recent call
+        (`self._trace` resets at the top of each), this never resets. A
+        fresh `AgentRunner` per scenario (see `evals/conftest.py`'s `agent`
+        fixture) is what scopes it to one scenario's full history, feedback
+        rounds included."""
+        return tuple(self._trace_history)
+
+    def _record_call(self, record: ToolCallRecord) -> None:
+        self._trace.append(record)
+        self._trace_history.append(record)
 
     # -- tool callbacks -------------------------------------------------------
 
@@ -874,13 +894,13 @@ class AgentRunner:
         self._record_usage(response, 0)
         message = response.choices[0].message
         if not message.tool_calls:
-            self._trace.append(
+            self._record_call(
                 ToolCallRecord(name="classify_request", arguments={}, result=message.content or "")
             )
             return QueryKind.REJECT
         call = message.tool_calls[0].function
         args = json.loads(call.arguments)
-        self._trace.append(
+        self._record_call(
             ToolCallRecord(name="classify_request", arguments=args, result=json.dumps(args))
         )
         try:
@@ -933,7 +953,7 @@ class AgentRunner:
                 # this one call rather than crash or silently dispatch the
                 # wrong domain action.
                 result = _rejected("tool_not_available", {"name": call.name})
-            self._trace.append(ToolCallRecord(name=call.name, arguments=args, result=result))
+            self._record_call(ToolCallRecord(name=call.name, arguments=args, result=result))
             self._messages.append(
                 {
                     "role": "assistant",

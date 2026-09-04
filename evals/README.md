@@ -51,6 +51,33 @@ scripts/benchmark-models.sh          # pull what's missing, run the suite once p
                                       # print a pass-rate/latency table (evals/report.jq)
 ```
 
+### Is a difference real, or one noisy run?
+
+A single 22-scenario run is one stochastic sample — a 1-scenario difference between two models
+(21/22 vs 20/22) isn't enough on its own to say one is actually worse. `scripts/epoch-benchmark.sh
+N` runs every registered preset `N` times, **each epoch a separate `pytest` process at its own
+`--eval-seed`** (not `N` repetitions sharing one loaded model — `mistralrs.ChatCompletionRequest`
+has no seed field, only `Runner.__init__` does, so a shared Runner's RNG stream position at
+attempt `k` would depend on how many tokens every prior attempt generated), then
+`evals/epoch_report.py` aggregates the per-epoch JSONs into a per-scenario pass-count table across
+models — which scenarios are consistently different (a real regression) versus which fail
+identically on every model (an application bug, not a model difference; see Blind Spots below for
+`add.basmati_rice_in_different_unit`, always 0/N regardless of model).
+
+```sh
+scripts/epoch-benchmark.sh 10          # 10 epochs x every registered preset
+uv run python -m evals.epoch_report runs/epochs/*/    # re-print the aggregate later, no rerun
+```
+
+Deliberately not here: paired/interleaved run ordering (nothing carries state between two separate
+`pytest` processes to protect against), warm-up runs discarded before recording (each epoch is
+already an independent draw from a stationary distribution — there's no burn-in state to escape),
+and any inferential statistics (a paired significance test, intraclass correlation, a
+bootstrap-estimated MDE). An earlier draft of this suite built exactly that machinery
+(`evals/compare.py`) and none of it earned its complexity at ~22 hand-picked scenarios — see
+`docs/journal/2026-09-02-eval-suite.md`'s original "Comparing two runs" section, and the 2026-09-03
+entry that deleted it. `evals/epoch_report.py` reports plain counts and rates only.
+
 `sumac models pull` replaces manually editing `DEFAULT_MODEL_PRESET` and running `sumac ask` once
 per model just to prime the cache — it loads each uncached preset just long enough to trigger
 `mistralrs`' own download-on-load, the same mechanism `sumac ask` already relies on, then drops it.
@@ -67,6 +94,7 @@ evals/
 ├── evaluators.py      # EvalResult + evaluate_* functions — the checks, not tied to any one test
 ├── fixtures.py         # one realistic seeded inventory, built via real `sumac` CLI commands
 ├── report.jq            # the multi-model summary table query — see scripts/benchmark-models.sh
+├── epoch_report.py       # aggregates repeated-epoch runs — see scripts/epoch-benchmark.sh
 ├── test_find.py         # 5 scenarios
 ├── test_add.py           # 10 scenarios
 ├── test_remove.py         # 4 scenarios (consumption and movement — both classified REMOVE)
@@ -99,8 +127,12 @@ dimension (`classification`, `product`, `amount`, `unit`, `location`, a `tool:<n
 called, `reply`, `outcome` for the ask-or-act scenarios). The final `assert` is what makes pytest
 report the test PASSED/FAILED by name; the `result` fixture captures the same `EvalResult`
 regardless, so a test that fails partway still shows exactly which checks it got right.
-`duration_s`/`tokens_per_sec` aren't checks (nothing to pass or fail) — the `agent` fixture fills
-them in automatically from the real `AgentRunner` it built, no `evaluate_*` call needed for either.
+`duration_s`/`tokens_per_sec`/`trace` aren't checks (nothing to pass or fail) — the `agent` fixture
+fills them in automatically from the real `AgentRunner` it built, no `evaluate_*` call needed for
+any of them. `trace` is every tool call the agent made across the whole scenario (name, arguments,
+result) — not shown in the console summary (too verbose for a table), but present in `--eval-json`
+output, which is where to actually look when a scenario's `checks` say *that* it failed but not
+*why*.
 
 ### Reading the output
 
@@ -144,9 +176,11 @@ that temp root; no eval calls `AgentRunner.commit` — every assertion reads `pl
 
 ## Deliberately not here (yet)
 
-- **Generated cases, epochs, seeds beyond one, null baselines, McNemar/ICC/MDE/cluster bootstrap.**
-  All built once, all deleted, in the reduction pass this suite went through before reaching this
-  shape — see the journal for what each did and why none of it earned its complexity at 25 cases.
+- **Generated cases, null baselines, McNemar/ICC/MDE/cluster bootstrap.** All built once, all
+  deleted, in the reduction pass this suite went through before reaching this shape — see the
+  journal for what each did and why none of it earned its complexity at ~22 cases. Repeated
+  epochs at multiple seeds came back later, in a smaller form — see "Is a difference real, or one
+  noisy run?" above — but deliberately without the inferential-statistics half of the original.
 - **YAML scenario files.** Considered (an external design review suggested it) and explicitly not
   done — the scenarios carry real semantic nuance in their prompts and docstrings (why this
   wording, why this location, why this outcome is acceptable) that YAML would flatten.

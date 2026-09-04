@@ -67,6 +67,7 @@ class EvalResult:
     note: str | None = None
     duration_s: float = 0.0
     tokens_per_sec: float | None = None
+    trace: list[dict] = field(default_factory=list)
 
     @property
     def passed(self) -> bool:
