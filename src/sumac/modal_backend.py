@@ -260,7 +260,7 @@ _GATE_MESSAGES = [
 ]
 
 
-_STARTUP_TIMEOUT_S = 10 * 60.0  # matches serve_qwen3_5_4b.py's own startup_timeout=10*MINUTES
+_STARTUP_TIMEOUT_S = 14 * 60.0  # matches serve_qwen3_5_4b.py's own startup_timeout=14*MINUTES
 _HEALTH_POLL_INTERVAL_S = 2.0
 
 

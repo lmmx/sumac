@@ -165,7 +165,7 @@ app = modal.App("sumac-qwen3-5-4b")
     image=vllm_image,
     gpu=GPU,
     scaledown_window=15 * MINUTES,
-    startup_timeout=10 * MINUTES,
+    startup_timeout=14 * MINUTES,
     volumes={
         "/root/.cache/huggingface": hf_cache_vol,
         "/root/.cache/vllm": vllm_cache_vol,
