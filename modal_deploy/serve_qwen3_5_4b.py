@@ -141,12 +141,17 @@ vllm_image = (
     .env(
         {
             "HF_XET_HIGH_PERFORMANCE": "1",  # faster model transfers
-            # Fail loudly instead of silently re-triggering the multi-minute
-            # compile sweep if the persisted vllm_cache_vol ever misses for
-            # a (model, config, hardware) combo it should already cover —
-            # relevant once FAST_BOOT is False again; a no-op under
-            # --enforce-eager, which skips the compile path entirely.
-            "VLLM_FORCE_AOT_LOAD": "1",
+            # NOT `VLLM_FORCE_AOT_LOAD=1` here, deliberately (previously
+            # was — removed after it turned a legitimate cache-invalidating
+            # config change into a hard crash instead of a fresh compile):
+            # *any* change to the model, config, relevant `VLLM_*` vars,
+            # torch build, or GPU model invalidates the persisted
+            # `vllm_cache_vol` AOT cache — including switching vLLM
+            # versions (nightly moves every day) or adding
+            # `--speculative-config`, both of which this file does. Forcing
+            # AOT-only loading is only useful once you've stopped changing
+            # things and want drift caught loudly — re-add it then, not
+            # while actively tuning FAST_BOOT/quantization/parser/version.
         }
     )
 )
@@ -206,7 +211,7 @@ class Server:
             "--limit-mm-per-prompt",
             json.dumps({"image": 0, "video": 0, "audio": 0}),
             "--speculative-config",
-            '{"method":"qwen3_next_mtp","num_speculative_tokens":2}',
+            '{"method":"mtp","num_speculative_tokens":1}',
         ]
         cmd += ["--enforce-eager" if FAST_BOOT else "--no-enforce-eager"]
 

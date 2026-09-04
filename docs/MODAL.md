@@ -88,5 +88,11 @@ throughput). Measured on this deployment: the full-compile path ran well past te
 first boot — bump `@app.server`'s own `startup_timeout` to comfortably clear whatever your own
 measurement shows before ever setting `FAST_BOOT = False` again, or Modal will kill the container
 as failed-to-start mid-compile. The compile cache persists on `vllm_cache_vol`, so this cost is
-paid once, not on every cold start after that — `VLLM_FORCE_AOT_LOAD=1` (already set in the image)
-makes a cache miss fail loudly instead of silently re-paying it.
+paid once per (model, config, vLLM version, torch build, GPU) combination, not on every cold start
+— but *any* of those changing (a vLLM version bump, `--speculative-config`, quantization, ...)
+invalidates the cache and pays the compile cost again on the next boot; that's expected, not a
+regression. `VLLM_FORCE_AOT_LOAD=1` turns a cache miss into a hard failure instead of a fresh
+compile — useful once your config is stable and you want drift caught loudly, actively wrong while
+you're still changing things (it turned exactly this kind of legitimate cache invalidation into a
+crash once already) — not set in the image for that reason; add it back deliberately once you've
+settled on a configuration you don't expect to keep changing.
