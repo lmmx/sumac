@@ -1072,6 +1072,21 @@ def test_build_request_passes_custom_sampling_config(
     assert request["max_tokens"] == 256
 
 
+def test_build_request_carries_seed_for_a_per_request_backend(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    """`_LocalMistralRsBackend` ignores this key (the real engine is seeded
+    once at `Runner` construction) — it's carried for a per-request
+    backend (Modal) that has no other way to reproduce a run. Previously
+    missing entirely; see
+    docs/journal/2026-09-04-modal-remote-inference-backend.md."""
+    fake = FakeRunner([])
+    agent = llm.AgentRunner(data_dir, key, runner=fake, seed=12345)
+    request = agent._build_request([{"role": "user", "content": "hi"}], [])
+
+    assert request["seed"] == 12345
+
+
 def test_build_runner_passes_seed_to_mistralrs_runner(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict = {}
 

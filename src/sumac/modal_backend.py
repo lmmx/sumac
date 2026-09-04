@@ -148,6 +148,16 @@ def _build_body(request: dict, *, served_model_name: str) -> dict:
     if schemas:
         body["tools"] = [json.loads(s) for s in schemas]
         body["tool_choice"] = request["tool_choice"]
+    # `.get`, not `["seed"]` — `verify_tool_calling`'s own fixed gate
+    # request builds its dict by hand and doesn't set one; a real
+    # `llm.AgentRunner` request always does (`None` when no `--eval-seed`
+    # was passed), vLLM's OpenAI-compatible server accepts `seed` as a
+    # standard top-level field. Previously never threaded through at all —
+    # every Modal request ran against vLLM's own unseeded default with no
+    # way to reproduce a specific run. See the journal entry.
+    seed = request.get("seed")
+    if seed is not None:
+        body["seed"] = seed
     return body
 
 

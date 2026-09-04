@@ -72,6 +72,7 @@ def _fixed_request() -> dict:
         "temperature": 0.2,
         "top_p": 0.95,
         "max_tokens": 1024,
+        "seed": None,
     }
 
 
@@ -85,6 +86,23 @@ def test_build_body_uses_served_model_name_not_local_gguf_id() -> None:
     assert body["chat_template_kwargs"] == {"enable_thinking": False}
     assert body["tools"][0]["function"]["name"] == "sumac_find_inventory"
     assert body["tool_choice"] == "auto"
+
+
+def test_build_body_passes_seed_when_present() -> None:
+    request = _fixed_request()
+    request["seed"] = 12345
+
+    body = modal_backend._build_body(request, served_model_name="m")
+
+    assert body["seed"] == 12345
+
+
+def test_build_body_omits_seed_when_none_or_absent() -> None:
+    request = _fixed_request()
+    assert "seed" not in modal_backend._build_body(request, served_model_name="m")
+
+    del request["seed"]  # the gate's own hand-built request never sets this key at all
+    assert "seed" not in modal_backend._build_body(request, served_model_name="m")
 
 
 def test_build_body_omits_tools_when_no_schemas() -> None:

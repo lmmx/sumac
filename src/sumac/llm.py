@@ -836,6 +836,15 @@ class AgentRunner:
         self._temperature = temperature
         self._top_p = top_p
         self._max_tokens = max_tokens
+        # Session-level for the local backend (`_build_runner(seed=...)`
+        # seeds the whole `mistralrs.Runner`, not a per-request field — see
+        # `_LocalMistralRsBackend`, which ignores this dict key entirely).
+        # Carried into every request dict anyway so a per-request backend
+        # (Modal) has something to seed with — previously not threaded
+        # through at all, meaning every Modal request ran with vLLM's own
+        # unseeded default and no run was reproducible. See
+        # docs/journal/2026-09-04-modal-remote-inference-backend.md.
+        self._seed = seed
         self._messages: list[dict[str, str]] | None = None
         self._kind: QueryKind | None = None
         self._schemas: list[str] = []
@@ -1120,6 +1129,11 @@ class AgentRunner:
             "temperature": self._temperature,
             "top_p": self._top_p,
             "max_tokens": self._max_tokens,
+            # `_LocalMistralRsBackend` ignores this — the local engine is
+            # already seeded once at `Runner` construction, not per
+            # request. A per-request backend (Modal) uses it for whatever
+            # reproducibility a stateless HTTP request can offer.
+            "seed": self._seed,
         }
 
     def classify(self, prompt: str) -> QueryKind:

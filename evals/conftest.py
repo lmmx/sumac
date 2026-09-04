@@ -258,6 +258,14 @@ def agent_runner_factory(request: pytest.FixtureRequest, inventory: tuple[Path, 
     )
     variant = llm.prompt_variant(variant_name)
     backend_name = request.config.getoption("--eval-backend")
+    # Both backends need this: locally it seeds the real `mistralrs.Runner`
+    # (via `_build_runner` below); passed to `AgentRunner(seed=...)` further
+    # down either way, since that's what actually lands in every request
+    # dict `_build_request` builds — the one thing a per-request backend
+    # (Modal) has to reproduce a run with. Previously only reached the
+    # local `Runner`, never `AgentRunner` itself — a Modal run had no seed
+    # at all. See docs/journal/2026-09-04-modal-remote-inference-backend.md.
+    seed_value = request.config.getoption("--eval-seed")
 
     if backend_name == "modal":
         base_runner = _build_modal_runner(request.config, model)
@@ -268,7 +276,6 @@ def agent_runner_factory(request: pytest.FixtureRequest, inventory: tuple[Path, 
                 f"{model.quantized_model_id}/{model.quantized_filename} not in the local "
                 "Hugging Face cache — refusing to trigger a network download from a test fixture"
             )
-        seed_value = request.config.getoption("--eval-seed")
         try:
             base_runner = llm._build_runner(model, seed=seed_value)
         except Exception as e:  # noqa: BLE001 - last-resort guard; the cache check above is primary
@@ -289,6 +296,7 @@ def agent_runner_factory(request: pytest.FixtureRequest, inventory: tuple[Path, 
             prompt_variant=variant,
             runner=cast(llm.SendsCompletions, base_runner),
             debug=debug,
+            seed=seed_value,
         )
 
     return make
