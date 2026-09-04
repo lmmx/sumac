@@ -1187,3 +1187,14 @@ def test_ask_stats_flag_reaches_the_agent(data_dir: Path, monkeypatch: pytest.Mo
 
     _run(data_dir, "ask", "consume 1 jar of jam", "--stats", input="r\n")
     assert fake_cls.usage_flags == [False, True]
+
+
+def test_ask_debug_implies_stats(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--debug` is the strictly-more-verbose flag; it never shows fewer
+    numbers than the default would."""
+    _run(data_dir, "init")
+    fake_cls = _patch_agent_runner(monkeypatch, [_effect_plan()])
+
+    _run(data_dir, "ask", "consume 1 jar of jam", "--debug", input="r\n")
+
+    assert fake_cls.usage_flags == [True]

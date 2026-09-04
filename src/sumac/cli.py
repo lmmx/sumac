@@ -579,7 +579,16 @@ def _build_agent(llm, data_dir: Path, key: bytes, *, model: ModelPreset, view: _
     whenever the constructor gained an argument (`debug` in §43, `show_usage`
     here), and two of them are inside `except` branches where a missed
     argument surfaces only on a retry."""
-    return llm.AgentRunner(data_dir, key, model=model, debug=view.debug, show_usage=view.stats)
+    return llm.AgentRunner(
+        data_dir,
+        key,
+        model=model,
+        debug=view.debug,
+        # `--debug` implies `--stats`: it is the strictly-more-verbose flag,
+        # and a session that asked for the raw per-round request/response
+        # dumps wanting *fewer* numbers than the default is not a real case.
+        show_usage=view.stats or view.debug,
+    )
 
 
 def _decide_prompt(plan: AgentPlan, *, dry_run: bool, defer: bool) -> str:

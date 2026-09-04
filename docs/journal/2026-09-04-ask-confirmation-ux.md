@@ -286,6 +286,12 @@ tests for what it introduces.
 - `sumac ask` takes `--trace` and `--stats` alongside `--dry-run`/`--debug`, carried through
   `cli._AskView`; `--stats` reaches `AgentRunner(show_usage=...)` (llm.py), whose default stays
   True so `evals/` and the benchmark scripts print what they always did.
+- `cli._build_agent` passes `show_usage=view.stats or view.debug`, so `--debug` prints the per-round
+  usage lines without `--stats` alongside it (`test_ask_debug_implies_stats`, tests/test_cli.py).
+- `_print_usage` (llm.py) is unchanged by this branch — `--stats` restores its lines verbatim,
+  round label, token counts, `tok/s`, `total_time_sec` and round preview included; `--trace`
+  restores `print_trace`'s previous full table verbatim. `sumac ask --stats --trace` reproduces
+  exactly what printed unconditionally before.
 - `cli._decision_options` returns `list[prompt_ui.Option]` and takes `pick`, which `cli._decide_prompt`
   passes only when a plan has more than one write and `prompt_ui.interactive()` is True.
 - `cli._pick_writes` runs `prompt_ui.multiselect` over a plan's writes and returns a

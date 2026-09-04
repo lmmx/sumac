@@ -123,7 +123,10 @@ isn't an option is feedback the agent revises the plan with.
 sumac ask "move the ragu to the fridge" --dry-run   # show the plan, write nothing
 sumac ask "consume 1 jar of jam" --trace            # full tool-call arguments and raw results
 sumac ask "where is the rice?" --stats              # per-round token counts and tok/s
+sumac ask "find the butter" --stats --trace        # both, i.e. what was printed unconditionally before
 ```
+
+`--debug` (raw per-round request/response dumps) implies `--stats`.
 
 To iterate on the review screens themselves without loading a model:
 
