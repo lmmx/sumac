@@ -467,49 +467,16 @@ class PromptVariant:
 
 PROMPT_VARIANTS: tuple[PromptVariant, ...] = (
     PromptVariant("default"),  # every field defaults — reproduces current behavior exactly
-    # Overrides only empty_plan_nudge — see docs/journal/2026-09-02-eval-suite.md for the
-    # diagnosed failure this targets (a forced-retry round that repeats a search instead of
-    # transitioning to the tool that actually changes inventory). Unverified until run.
-    PromptVariant(
-        "nudge-v2",
-        empty_plan_nudge=(
-            "This request needs a change to inventory, but no change has been made yet — "
-            "a description isn't the same as making it. Continue from the conversation "
-            "above rather than starting over: if you already have what you need for an "
-            "item, make that change now; only search again for an item you haven't "
-            "looked up yet."
-        ),
-    ),
-    # v2 fixed a restart-the-search failure but plausibly traded it for a
-    # different one on a different scenario — "if you already have what you
-    # need, act now" apparently read as license to skip a still-required
-    # second search before assuming a product is new. v3/v4 test two ways
-    # of keeping the "don't restart" fix without granting that license,
-    # phrased kind-agnostically (this fires for REMOVE too, which has no
-    # search-twice-before-assuming-new policy — a wording that names that
-    # policy directly would be wrong on a REMOVE-triggered nudge).
-    PromptVariant(
-        "nudge-v3",
-        empty_plan_nudge=(
-            "This request needs a change to inventory, but no change has been made yet. "
-            "Continue from the conversation above rather than starting over — don't "
-            "repeat a search you already made. If this request's own instructions "
-            "require you to gather more information before acting on an item (for "
-            "example, before assuming an unfamiliar product doesn't exist), do that "
-            "now; otherwise make the change for that item now."
-        ),
-    ),
-    PromptVariant(
-        "nudge-v4",
-        empty_plan_nudge=(
-            "No inventory change has been made yet for this request — do not restart "
-            "it. Continue from the tool results already in this conversation. For each "
-            "item the request needs to affect: if you don't yet have enough information "
-            "to act on it correctly, get that information now, following this request's "
-            "own instructions for what's required first; if you do, make its inventory "
-            "change now."
-        ),
-    ),
+    # nudge-v2/v3/v4 (a series of `empty_plan_nudge` rewordings aimed at a
+    # diagnosed 9B failure) were tried and rolled back — see
+    # docs/journal/2026-09-04-trace-and-verdict-redesign.md for why: the
+    # comparison was confounded (mistralrs.Runner's RNG stream position
+    # drifts based on everything that ran earlier in the same session, so
+    # two different-wording sessions aren't cleanly comparable) and the
+    # trace format couldn't show what was actually sent to the model or
+    # what it replied when a round produced no tool call, so the apparent
+    # per-scenario effects couldn't be verified against what really
+    # happened. Revisit once that's fixed, not before.
 )
 
 _PROMPT_VARIANTS_BY_NAME: dict[str, PromptVariant] = {v.name: v for v in PROMPT_VARIANTS}
