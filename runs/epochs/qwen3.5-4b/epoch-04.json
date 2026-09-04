@@ -1,8 +1,8 @@
 {
   "model": "qwen3.5-4b",
   "seed": 4,
-  "total_duration_s": 63.13396771294356,
-  "mean_tokens_per_sec": 90.07766999050854,
+  "total_duration_s": 46.42716458902578,
+  "mean_tokens_per_sec": 86.51052678841725,
   "results": [
     {
       "scenario": "add.existing_item_explicit_location",
@@ -19,8 +19,34 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.6793301659927238,
-      "tokens_per_sec": 89.92372553197625
+      "duration_s": 2.8818990050058346,
+      "tokens_per_sec": 89.85398664107282,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "add"
+          },
+          "result": "{\"kind\": \"add\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "Chopped Tomatoes"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Chopped Tomatoes\", \"is_exact_match\": true, \"locations\": [{\"location_id\": \"fridge-main-shelf-2\", \"location_path\": \"Fridge > Main Shelves > Shelf 2\", \"amount\": \"1\", \"unit\": \"jar\"}]}, {\"product_id\": \"Ocado Italian Chopped Tomatoes\", \"is_exact_match\": false, \"locations\": [{\"location_id\": \"pantry-white-unit-r2c3\", \"location_path\": \"Pantry > White Unit R2C3\", \"amount\": \"3\", \"unit\": \"cans\"}]}]}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Chopped Tomatoes",
+            "amount": "1",
+            "unit": "jar",
+            "to_location": "fridge-main-shelf-2"
+          },
+          "result": "{\"status\": \"proposed\", \"product_id\": \"Chopped Tomatoes\", \"amount\": \"1\", \"unit\": \"jar\", \"from_location\": null, \"to_location\": \"fridge-main-shelf-2\", \"warnings\": []}"
+        }
+      ]
     },
     {
       "scenario": "add.existing_item_indirect_location",
@@ -38,8 +64,34 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.7952321040065726,
-      "tokens_per_sec": 95.45804282761125
+      "duration_s": 2.8451021399960155,
+      "tokens_per_sec": 93.25246463682724,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "add"
+          },
+          "result": "{\"kind\": \"add\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "Italian Chopped Tomatoes"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Ocado Italian Chopped Tomatoes\", \"is_exact_match\": false, \"locations\": [{\"location_id\": \"pantry-white-unit-r2c3\", \"location_path\": \"Pantry > White Unit R2C3\", \"amount\": \"3\", \"unit\": \"cans\"}]}]}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Ocado Italian Chopped Tomatoes",
+            "amount": "1",
+            "unit": "cans",
+            "to_location": "pantry-white-unit-r2c3"
+          },
+          "result": "{\"status\": \"proposed\", \"product_id\": \"Ocado Italian Chopped Tomatoes\", \"amount\": \"1\", \"unit\": \"cans\", \"from_location\": null, \"to_location\": \"pantry-white-unit-r2c3\", \"warnings\": []}"
+        }
+      ]
     },
     {
       "scenario": "add.missing_item_discovers_new_product",
@@ -57,8 +109,51 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 3.370213418995263,
-      "tokens_per_sec": 89.1943740779817
+      "duration_s": 3.432828981996863,
+      "tokens_per_sec": 87.86741839344941,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "add"
+          },
+          "result": "{\"kind\": \"add\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "Irn-Bru Zero"
+          },
+          "result": "{\"products\": []}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "Irn-Bru"
+          },
+          "result": "{\"products\": []}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Irn-Bru Zero",
+            "amount": "2",
+            "unit": "bottles",
+            "to_location": "fridge door"
+          },
+          "result": "{\"status\": \"rejected\", \"reason\": \"unknown_location\", \"detail\": {\"field\": \"to\", \"value\": \"fridge door\", \"suggestions\": \"['fridge-door']\"}, \"hint\": \"If a fix is obvious from this, retry with the correction \\u2014 actually make the retry, don't just describe one and stop. Otherwise explain why in plain text.\"}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Irn-Bru Zero",
+            "amount": "2",
+            "unit": "bottles",
+            "to_location": "fridge-door"
+          },
+          "result": "{\"status\": \"proposed\", \"product_id\": \"Irn-Bru Zero\", \"amount\": \"2\", \"unit\": \"bottles\", \"from_location\": null, \"to_location\": \"fridge-door\", \"warnings\": []}"
+        }
+      ]
     },
     {
       "scenario": "add.discriminator_variant_not_confused",
@@ -75,8 +170,34 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.2276852969953325,
-      "tokens_per_sec": 91.39264908143277
+      "duration_s": 2.383645819994854,
+      "tokens_per_sec": 88.97922246441432,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "add"
+          },
+          "result": "{\"kind\": \"add\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "Unsalted Butter"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Unsalted Butter\", \"is_exact_match\": true, \"locations\": [{\"location_id\": \"freezer-drawer-2\", \"location_path\": \"Big Freezer > Drawer 2\", \"amount\": \"2\", \"unit\": \"packs\"}]}]}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Unsalted Butter",
+            "amount": "2",
+            "unit": "packs",
+            "to_location": "freezer-drawer-2"
+          },
+          "result": "{\"status\": \"proposed\", \"product_id\": \"Unsalted Butter\", \"amount\": \"2\", \"unit\": \"packs\", \"from_location\": null, \"to_location\": \"freezer-drawer-2\", \"warnings\": []}"
+        }
+      ]
     },
     {
       "scenario": "add.basmati_rice_in_different_unit",
@@ -86,16 +207,52 @@
         "classification": true,
         "writes": true,
         "kind": true,
-        "product": false,
+        "product": true,
         "amount": true,
-        "unit": true
+        "unit": false
       },
       "failures": [
-        "expected product 'Basmati Rice', got 'Basmati Rice Bag'"
+        "expected unit 'bag', got 'jug'"
       ],
       "note": null,
-      "duration_s": 21.095623510002042,
-      "tokens_per_sec": 97.07894997107186
+      "duration_s": 3.4263910340087023,
+      "tokens_per_sec": 86.75227089637256,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "add"
+          },
+          "result": "{\"kind\": \"add\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "Basmati Rice"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Basmati Rice\", \"is_exact_match\": true, \"locations\": [{\"location_id\": \"pantry-white-unit-r1c1\", \"location_path\": \"Pantry > White Unit R1C1\", \"amount\": \"1\", \"unit\": \"jug\"}]}]}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Basmati Rice",
+            "amount": "1",
+            "unit": "bag",
+            "to_location": "Pantry > White Unit R1C1"
+          },
+          "result": "{\"status\": \"rejected\", \"reason\": \"unit_unconvertible\", \"detail\": {\"value\": \"bag\", \"expected\": \"jug\"}, \"hint\": \"If a fix is obvious from this, retry with the correction \\u2014 actually make the retry, don't just describe one and stop. Otherwise explain why in plain text.\"}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Basmati Rice",
+            "amount": "1",
+            "unit": "jug",
+            "to_location": "Pantry > White Unit R1C1"
+          },
+          "result": "{\"status\": \"proposed\", \"product_id\": \"Basmati Rice\", \"amount\": \"1\", \"unit\": \"jug\", \"from_location\": null, \"to_location\": \"Pantry > White Unit R1C1\", \"warnings\": []}"
+        }
+      ]
     },
     {
       "scenario": "add.odd_destination_respected",
@@ -112,8 +269,51 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 3.3527673009957653,
-      "tokens_per_sec": 92.33728883444272
+      "duration_s": 3.377933245006716,
+      "tokens_per_sec": 93.38023741748226,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "add"
+          },
+          "result": "{\"kind\": \"add\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "Pizza Express Margherita Pizza"
+          },
+          "result": "{\"products\": []}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "Margherita Pizza"
+          },
+          "result": "{\"products\": []}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Pizza Express Margherita Pizza",
+            "amount": "1",
+            "unit": "box",
+            "to_location": "fridge bottle rack"
+          },
+          "result": "{\"status\": \"rejected\", \"reason\": \"unknown_location\", \"detail\": {\"field\": \"to\", \"value\": \"fridge bottle rack\", \"suggestions\": \"['fridge-bottle-rack']\"}, \"hint\": \"If a fix is obvious from this, retry with the correction \\u2014 actually make the retry, don't just describe one and stop. Otherwise explain why in plain text.\"}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Pizza Express Margherita Pizza",
+            "amount": "1",
+            "unit": "box",
+            "to_location": "fridge-bottle-rack"
+          },
+          "result": "{\"status\": \"proposed\", \"product_id\": \"Pizza Express Margherita Pizza\", \"amount\": \"1\", \"unit\": \"box\", \"from_location\": null, \"to_location\": \"fridge-bottle-rack\", \"warnings\": []}"
+        }
+      ]
     },
     {
       "scenario": "add.duplicate_search_bounded",
@@ -131,8 +331,34 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.6379612449964043,
-      "tokens_per_sec": 88.84381325852729
+      "duration_s": 3.10287544199673,
+      "tokens_per_sec": 89.7746988586299,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "add"
+          },
+          "result": "{\"kind\": \"add\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "Ocado Italian Chopped Tomatoes"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Ocado Italian Chopped Tomatoes\", \"is_exact_match\": true, \"locations\": [{\"location_id\": \"pantry-white-unit-r2c3\", \"location_path\": \"Pantry > White Unit R2C3\", \"amount\": \"3\", \"unit\": \"cans\"}]}]}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Ocado Italian Chopped Tomatoes",
+            "amount": "6",
+            "unit": "cans",
+            "to_location": "pantry-white-unit-r2c3"
+          },
+          "result": "{\"status\": \"proposed\", \"product_id\": \"Ocado Italian Chopped Tomatoes\", \"amount\": \"6\", \"unit\": \"cans\", \"from_location\": null, \"to_location\": \"pantry-white-unit-r2c3\", \"warnings\": []}"
+        }
+      ]
     },
     {
       "scenario": "add.product_with_omitted_amount",
@@ -149,8 +375,34 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.20253465299902,
-      "tokens_per_sec": 84.87804890388112
+      "duration_s": 2.2738894170033745,
+      "tokens_per_sec": 82.62108296248417,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "add"
+          },
+          "result": "{\"kind\": \"add\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "pasta"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Fusilli Pasta\", \"is_exact_match\": false, \"locations\": [{\"location_id\": \"pantry-white-unit-r2c1\", \"location_path\": \"Pantry > White Unit R2C1\", \"amount\": \"500\", \"unit\": \"g\"}]}]}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Barilla Rigatoni",
+            "amount": "1",
+            "unit": "box",
+            "to_location": "pantry-white-unit-r2c1"
+          },
+          "result": "{\"status\": \"proposed\", \"product_id\": \"Barilla Rigatoni\", \"amount\": \"1\", \"unit\": \"box\", \"from_location\": null, \"to_location\": \"pantry-white-unit-r2c1\", \"warnings\": []}"
+        }
+      ]
     },
     {
       "scenario": "add.multiple_products_with_omitted_amounts",
@@ -171,8 +423,51 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 4.086746819986729,
-      "tokens_per_sec": 88.92969450473913
+      "duration_s": 3.565143113999511,
+      "tokens_per_sec": 85.93750130519487,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "add"
+          },
+          "result": "{\"kind\": \"add\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "butter"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Butter Beans\", \"is_exact_match\": false, \"locations\": [{\"location_id\": \"pantry-white-unit-r1c2\", \"location_path\": \"Pantry > White Unit R1C2\", \"amount\": \"2\", \"unit\": \"cans\"}]}, {\"product_id\": \"Salted Butter\", \"is_exact_match\": false, \"locations\": [{\"location_id\": \"freezer-drawer-1\", \"location_path\": \"Big Freezer > Drawer 1\", \"amount\": \"1\", \"unit\": \"pack\"}]}, {\"product_id\": \"Unsalted Butter\", \"is_exact_match\": false, \"locations\": [{\"location_id\": \"freezer-drawer-2\", \"location_path\": \"Big Freezer > Drawer 2\", \"amount\": \"2\", \"unit\": \"packs\"}]}]}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "jam"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Strawberry Jam\", \"is_exact_match\": false, \"locations\": [{\"location_id\": \"pantry-white-unit-r3c1\", \"location_path\": \"Pantry > White Unit R3C1\", \"amount\": \"1\", \"unit\": \"jar\"}]}]}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Butter",
+            "amount": "1",
+            "unit": "stick",
+            "to_location": "pantry-white-unit-r1c2"
+          },
+          "result": "{\"status\": \"proposed\", \"product_id\": \"Butter\", \"amount\": \"1\", \"unit\": \"stick\", \"from_location\": null, \"to_location\": \"pantry-white-unit-r1c2\", \"warnings\": [\"'Butter' is not a registered product \\u2014 did you mean 'Butter Beans'? Registering 'Butter' instead; run `sumac correct` if it was a typo.\"]}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Jam",
+            "amount": "1",
+            "unit": "jar",
+            "to_location": "pantry-white-unit-r3c1"
+          },
+          "result": "{\"status\": \"proposed\", \"product_id\": \"Jam\", \"amount\": \"1\", \"unit\": \"jar\", \"from_location\": null, \"to_location\": \"pantry-white-unit-r3c1\", \"warnings\": []}"
+        }
+      ]
     },
     {
       "scenario": "add.ambiguous_product_asks_or_acts",
@@ -184,8 +479,44 @@
       },
       "failures": [],
       "note": "branch=act",
-      "duration_s": 3.4691914659924805,
-      "tokens_per_sec": 95.82689293019638
+      "duration_s": 3.634882792001008,
+      "tokens_per_sec": 92.27152681863136,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "add"
+          },
+          "result": "{\"kind\": \"add\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "chopped tomatoes"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Chopped Tomatoes\", \"is_exact_match\": true, \"locations\": [{\"location_id\": \"fridge-main-shelf-2\", \"location_path\": \"Fridge > Main Shelves > Shelf 2\", \"amount\": \"1\", \"unit\": \"jar\"}]}, {\"product_id\": \"Ocado Italian Chopped Tomatoes\", \"is_exact_match\": false, \"locations\": [{\"location_id\": \"pantry-white-unit-r2c3\", \"location_path\": \"Pantry > White Unit R2C3\", \"amount\": \"3\", \"unit\": \"cans\"}]}]}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Chopped Tomatoes",
+            "amount": "1",
+            "unit": "cans",
+            "to_location": "Pantry > White Unit R2C3"
+          },
+          "result": "{\"status\": \"rejected\", \"reason\": \"unit_unconvertible\", \"detail\": {\"value\": \"cans\", \"expected\": \"jar\"}, \"hint\": \"If a fix is obvious from this, retry with the correction \\u2014 actually make the retry, don't just describe one and stop. Otherwise explain why in plain text.\"}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Chopped Tomatoes",
+            "amount": "1",
+            "unit": "jar",
+            "to_location": "Pantry > White Unit R2C3"
+          },
+          "result": "{\"status\": \"proposed\", \"product_id\": \"Chopped Tomatoes\", \"amount\": \"1\", \"unit\": \"jar\", \"from_location\": null, \"to_location\": \"Pantry > White Unit R2C3\", \"warnings\": []}"
+        }
+      ]
     },
     {
       "scenario": "find.existing_item",
@@ -199,8 +530,24 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 1.0376806309941458,
-      "tokens_per_sec": 76.60455560278885
+      "duration_s": 1.0450847199972486,
+      "tokens_per_sec": 76.36738931455105,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "find"
+          },
+          "result": "{\"kind\": \"find\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "strawberry jam"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Strawberry Jam\", \"is_exact_match\": true, \"locations\": [{\"location_id\": \"pantry-white-unit-r3c1\", \"location_path\": \"Pantry > White Unit R3C1\", \"amount\": \"1\", \"unit\": \"jar\"}]}]}"
+        }
+      ]
     },
     {
       "scenario": "find.missing_item",
@@ -213,8 +560,24 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 0.70679287200619,
-      "tokens_per_sec": 104.68749990250217
+      "duration_s": 0.7239869439945323,
+      "tokens_per_sec": 100.1494768667825,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "find"
+          },
+          "result": "{\"kind\": \"find\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "caviar"
+          },
+          "result": "{\"products\": []}"
+        }
+      ]
     },
     {
       "scenario": "find.quantity",
@@ -228,8 +591,24 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 1.0352769409946632,
-      "tokens_per_sec": 81.58995941038972
+      "duration_s": 1.10804583200661,
+      "tokens_per_sec": 75.14450741054257,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "find"
+          },
+          "result": "{\"kind\": \"find\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "basmati rice"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Basmati Rice\", \"is_exact_match\": true, \"locations\": [{\"location_id\": \"pantry-white-unit-r1c1\", \"location_path\": \"Pantry > White Unit R1C1\", \"amount\": \"1\", \"unit\": \"jug\"}]}]}"
+        }
+      ]
     },
     {
       "scenario": "find.shared_word_picks_right_product",
@@ -242,8 +621,24 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 1.2702555419964483,
-      "tokens_per_sec": 84.32708938275225
+      "duration_s": 1.3672808300034376,
+      "tokens_per_sec": 81.50470073237103,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "find"
+          },
+          "result": "{\"kind\": \"find\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "butter"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Butter Beans\", \"is_exact_match\": false, \"locations\": [{\"location_id\": \"pantry-white-unit-r1c2\", \"location_path\": \"Pantry > White Unit R1C2\", \"amount\": \"2\", \"unit\": \"cans\"}]}, {\"product_id\": \"Salted Butter\", \"is_exact_match\": false, \"locations\": [{\"location_id\": \"freezer-drawer-1\", \"location_path\": \"Big Freezer > Drawer 1\", \"amount\": \"1\", \"unit\": \"pack\"}]}, {\"product_id\": \"Unsalted Butter\", \"is_exact_match\": false, \"locations\": [{\"location_id\": \"freezer-drawer-2\", \"location_path\": \"Big Freezer > Drawer 2\", \"amount\": \"2\", \"unit\": \"packs\"}]}]}"
+        }
+      ]
     },
     {
       "scenario": "find.uses_only_find_tool",
@@ -256,8 +651,24 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 0.8014313320018118,
-      "tokens_per_sec": 103.54223470238463
+      "duration_s": 0.836774235998746,
+      "tokens_per_sec": 97.31113730696605,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "find"
+          },
+          "result": "{\"kind\": \"find\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "ragu"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Ragu\", \"is_exact_match\": true, \"locations\": [{\"location_id\": \"freezer-drawer-3\", \"location_path\": \"Big Freezer > Drawer 3\", \"amount\": \"2\", \"unit\": \"tubs\"}]}]}"
+        }
+      ]
     },
     {
       "scenario": "reject.out_of_domain_weather",
@@ -269,8 +680,17 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 0.3765752259932924,
-      "tokens_per_sec": 77.8097976293498
+      "duration_s": 0.38374734499666374,
+      "tokens_per_sec": 75.63025351508799,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "reject"
+          },
+          "result": "{\"kind\": \"reject\"}"
+        }
+      ]
     },
     {
       "scenario": "reject.gibberish",
@@ -282,8 +702,17 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 0.36152186000254005,
-      "tokens_per_sec": 80.5970129177496
+      "duration_s": 0.38742808399547357,
+      "tokens_per_sec": 76.48725532756637,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "reject"
+          },
+          "result": "{\"kind\": \"reject\"}"
+        }
+      ]
     },
     {
       "scenario": "reject.joke_with_inventory_word",
@@ -295,8 +724,17 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 0.35853149098693393,
-      "tokens_per_sec": 81.57099692009655
+      "duration_s": 0.37773289500910323,
+      "tokens_per_sec": 76.27118597836099,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "reject"
+          },
+          "result": "{\"kind\": \"reject\"}"
+        }
+      ]
     },
     {
       "scenario": "remove.partial",
@@ -313,8 +751,34 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.3417456390016014,
-      "tokens_per_sec": 83.29519441712073
+      "duration_s": 2.3943702090036822,
+      "tokens_per_sec": 82.10620161852009,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "remove"
+          },
+          "result": "{\"kind\": \"remove\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "Ragu"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Ragu\", \"is_exact_match\": true, \"locations\": [{\"location_id\": \"freezer-drawer-3\", \"location_path\": \"Big Freezer > Drawer 3\", \"amount\": \"2\", \"unit\": \"tubs\"}]}]}"
+        },
+        {
+          "name": "sumac_consume_inventory",
+          "arguments": {
+            "product_id": "Ragu",
+            "amount": "1",
+            "unit": "tubs",
+            "from_location": "freezer-drawer-3"
+          },
+          "result": "{\"status\": \"proposed\", \"product_id\": \"Ragu\", \"amount\": \"1\", \"unit\": \"tubs\", \"from_location\": \"freezer-drawer-3\", \"to_location\": null, \"warnings\": []}"
+        }
+      ]
     },
     {
       "scenario": "remove.all",
@@ -331,8 +795,34 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.2899530800059438,
-      "tokens_per_sec": 99.5305180473423
+      "duration_s": 2.2065243889956037,
+      "tokens_per_sec": 90.99709519679608,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "remove"
+          },
+          "result": "{\"kind\": \"remove\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "strawberry jam"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Strawberry Jam\", \"is_exact_match\": true, \"locations\": [{\"location_id\": \"pantry-white-unit-r3c1\", \"location_path\": \"Pantry > White Unit R3C1\", \"amount\": \"1\", \"unit\": \"jar\"}]}]}"
+        },
+        {
+          "name": "sumac_consume_inventory",
+          "arguments": {
+            "product_id": "Strawberry Jam",
+            "amount": "1",
+            "unit": "jar",
+            "from_location": "Pantry > White Unit R3C1"
+          },
+          "result": "{\"status\": \"proposed\", \"product_id\": \"Strawberry Jam\", \"amount\": \"1\", \"unit\": \"jar\", \"from_location\": \"Pantry > White Unit R3C1\", \"to_location\": null, \"warnings\": []}"
+        }
+      ]
     },
     {
       "scenario": "remove.move_explicit",
@@ -349,8 +839,35 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.3818138249916956,
-      "tokens_per_sec": 95.85958712087391
+      "duration_s": 2.4408717840124154,
+      "tokens_per_sec": 91.22653828764572,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "remove"
+          },
+          "result": "{\"kind\": \"remove\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "Ragu"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Ragu\", \"is_exact_match\": true, \"locations\": [{\"location_id\": \"freezer-drawer-3\", \"location_path\": \"Big Freezer > Drawer 3\", \"amount\": \"2\", \"unit\": \"tubs\"}]}]}"
+        },
+        {
+          "name": "sumac_move_inventory",
+          "arguments": {
+            "product_id": "Ragu",
+            "amount": "1",
+            "unit": "tubs",
+            "from_location": "freezer-drawer-3",
+            "to_location": "fridge-door"
+          },
+          "result": "{\"status\": \"proposed\", \"product_id\": \"Ragu\", \"amount\": \"1\", \"unit\": \"tubs\", \"from_location\": \"freezer-drawer-3\", \"to_location\": \"fridge-door\", \"warnings\": []}"
+        }
+      ]
     },
     {
       "scenario": "remove.move_vague_asks_or_acts",
@@ -362,8 +879,35 @@
       },
       "failures": [],
       "note": "branch=act",
-      "duration_s": 2.255103293005959,
-      "tokens_per_sec": 98.43081381597696
+      "duration_s": 2.2307263300026534,
+      "tokens_per_sec": 89.34543739543022,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "remove"
+          },
+          "result": "{\"kind\": \"remove\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "ragu"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Ragu\", \"is_exact_match\": true, \"locations\": [{\"location_id\": \"freezer-drawer-3\", \"location_path\": \"Big Freezer > Drawer 3\", \"amount\": \"2\", \"unit\": \"tubs\"}]}]}"
+        },
+        {
+          "name": "sumac_move_inventory",
+          "arguments": {
+            "product_id": "Ragu",
+            "amount": "2",
+            "unit": "tubs",
+            "from_location": "freezer-drawer-3",
+            "to_location": "fridge"
+          },
+          "result": "{\"status\": \"proposed\", \"product_id\": \"Ragu\", \"amount\": \"2\", \"unit\": \"tubs\", \"from_location\": \"freezer-drawer-3\", \"to_location\": \"fridge\", \"warnings\": []}"
+        }
+      ]
     }
   ]
 }

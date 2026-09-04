@@ -1,8 +1,8 @@
 {
   "model": "qwen3.5-4b",
   "seed": 1,
-  "total_duration_s": 61.72169107203081,
-  "mean_tokens_per_sec": 89.64115810178099,
+  "total_duration_s": 59.22714018897386,
+  "mean_tokens_per_sec": 94.3738159270406,
   "results": [
     {
       "scenario": "add.existing_item_explicit_location",
@@ -19,8 +19,34 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.4709159460035153,
-      "tokens_per_sec": 96.6350306655999
+      "duration_s": 2.548860758994124,
+      "tokens_per_sec": 94.59459456602224,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "add"
+          },
+          "result": "{\"kind\": \"add\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "Chopped Tomatoes"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Chopped Tomatoes\", \"is_exact_match\": true, \"locations\": [{\"location_id\": \"fridge-main-shelf-2\", \"location_path\": \"Fridge > Main Shelves > Shelf 2\", \"amount\": \"1\", \"unit\": \"jar\"}]}, {\"product_id\": \"Ocado Italian Chopped Tomatoes\", \"is_exact_match\": false, \"locations\": [{\"location_id\": \"pantry-white-unit-r2c3\", \"location_path\": \"Pantry > White Unit R2C3\", \"amount\": \"3\", \"unit\": \"cans\"}]}]}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Chopped Tomatoes",
+            "amount": "1",
+            "unit": "jar",
+            "to_location": "fridge-main-shelf-2"
+          },
+          "result": "{\"status\": \"proposed\", \"product_id\": \"Chopped Tomatoes\", \"amount\": \"1\", \"unit\": \"jar\", \"from_location\": null, \"to_location\": \"fridge-main-shelf-2\", \"warnings\": []}"
+        }
+      ]
     },
     {
       "scenario": "add.existing_item_indirect_location",
@@ -38,8 +64,34 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.56618142699881,
-      "tokens_per_sec": 102.3198003362934
+      "duration_s": 2.6265080939920153,
+      "tokens_per_sec": 100.93610267951873,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "add"
+          },
+          "result": "{\"kind\": \"add\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "Ocado Italian Chopped Tomatoes"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Ocado Italian Chopped Tomatoes\", \"is_exact_match\": true, \"locations\": [{\"location_id\": \"pantry-white-unit-r2c3\", \"location_path\": \"Pantry > White Unit R2C3\", \"amount\": \"3\", \"unit\": \"cans\"}]}]}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Ocado Italian Chopped Tomatoes",
+            "amount": "1",
+            "unit": "cans",
+            "to_location": "pantry-white-unit-r2c3"
+          },
+          "result": "{\"status\": \"proposed\", \"product_id\": \"Ocado Italian Chopped Tomatoes\", \"amount\": \"1\", \"unit\": \"cans\", \"from_location\": null, \"to_location\": \"pantry-white-unit-r2c3\", \"warnings\": []}"
+        }
+      ]
     },
     {
       "scenario": "add.missing_item_discovers_new_product",
@@ -57,8 +109,51 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 3.0894191469997168,
-      "tokens_per_sec": 97.26549033870133
+      "duration_s": 3.1972439370001666,
+      "tokens_per_sec": 93.09309328194048,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "add"
+          },
+          "result": "{\"kind\": \"add\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "Irn-Bru Zero"
+          },
+          "result": "{\"products\": []}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "Irn-Bru"
+          },
+          "result": "{\"products\": []}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Irn-Bru Zero",
+            "amount": "2",
+            "unit": "bottles",
+            "to_location": "fridge door"
+          },
+          "result": "{\"status\": \"rejected\", \"reason\": \"unknown_location\", \"detail\": {\"field\": \"to\", \"value\": \"fridge door\", \"suggestions\": \"['fridge-door']\"}, \"hint\": \"If a fix is obvious from this, retry with the correction \\u2014 actually make the retry, don't just describe one and stop. Otherwise explain why in plain text.\"}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Irn-Bru Zero",
+            "amount": "2",
+            "unit": "bottles",
+            "to_location": "fridge-door"
+          },
+          "result": "{\"status\": \"proposed\", \"product_id\": \"Irn-Bru Zero\", \"amount\": \"2\", \"unit\": \"bottles\", \"from_location\": null, \"to_location\": \"fridge-door\", \"warnings\": []}"
+        }
+      ]
     },
     {
       "scenario": "add.discriminator_variant_not_confused",
@@ -75,8 +170,34 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.089516938998713,
-      "tokens_per_sec": 96.72466753785841
+      "duration_s": 2.1335069769993424,
+      "tokens_per_sec": 94.68937772826186,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "add"
+          },
+          "result": "{\"kind\": \"add\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "Unsalted Butter"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Unsalted Butter\", \"is_exact_match\": true, \"locations\": [{\"location_id\": \"freezer-drawer-2\", \"location_path\": \"Big Freezer > Drawer 2\", \"amount\": \"2\", \"unit\": \"packs\"}]}]}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Unsalted Butter",
+            "amount": "2",
+            "unit": "packs",
+            "to_location": "freezer-drawer-2"
+          },
+          "result": "{\"status\": \"proposed\", \"product_id\": \"Unsalted Butter\", \"amount\": \"2\", \"unit\": \"packs\", \"from_location\": null, \"to_location\": \"freezer-drawer-2\", \"warnings\": []}"
+        }
+      ]
     },
     {
       "scenario": "add.basmati_rice_in_different_unit",
@@ -94,8 +215,234 @@
         "expected product 'Basmati Rice', got 'Basmati Rice (Bag)'"
       ],
       "note": null,
-      "duration_s": 19.62728777099983,
-      "tokens_per_sec": 103.94499888810034
+      "duration_s": 20.07339833000151,
+      "tokens_per_sec": 102.20387158136607,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "add"
+          },
+          "result": "{\"kind\": \"add\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "Basmati Rice"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Basmati Rice\", \"is_exact_match\": true, \"locations\": [{\"location_id\": \"pantry-white-unit-r1c1\", \"location_path\": \"Pantry > White Unit R1C1\", \"amount\": \"1\", \"unit\": \"jug\"}]}]}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Basmati Rice",
+            "amount": "1",
+            "unit": "bag",
+            "to_location": "Pantry > White Unit R1C1"
+          },
+          "result": "{\"status\": \"rejected\", \"reason\": \"unit_unconvertible\", \"detail\": {\"value\": \"bag\", \"expected\": \"jug\"}, \"hint\": \"If a fix is obvious from this, retry with the correction \\u2014 actually make the retry, don't just describe one and stop. Otherwise explain why in plain text.\"}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Basmati Rice",
+            "amount": "1",
+            "unit": "bag",
+            "to_location": "Pantry > White Unit R1C1"
+          },
+          "result": "{\"status\": \"rejected\", \"reason\": \"unit_unconvertible\", \"detail\": {\"value\": \"bag\", \"expected\": \"jug\"}, \"hint\": \"If a fix is obvious from this, retry with the correction \\u2014 actually make the retry, don't just describe one and stop. Otherwise explain why in plain text.\"}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Basmati Rice",
+            "amount": "1",
+            "unit": "bag",
+            "to_location": "Pantry > White Unit R1C1"
+          },
+          "result": "{\"status\": \"rejected\", \"reason\": \"unit_unconvertible\", \"detail\": {\"value\": \"bag\", \"expected\": \"jug\"}, \"hint\": \"If a fix is obvious from this, retry with the correction \\u2014 actually make the retry, don't just describe one and stop. Otherwise explain why in plain text.\"}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Basmati Rice",
+            "amount": "1",
+            "unit": "bag",
+            "to_location": "Pantry > White Unit R1C1"
+          },
+          "result": "{\"status\": \"rejected\", \"reason\": \"unit_unconvertible\", \"detail\": {\"value\": \"bag\", \"expected\": \"jug\"}, \"hint\": \"If a fix is obvious from this, retry with the correction \\u2014 actually make the retry, don't just describe one and stop. Otherwise explain why in plain text.\"}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Basmati Rice",
+            "amount": "1",
+            "unit": "bag",
+            "to_location": "Pantry > White Unit R1C1"
+          },
+          "result": "{\"status\": \"rejected\", \"reason\": \"unit_unconvertible\", \"detail\": {\"value\": \"bag\", \"expected\": \"jug\"}, \"hint\": \"If a fix is obvious from this, retry with the correction \\u2014 actually make the retry, don't just describe one and stop. Otherwise explain why in plain text.\"}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Basmati Rice",
+            "amount": "1",
+            "unit": "bag",
+            "to_location": "Pantry > White Unit R1C1"
+          },
+          "result": "{\"status\": \"rejected\", \"reason\": \"unit_unconvertible\", \"detail\": {\"value\": \"bag\", \"expected\": \"jug\"}, \"hint\": \"If a fix is obvious from this, retry with the correction \\u2014 actually make the retry, don't just describe one and stop. Otherwise explain why in plain text.\"}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Basmati Rice",
+            "amount": "1",
+            "unit": "bag",
+            "to_location": "Pantry > White Unit R1C1"
+          },
+          "result": "{\"status\": \"rejected\", \"reason\": \"unit_unconvertible\", \"detail\": {\"value\": \"bag\", \"expected\": \"jug\"}, \"hint\": \"If a fix is obvious from this, retry with the correction \\u2014 actually make the retry, don't just describe one and stop. Otherwise explain why in plain text.\"}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Basmati Rice",
+            "amount": "1",
+            "unit": "bag",
+            "to_location": "Pantry > White Unit R1C1"
+          },
+          "result": "{\"status\": \"rejected\", \"reason\": \"unit_unconvertible\", \"detail\": {\"value\": \"bag\", \"expected\": \"jug\"}, \"hint\": \"If a fix is obvious from this, retry with the correction \\u2014 actually make the retry, don't just describe one and stop. Otherwise explain why in plain text.\"}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Basmati Rice",
+            "amount": "1",
+            "unit": "bag",
+            "to_location": "Pantry > White Unit R1C1"
+          },
+          "result": "{\"status\": \"rejected\", \"reason\": \"unit_unconvertible\", \"detail\": {\"value\": \"bag\", \"expected\": \"jug\"}, \"hint\": \"If a fix is obvious from this, retry with the correction \\u2014 actually make the retry, don't just describe one and stop. Otherwise explain why in plain text.\"}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Basmati Rice",
+            "amount": "1",
+            "unit": "bag",
+            "to_location": "Pantry > White Unit R1C1"
+          },
+          "result": "{\"status\": \"rejected\", \"reason\": \"unit_unconvertible\", \"detail\": {\"value\": \"bag\", \"expected\": \"jug\"}, \"hint\": \"If a fix is obvious from this, retry with the correction \\u2014 actually make the retry, don't just describe one and stop. Otherwise explain why in plain text.\"}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Basmati Rice",
+            "amount": "1",
+            "unit": "bag",
+            "to_location": "Pantry > White Unit R1C1"
+          },
+          "result": "{\"status\": \"rejected\", \"reason\": \"unit_unconvertible\", \"detail\": {\"value\": \"bag\", \"expected\": \"jug\"}, \"hint\": \"If a fix is obvious from this, retry with the correction \\u2014 actually make the retry, don't just describe one and stop. Otherwise explain why in plain text.\"}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Basmati Rice",
+            "amount": "1",
+            "unit": "bag",
+            "to_location": "Pantry > White Unit R1C1"
+          },
+          "result": "{\"status\": \"rejected\", \"reason\": \"unit_unconvertible\", \"detail\": {\"value\": \"bag\", \"expected\": \"jug\"}, \"hint\": \"If a fix is obvious from this, retry with the correction \\u2014 actually make the retry, don't just describe one and stop. Otherwise explain why in plain text.\"}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Basmati Rice",
+            "amount": "1",
+            "unit": "bag",
+            "to_location": "Pantry > White Unit R1C1"
+          },
+          "result": "{\"status\": \"rejected\", \"reason\": \"unit_unconvertible\", \"detail\": {\"value\": \"bag\", \"expected\": \"jug\"}, \"hint\": \"If a fix is obvious from this, retry with the correction \\u2014 actually make the retry, don't just describe one and stop. Otherwise explain why in plain text.\"}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Basmati Rice",
+            "amount": "1",
+            "unit": "bag",
+            "to_location": "Pantry > White Unit R1C1"
+          },
+          "result": "{\"status\": \"rejected\", \"reason\": \"unit_unconvertible\", \"detail\": {\"value\": \"bag\", \"expected\": \"jug\"}, \"hint\": \"If a fix is obvious from this, retry with the correction \\u2014 actually make the retry, don't just describe one and stop. Otherwise explain why in plain text.\"}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Basmati Rice",
+            "amount": "1",
+            "unit": "bag",
+            "to_location": "Pantry > White Unit R1C1"
+          },
+          "result": "{\"status\": \"rejected\", \"reason\": \"unit_unconvertible\", \"detail\": {\"value\": \"bag\", \"expected\": \"jug\"}, \"hint\": \"If a fix is obvious from this, retry with the correction \\u2014 actually make the retry, don't just describe one and stop. Otherwise explain why in plain text.\"}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Basmati Rice",
+            "amount": "1",
+            "unit": "bag",
+            "to_location": "Pantry > White Unit R1C1"
+          },
+          "result": "{\"status\": \"rejected\", \"reason\": \"unit_unconvertible\", \"detail\": {\"value\": \"bag\", \"expected\": \"jug\"}, \"hint\": \"If a fix is obvious from this, retry with the correction \\u2014 actually make the retry, don't just describe one and stop. Otherwise explain why in plain text.\"}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Basmati Rice",
+            "amount": "1",
+            "unit": "bag",
+            "to_location": "Pantry > White Unit R1C1"
+          },
+          "result": "{\"status\": \"rejected\", \"reason\": \"unit_unconvertible\", \"detail\": {\"value\": \"bag\", \"expected\": \"jug\"}, \"hint\": \"If a fix is obvious from this, retry with the correction \\u2014 actually make the retry, don't just describe one and stop. Otherwise explain why in plain text.\"}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Basmati Rice",
+            "amount": "1",
+            "unit": "bag",
+            "to_location": "Pantry > White Unit R1C1"
+          },
+          "result": "{\"status\": \"rejected\", \"reason\": \"unit_unconvertible\", \"detail\": {\"value\": \"bag\", \"expected\": \"jug\"}, \"hint\": \"If a fix is obvious from this, retry with the correction \\u2014 actually make the retry, don't just describe one and stop. Otherwise explain why in plain text.\"}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Basmati Rice",
+            "amount": "1",
+            "unit": "bag",
+            "to_location": "Pantry > White Unit R1C1"
+          },
+          "result": "{\"status\": \"rejected\", \"reason\": \"unit_unconvertible\", \"detail\": {\"value\": \"bag\", \"expected\": \"jug\"}, \"hint\": \"If a fix is obvious from this, retry with the correction \\u2014 actually make the retry, don't just describe one and stop. Otherwise explain why in plain text.\"}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Basmati Rice",
+            "amount": "1",
+            "unit": "bag",
+            "to_location": "Pantry > White Unit R1C1"
+          },
+          "result": "{\"status\": \"rejected\", \"reason\": \"unit_unconvertible\", \"detail\": {\"value\": \"bag\", \"expected\": \"jug\"}, \"hint\": \"If a fix is obvious from this, retry with the correction \\u2014 actually make the retry, don't just describe one and stop. Otherwise explain why in plain text.\"}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Basmati Rice (Bag)",
+            "amount": "1",
+            "unit": "bag",
+            "to_location": "Pantry > White Unit R1C1"
+          },
+          "result": "{\"status\": \"proposed\", \"product_id\": \"Basmati Rice (Bag)\", \"amount\": \"1\", \"unit\": \"bag\", \"from_location\": null, \"to_location\": \"Pantry > White Unit R1C1\", \"warnings\": [\"'Basmati Rice (Bag)' is not a registered product \\u2014 did you mean 'Basmati Rice'? Registering 'Basmati Rice (Bag)' instead; run `sumac correct` if it was a typo.\"]}"
+        }
+      ]
     },
     {
       "scenario": "add.odd_destination_respected",
@@ -112,8 +459,51 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 3.5153897929994855,
-      "tokens_per_sec": 89.16030518124066
+      "duration_s": 3.179294461006066,
+      "tokens_per_sec": 96.45868405318397,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "add"
+          },
+          "result": "{\"kind\": \"add\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "Pizza Express Margherita Pizza"
+          },
+          "result": "{\"products\": []}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "Margherita Pizza"
+          },
+          "result": "{\"products\": []}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Pizza Express Margherita Pizza",
+            "amount": "1",
+            "unit": "box",
+            "to_location": "fridge bottle rack"
+          },
+          "result": "{\"status\": \"rejected\", \"reason\": \"unknown_location\", \"detail\": {\"field\": \"to\", \"value\": \"fridge bottle rack\", \"suggestions\": \"['fridge-bottle-rack']\"}, \"hint\": \"If a fix is obvious from this, retry with the correction \\u2014 actually make the retry, don't just describe one and stop. Otherwise explain why in plain text.\"}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Pizza Express Margherita Pizza",
+            "amount": "1",
+            "unit": "box",
+            "to_location": "fridge-bottle-rack"
+          },
+          "result": "{\"status\": \"proposed\", \"product_id\": \"Pizza Express Margherita Pizza\", \"amount\": \"1\", \"unit\": \"box\", \"from_location\": null, \"to_location\": \"fridge-bottle-rack\", \"warnings\": []}"
+        }
+      ]
     },
     {
       "scenario": "add.duplicate_search_bounded",
@@ -131,8 +521,34 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 3.078657814010512,
-      "tokens_per_sec": 89.7079290085044
+      "duration_s": 2.85510176900425,
+      "tokens_per_sec": 97.78112038014268,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "add"
+          },
+          "result": "{\"kind\": \"add\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "Ocado Italian Chopped Tomatoes"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Ocado Italian Chopped Tomatoes\", \"is_exact_match\": true, \"locations\": [{\"location_id\": \"pantry-white-unit-r2c3\", \"location_path\": \"Pantry > White Unit R2C3\", \"amount\": \"3\", \"unit\": \"cans\"}]}]}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Ocado Italian Chopped Tomatoes",
+            "amount": "6",
+            "unit": "cans",
+            "to_location": "pantry-white-unit-r2c3"
+          },
+          "result": "{\"status\": \"proposed\", \"product_id\": \"Ocado Italian Chopped Tomatoes\", \"amount\": \"6\", \"unit\": \"cans\", \"from_location\": null, \"to_location\": \"pantry-white-unit-r2c3\", \"warnings\": []}"
+        }
+      ]
     },
     {
       "scenario": "add.product_with_omitted_amount",
@@ -149,8 +565,34 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.2410474009957397,
-      "tokens_per_sec": 82.85714426819162
+      "duration_s": 2.1261689200036926,
+      "tokens_per_sec": 90.81684488964635,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "add"
+          },
+          "result": "{\"kind\": \"add\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "pasta"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Fusilli Pasta\", \"is_exact_match\": false, \"locations\": [{\"location_id\": \"pantry-white-unit-r2c1\", \"location_path\": \"Pantry > White Unit R2C1\", \"amount\": \"500\", \"unit\": \"g\"}]}]}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Barilla Rigatoni",
+            "amount": "1",
+            "unit": "box",
+            "to_location": "Pantry > White Unit R2C1"
+          },
+          "result": "{\"status\": \"proposed\", \"product_id\": \"Barilla Rigatoni\", \"amount\": \"1\", \"unit\": \"box\", \"from_location\": null, \"to_location\": \"Pantry > White Unit R2C1\", \"warnings\": []}"
+        }
+      ]
     },
     {
       "scenario": "add.multiple_products_with_omitted_amounts",
@@ -171,8 +613,51 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 4.167430825997144,
-      "tokens_per_sec": 86.41345858589196
+      "duration_s": 3.37032620300306,
+      "tokens_per_sec": 92.5925934947962,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "add"
+          },
+          "result": "{\"kind\": \"add\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "butter"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Butter Beans\", \"is_exact_match\": false, \"locations\": [{\"location_id\": \"pantry-white-unit-r1c2\", \"location_path\": \"Pantry > White Unit R1C2\", \"amount\": \"2\", \"unit\": \"cans\"}]}, {\"product_id\": \"Salted Butter\", \"is_exact_match\": false, \"locations\": [{\"location_id\": \"freezer-drawer-1\", \"location_path\": \"Big Freezer > Drawer 1\", \"amount\": \"1\", \"unit\": \"pack\"}]}, {\"product_id\": \"Unsalted Butter\", \"is_exact_match\": false, \"locations\": [{\"location_id\": \"freezer-drawer-2\", \"location_path\": \"Big Freezer > Drawer 2\", \"amount\": \"2\", \"unit\": \"packs\"}]}]}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "jam"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Strawberry Jam\", \"is_exact_match\": false, \"locations\": [{\"location_id\": \"pantry-white-unit-r3c1\", \"location_path\": \"Pantry > White Unit R3C1\", \"amount\": \"1\", \"unit\": \"jar\"}]}]}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Butter",
+            "amount": "1",
+            "unit": "stick",
+            "to_location": "pantry-white-unit-r1c2"
+          },
+          "result": "{\"status\": \"proposed\", \"product_id\": \"Butter\", \"amount\": \"1\", \"unit\": \"stick\", \"from_location\": null, \"to_location\": \"pantry-white-unit-r1c2\", \"warnings\": [\"'Butter' is not a registered product \\u2014 did you mean 'Butter Beans'? Registering 'Butter' instead; run `sumac correct` if it was a typo.\"]}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Jam",
+            "amount": "1",
+            "unit": "jar",
+            "to_location": "pantry-white-unit-r3c1"
+          },
+          "result": "{\"status\": \"proposed\", \"product_id\": \"Jam\", \"amount\": \"1\", \"unit\": \"jar\", \"from_location\": null, \"to_location\": \"pantry-white-unit-r3c1\", \"warnings\": []}"
+        }
+      ]
     },
     {
       "scenario": "add.ambiguous_product_asks_or_acts",
@@ -184,8 +669,44 @@
       },
       "failures": [],
       "note": "branch=act",
-      "duration_s": 3.7943448049918516,
-      "tokens_per_sec": 93.3108496168098
+      "duration_s": 3.352741052993224,
+      "tokens_per_sec": 100.86455344502585,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "add"
+          },
+          "result": "{\"kind\": \"add\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "chopped tomatoes"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Chopped Tomatoes\", \"is_exact_match\": true, \"locations\": [{\"location_id\": \"fridge-main-shelf-2\", \"location_path\": \"Fridge > Main Shelves > Shelf 2\", \"amount\": \"1\", \"unit\": \"jar\"}]}, {\"product_id\": \"Ocado Italian Chopped Tomatoes\", \"is_exact_match\": false, \"locations\": [{\"location_id\": \"pantry-white-unit-r2c3\", \"location_path\": \"Pantry > White Unit R2C3\", \"amount\": \"3\", \"unit\": \"cans\"}]}]}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Chopped Tomatoes",
+            "amount": "1",
+            "unit": "cans",
+            "to_location": "Pantry > White Unit R2C3"
+          },
+          "result": "{\"status\": \"rejected\", \"reason\": \"unit_unconvertible\", \"detail\": {\"value\": \"cans\", \"expected\": \"jar\"}, \"hint\": \"If a fix is obvious from this, retry with the correction \\u2014 actually make the retry, don't just describe one and stop. Otherwise explain why in plain text.\"}"
+        },
+        {
+          "name": "sumac_discover_inventory",
+          "arguments": {
+            "product_id": "Chopped Tomatoes",
+            "amount": "1",
+            "unit": "jar",
+            "to_location": "Pantry > White Unit R2C3"
+          },
+          "result": "{\"status\": \"proposed\", \"product_id\": \"Chopped Tomatoes\", \"amount\": \"1\", \"unit\": \"jar\", \"from_location\": null, \"to_location\": \"Pantry > White Unit R2C3\", \"warnings\": []}"
+        }
+      ]
     },
     {
       "scenario": "find.existing_item",
@@ -199,8 +720,24 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 1.0217185520014027,
-      "tokens_per_sec": 78.0590718182999
+      "duration_s": 0.955770960994414,
+      "tokens_per_sec": 83.90022540793575,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "find"
+          },
+          "result": "{\"kind\": \"find\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "strawberry jam"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Strawberry Jam\", \"is_exact_match\": true, \"locations\": [{\"location_id\": \"pantry-white-unit-r3c1\", \"location_path\": \"Pantry > White Unit R3C1\", \"amount\": \"1\", \"unit\": \"jar\"}]}]}"
+        }
+      ]
     },
     {
       "scenario": "find.missing_item",
@@ -213,8 +750,24 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 0.729616224009078,
-      "tokens_per_sec": 99.25925969750466
+      "duration_s": 0.6640196879889118,
+      "tokens_per_sec": 110.01642083502388,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "find"
+          },
+          "result": "{\"kind\": \"find\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "caviar"
+          },
+          "result": "{\"products\": []}"
+        }
+      ]
     },
     {
       "scenario": "find.quantity",
@@ -228,8 +781,24 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 1.0567104450019542,
-      "tokens_per_sec": 79.59183760604876
+      "duration_s": 0.9923560500028543,
+      "tokens_per_sec": 85.15283763005168,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "find"
+          },
+          "result": "{\"kind\": \"find\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "basmati rice"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Basmati Rice\", \"is_exact_match\": true, \"locations\": [{\"location_id\": \"pantry-white-unit-r1c1\", \"location_path\": \"Pantry > White Unit R1C1\", \"amount\": \"1\", \"unit\": \"jug\"}]}]}"
+        }
+      ]
     },
     {
       "scenario": "find.shared_word_picks_right_product",
@@ -242,8 +811,24 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 1.2927972650068114,
-      "tokens_per_sec": 81.95364209295788
+      "duration_s": 1.2127282849978656,
+      "tokens_per_sec": 87.76595813317934,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "find"
+          },
+          "result": "{\"kind\": \"find\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "butter"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Butter Beans\", \"is_exact_match\": false, \"locations\": [{\"location_id\": \"pantry-white-unit-r1c2\", \"location_path\": \"Pantry > White Unit R1C2\", \"amount\": \"2\", \"unit\": \"cans\"}]}, {\"product_id\": \"Salted Butter\", \"is_exact_match\": false, \"locations\": [{\"location_id\": \"freezer-drawer-1\", \"location_path\": \"Big Freezer > Drawer 1\", \"amount\": \"1\", \"unit\": \"pack\"}]}, {\"product_id\": \"Unsalted Butter\", \"is_exact_match\": false, \"locations\": [{\"location_id\": \"freezer-drawer-2\", \"location_path\": \"Big Freezer > Drawer 2\", \"amount\": \"2\", \"unit\": \"packs\"}]}]}"
+        }
+      ]
     },
     {
       "scenario": "find.uses_only_find_tool",
@@ -256,8 +841,24 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 0.7756778940092772,
-      "tokens_per_sec": 97.08738053494963
+      "duration_s": 0.7123651069996413,
+      "tokens_per_sec": 106.87022881313094,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "find"
+          },
+          "result": "{\"kind\": \"find\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "ragu"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Ragu\", \"is_exact_match\": true, \"locations\": [{\"location_id\": \"freezer-drawer-3\", \"location_path\": \"Big Freezer > Drawer 3\", \"amount\": \"2\", \"unit\": \"tubs\"}]}]}"
+        }
+      ]
     },
     {
       "scenario": "reject.out_of_domain_weather",
@@ -269,8 +870,17 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 0.36395374800486024,
-      "tokens_per_sec": 79.88165691742763
+      "duration_s": 0.33941226699971594,
+      "tokens_per_sec": 86.26198260477445,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "reject"
+          },
+          "result": "{\"kind\": \"reject\"}"
+        }
+      ]
     },
     {
       "scenario": "reject.gibberish",
@@ -282,8 +892,17 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 0.36331893800524995,
-      "tokens_per_sec": 79.88165691742763
+      "duration_s": 0.34495866199722514,
+      "tokens_per_sec": 84.1121469713089,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "reject"
+          },
+          "result": "{\"kind\": \"reject\"}"
+        }
+      ]
     },
     {
       "scenario": "reject.joke_with_inventory_word",
@@ -295,8 +914,17 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 0.36434951500268653,
-      "tokens_per_sec": 79.64602083595605
+      "duration_s": 0.342974218991003,
+      "tokens_per_sec": 84.90566336926138,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "reject"
+          },
+          "result": "{\"kind\": \"reject\"}"
+        }
+      ]
     },
     {
       "scenario": "remove.partial",
@@ -313,8 +941,34 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.5097780670039356,
-      "tokens_per_sec": 85.36064784626072
+      "duration_s": 2.1511658020026516,
+      "tokens_per_sec": 89.27680819237158,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "remove"
+          },
+          "result": "{\"kind\": \"remove\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "Ragu"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Ragu\", \"is_exact_match\": true, \"locations\": [{\"location_id\": \"freezer-drawer-3\", \"location_path\": \"Big Freezer > Drawer 3\", \"amount\": \"2\", \"unit\": \"tubs\"}]}]}"
+        },
+        {
+          "name": "sumac_consume_inventory",
+          "arguments": {
+            "product_id": "Ragu",
+            "amount": "1",
+            "unit": "tubs",
+            "from_location": "freezer-drawer-3"
+          },
+          "result": "{\"status\": \"proposed\", \"product_id\": \"Ragu\", \"amount\": \"1\", \"unit\": \"tubs\", \"from_location\": \"freezer-drawer-3\", \"to_location\": null, \"warnings\": []}"
+        }
+      ]
     },
     {
       "scenario": "remove.all",
@@ -331,8 +985,34 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 1.9918721729918616,
-      "tokens_per_sec": 89.29531947476188
+      "duration_s": 1.8510260790062603,
+      "tokens_per_sec": 96.12043768756038,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "remove"
+          },
+          "result": "{\"kind\": \"remove\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "strawberry jam"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Strawberry Jam\", \"is_exact_match\": true, \"locations\": [{\"location_id\": \"pantry-white-unit-r3c1\", \"location_path\": \"Pantry > White Unit R3C1\", \"amount\": \"1\", \"unit\": \"jar\"}]}]}"
+        },
+        {
+          "name": "sumac_consume_inventory",
+          "arguments": {
+            "product_id": "Strawberry Jam",
+            "amount": "1",
+            "unit": "jar",
+            "from_location": "pantry-white-unit-r3c1"
+          },
+          "result": "{\"status\": \"proposed\", \"product_id\": \"Strawberry Jam\", \"amount\": \"1\", \"unit\": \"jar\", \"from_location\": \"pantry-white-unit-r3c1\", \"to_location\": null, \"warnings\": []}"
+        }
+      ]
     },
     {
       "scenario": "remove.move_explicit",
@@ -349,8 +1029,35 @@
       },
       "failures": [],
       "note": null,
-      "duration_s": 2.421334091006429,
-      "tokens_per_sec": 92.39610986147915
+      "duration_s": 2.152084208006272,
+      "tokens_per_sec": 99.75062516132087,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "remove"
+          },
+          "result": "{\"kind\": \"remove\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "Ragu"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Ragu\", \"is_exact_match\": true, \"locations\": [{\"location_id\": \"freezer-drawer-3\", \"location_path\": \"Big Freezer > Drawer 3\", \"amount\": \"2\", \"unit\": \"tubs\"}]}]}"
+        },
+        {
+          "name": "sumac_move_inventory",
+          "arguments": {
+            "product_id": "Ragu",
+            "amount": "1",
+            "unit": "tubs",
+            "from_location": "freezer-drawer-3",
+            "to_location": "fridge-door"
+          },
+          "result": "{\"status\": \"proposed\", \"product_id\": \"Ragu\", \"amount\": \"1\", \"unit\": \"tubs\", \"from_location\": \"freezer-drawer-3\", \"to_location\": \"fridge-door\", \"warnings\": []}"
+        }
+      ]
     },
     {
       "scenario": "remove.move_vague_asks_or_acts",
@@ -362,8 +1069,35 @@
       },
       "failures": [],
       "note": "branch=act",
-      "duration_s": 2.190372290991945,
-      "tokens_per_sec": 91.35320020891618
+      "duration_s": 2.045128357989597,
+      "tokens_per_sec": 98.05977948906974,
+      "trace": [
+        {
+          "name": "classify_request",
+          "arguments": {
+            "kind": "remove"
+          },
+          "result": "{\"kind\": \"remove\"}"
+        },
+        {
+          "name": "sumac_find_inventory",
+          "arguments": {
+            "query": "ragu"
+          },
+          "result": "{\"products\": [{\"product_id\": \"Ragu\", \"is_exact_match\": true, \"locations\": [{\"location_id\": \"freezer-drawer-3\", \"location_path\": \"Big Freezer > Drawer 3\", \"amount\": \"2\", \"unit\": \"tubs\"}]}]}"
+        },
+        {
+          "name": "sumac_move_inventory",
+          "arguments": {
+            "product_id": "Ragu",
+            "amount": "2",
+            "unit": "tubs",
+            "from_location": "freezer-drawer-3",
+            "to_location": "fridge"
+          },
+          "result": "{\"status\": \"proposed\", \"product_id\": \"Ragu\", \"amount\": \"2\", \"unit\": \"tubs\", \"from_location\": \"freezer-drawer-3\", \"to_location\": \"fridge\", \"warnings\": []}"
+        }
+      ]
     }
   ]
 }
