@@ -10,6 +10,7 @@ merely unlikely.
 from __future__ import annotations
 
 import json
+import random
 import time
 from collections import Counter
 from pathlib import Path
@@ -60,6 +61,45 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "comparison against a different model/prompt run — see evals/report.jq, "
         "evals/epoch_report.py, and scripts/*.sh.",
     )
+
+
+def _shuffle_model_scenarios(items: list, seed: int) -> tuple[list, list[str]]:
+    """Splits `items` into `pytest.mark.model` scenarios and everything
+    else, shuffles the former with a `random.Random(seed)` — deterministic
+    in `seed` alone, not in collection order or item identity — and returns
+    the reordered full list plus the shuffled scenarios' node ids in the
+    order they'll run. Factored out of `pytest_collection_modifyitems` so
+    the reordering itself is unit-testable without a nested pytest
+    session; takes/returns plain `list` rather than `list[pytest.Item]` so
+    a test can pass simple stand-ins exposing just `get_closest_marker`/
+    `nodeid`."""
+    model_items = [i for i in items if i.get_closest_marker("model")]
+    other_items = [i for i in items if not i.get_closest_marker("model")]
+    random.Random(seed).shuffle(model_items)
+    return model_items + other_items, [i.nodeid for i in model_items]
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Reproducibly shuffles the collection order of `pytest.mark.model`
+    scenarios, keyed on `--eval-seed` — `mistralrs.Runner` is seeded once
+    per session and shared by every request the session sends (no
+    per-request seed exists in the SDK), so the RNG stream position at
+    scenario *k* depends on every scenario that ran before it in the same
+    session. A fixed collection order turns that into a fixed per-scenario
+    bias; a reproducible per-epoch shuffle turns it into noise that
+    averages out across epochs instead. Measured before choosing this over
+    a per-scenario `Runner` (25 loads/epoch at ~2.7s each against an ~84s
+    `qwen3.5-9b` epoch — ~79% overhead, too expensive to pay every epoch)
+    — see "Open question, not decided" in
+    docs/journal/2026-09-04-trace-and-verdict-redesign.md. A `None` seed
+    (no `--eval-seed`, e.g. an interactive `pytest evals` run) leaves
+    collection order untouched — nothing to key a reproducible shuffle on,
+    and no order worth recording."""
+    seed = config.getoption("--eval-seed")
+    if seed is None:
+        return
+    items[:], order = _shuffle_model_scenarios(items, seed)
+    config._eval_scenario_order = order  # ty: ignore[unresolved-attribute]
 
 
 def _is_within(path: Path, root: Path) -> bool:
@@ -279,6 +319,11 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
             "model": model_name,
             "prompt_variant": variant_name,
             "seed": config.getoption("--eval-seed"),
+            # The reproducible per-epoch shuffle `pytest_collection_modifyitems`
+            # applied — `None` when `--eval-seed` was `None`, since nothing was
+            # shuffled. Recorded so an epoch's exact scenario order is
+            # recoverable without re-deriving it from the seed alone.
+            "scenario_order": getattr(config, "_eval_scenario_order", None),
             "total_duration_s": sum(r.duration_s for r in results),
             "mean_tokens_per_sec": sum(rates) / len(rates) if rates else None,
             "results": [
