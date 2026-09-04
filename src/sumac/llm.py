@@ -538,6 +538,22 @@ DEFAULT_PROMPT_VARIANT = PROMPT_VARIANTS[0]
 
 
 @dataclass(frozen=True, slots=True)
+class LocationEffect:
+    """What one location holds of one product before and after a single
+    proposed write, both numbers taken from `ledger.project`'s fold of the
+    records `decide.decide_change` returned for that write — not from
+    subtracting an amount from a holding. `None` means the location holds
+    none of the product on that side: `before=None` is a genuinely new
+    arrival, `after=None` is the last of it leaving."""
+
+    location_id: str
+    product_id: str
+    unit: str
+    before: Decimal | None
+    after: Decimal | None
+
+
+@dataclass(frozen=True, slots=True)
 class ProposedWrite:
     kind: ChangeKind
     product_id: str
@@ -552,6 +568,13 @@ class ProposedWrite:
     # than just the delta, without a second inventory query at render time
     # that could reflect a different moment than the one actually decided.
     current_amount: Decimal | None = None
+    # Per-location before/after for this write, in endpoint order (a
+    # movement's source then its destination). Empty when the write was
+    # built without a projection — `render.print_plan` falls back to
+    # `current_amount`'s descriptive "already there" line in that case, so
+    # a hand-built `ProposedWrite` renders exactly as it did before this
+    # field existed.
+    effects: tuple[LocationEffect, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -806,6 +829,52 @@ def _build_runner(model: ModelPreset, *, seed: int | None = None) -> SendsComple
     return _LocalMistralRsBackend(runner)
 
 
+def _effects(
+    inventory: ledger.Inventory,
+    cfg: config.Config,
+    decided: list[decide.Write],
+    product_id: str,
+    unit: str,
+    from_location: str | None,
+    to_location: str | None,
+) -> tuple[LocationEffect, ...]:
+    """The before/after this write produces at each endpoint it names, read
+    off `ledger.project`'s fold of `decided` — the records `decide_change`
+    just returned for this one write, which for a consumption exceeding the
+    shelf includes §3.5's reconciling `Counted` alongside the `Consumed`.
+    Projecting the records rather than subtracting the amount is what makes
+    the "after" the same number a commit would produce, for that case as
+    much as the ordinary one.
+
+    Endpoint order, source first, so a movement reads the way it happened.
+    An unknown location is skipped rather than reported: `decide_change`
+    already rejected before returning if an endpoint was invalid, so
+    anything reaching here is a location the projection could resolve."""
+    # Log records only. `decide_change` returns config writes alongside them
+    # when it auto-registers a product or location (decide.py's
+    # `_resolve_product`), and those carry no inventory delta — a config
+    # record reaching the fold is not a projection of anything, it's a
+    # schema mismatch.
+    objs = [w.obj for w in decided if w.stream.startswith("log:")]
+    projected = ledger.project(inventory, cfg.known_locations, objs)
+    effects: list[LocationEffect] = []
+    for location_id in (from_location, to_location):
+        if location_id is None:
+            continue
+        before = inventory.at(location_id).get(product_id)
+        after = projected.at(location_id).get(product_id)
+        effects.append(
+            LocationEffect(
+                location_id=location_id,
+                product_id=product_id,
+                unit=quantity.unit if (quantity := after or before) is not None else unit,
+                before=before.amount if before else None,
+                after=after.amount if after else None,
+            )
+        )
+    return tuple(effects)
+
+
 class AgentRunner:
     """`data_dir`/`key` are closed over by the tool callbacks below,
     matching `cli.py`'s existing `AgentRunner(data_dir, key)` construction.
@@ -823,6 +892,7 @@ class AgentRunner:
         prompt_variant: PromptVariant = DEFAULT_PROMPT_VARIANT,
         runner: SendsCompletions | None = None,
         debug: bool = False,
+        show_usage: bool = True,
         temperature: float = DEFAULT_TEMPERATURE,
         top_p: float = DEFAULT_TOP_P,
         max_tokens: int = DEFAULT_MAX_TOKENS,
@@ -833,6 +903,13 @@ class AgentRunner:
         self._model = model
         self._prompt_variant = prompt_variant
         self._debug = debug
+        # Per-round token/timing lines. Defaults on, which is what every
+        # existing caller (`evals/`, the benchmark scripts) already gets;
+        # `sumac ask` passes `--stats` through so the lines aren't printed
+        # above a plan someone is trying to read. `usage_history` carries
+        # the same numbers programmatically either way, so turning the
+        # print off never loses data.
+        self._show_usage = show_usage
         self._temperature = temperature
         self._top_p = top_p
         self._max_tokens = max_tokens
@@ -1027,7 +1104,7 @@ class AgentRunner:
         cfg = config.build_config(self._data_dir, self._key)
         inventory = ledger.build_inventory(self._data_dir, self._key)
         try:
-            _writes, messages = decide.decide_change(
+            decided, messages = decide.decide_change(
                 kind=kind,
                 product_id=product_id,
                 amount=amount,
@@ -1061,6 +1138,7 @@ class AgentRunner:
             to_location=to_location,
             warnings=tuple(messages),
             current_amount=current_quantity.amount if current_quantity else None,
+            effects=_effects(inventory, cfg, decided, product_id, unit, from_location, to_location),
         )
         if candidate in self._pending:
             # A real LFM2.5 run repeated an already-successful discover call
@@ -1144,11 +1222,12 @@ class AgentRunner:
         return self._classify(prompt)
 
     def _record_usage(self, response: ChatResponse, round_num: int) -> None:
-        """Prints the round's usage line (`_print_usage`) and folds its
-        token/timing numbers into `tokens_per_sec`'s running totals — a
-        no-op for the latter beyond the print for a fake `SendsCompletions`
-        with no real `.usage`."""
-        _print_usage(response, round_num)
+        """Prints the round's usage line (`_print_usage`, when `show_usage`)
+        and folds its token/timing numbers into `tokens_per_sec`'s running
+        totals — a no-op for the latter beyond the print for a fake
+        `SendsCompletions` with no real `.usage`."""
+        if self._show_usage:
+            _print_usage(response, round_num)
         usage = getattr(response, "usage", None)
         if usage is None:
             return

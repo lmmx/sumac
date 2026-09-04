@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from dataclasses import replace as dataclass_replace
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -23,8 +24,10 @@ from sumac import (
     ledger,
     models,
     paths,
+    prompt_ui,
     queue,
     render,
+    review,
     store,
 )
 from sumac import vault as sumac_vault
@@ -431,6 +434,14 @@ def ask(
         bool,
         typer.Option("--dry-run", help="Compute and show the plan; write nothing."),
     ] = False,
+    trace: Annotated[
+        bool,
+        typer.Option("--trace", help="Show each tool call's full arguments and raw result."),
+    ] = False,
+    stats: Annotated[
+        bool,
+        typer.Option("--stats", help="Show per-round token counts and generation speed."),
+    ] = False,
     debug: Annotated[
         bool,
         typer.Option("--debug", help="Show raw agent request/response diagnostics."),
@@ -460,28 +471,127 @@ def ask(
     """
     key = _key(data_dir)
     llm = _import_llm()
+    view = _AskView(trace=trace, stats=stats, debug=debug)
 
     if prompt is None or loop:
-        _ask_loop(data_dir, key, llm, first_prompt=prompt, dry_run=dry_run, debug=debug)
+        _ask_loop(data_dir, key, llm, first_prompt=prompt, dry_run=dry_run, view=view)
         return
 
-    _ask_one(data_dir, key, llm, prompt, dry_run=dry_run, debug=debug)
+    _ask_one(data_dir, key, llm, prompt, dry_run=dry_run, view=view)
 
 
-def _decision_options(dry_run: bool, *, defer: bool = False) -> list[tuple[str, str]]:
+def _decision_options(
+    dry_run: bool, *, defer: bool = False, pick: bool = False
+) -> list[prompt_ui.Option]:
+    """The responses available to a plan decision. Every option's `key` is
+    both what a typed answer must equal and the keystroke that chooses it in
+    `prompt_ui.select`'s menu, so the two input paths cannot drift.
+
+    `pick` adds per-write selection, and is passed only for a plan with more
+    than one write on an interactive terminal — there is nothing for it to
+    do on a single write, and `prompt_ui.multiselect` has no line-typed
+    equivalent to offer a pipe or a test."""
     options = [
-        ("a", "Accept" + (" — nothing will actually be written (--dry-run)" if dry_run else "")),
-        ("r", 'Reject (or "quit"/"exit") — discard this proposal'),
-        ("e", "Edit — manually correct a field, no model call"),
+        prompt_ui.Option(
+            "a", "Accept" + (" — nothing will actually be written (--dry-run)" if dry_run else "")
+        ),
+        prompt_ui.Option("r", 'Reject (or "quit"/"exit") — discard this proposal'),
+        prompt_ui.Option("e", "Edit — manually correct a field, no model call"),
     ]
+    if pick:
+        options.append(prompt_ui.Option("p", "Pick — apply only some of these changes"))
     if defer:
-        options.append(("d", "Defer — queue this for later, ask something else now"))
+        options.append(
+            prompt_ui.Option("d", "Defer — queue this for later, ask something else now")
+        )
     options += [
-        ("g", "Regenerate — same request, a different model, no memory of this attempt"),
-        ("s", "Start over — reword the request, same model, no memory of this attempt"),
-        ("(anything else)", "Feedback — the model revises this same plan with your note"),
+        prompt_ui.Option(
+            "g", "Regenerate — same request, a different model, no memory of this attempt"
+        ),
+        prompt_ui.Option(
+            "s", "Start over — reword the request, same model, no memory of this attempt"
+        ),
+        prompt_ui.Option(
+            "(anything else)",
+            "Feedback — the model revises this same plan with your note",
+            prompt_for_text=True,
+        ),
     ]
     return options
+
+
+@dataclass(frozen=True, slots=True)
+class _AskView:
+    """Which diagnostics accompany a plan, and the one thing threaded into
+    the agent itself.
+
+    All three default off, which is the change: `render.print_trace` and
+    `_print_usage` both used to print unconditionally, putting a table of
+    raw tool-call JSON and a line per round above the plan a person is
+    being asked to approve. The information is still one flag away, and the
+    trace still shows a one-line summary per call with no flag at all —
+    what changes is which of them is the default."""
+
+    trace: bool = False
+    stats: bool = False
+    debug: bool = False
+
+
+def _show(data_dir: Path, key: bytes, plan: AgentPlan, *, view: _AskView) -> None:
+    """The preview itself: what the agent looked up, then what it proposes,
+    with `review`'s deterministic findings attached. `config.build_config`
+    is read here rather than passed in because a feedback or regenerate
+    round can land between two calls of this and the second one should
+    describe the vault as it is now, not as it was when the request
+    started."""
+    render.print_trace(plan.trace, verbose=view.trace)
+    if not plan.writes:
+        return
+    cfg = config.build_config(data_dir, key)
+    findings = review.review_plan(plan, cfg)
+    render.print_plan(
+        plan,
+        findings=findings,
+        locations=cfg.known_locations,
+        header=review.headline(findings),
+    )
+
+
+def _pick_writes(plan: AgentPlan) -> AgentPlan | None:
+    """A plan narrowed to the writes left checked, or `None` if the person
+    cancelled or unchecked everything. Deliberately does not commit what was
+    picked: the narrowed plan goes back through the same preview and the
+    same accept prompt, so the subset is seen before it is written rather
+    than applied straight out of a checklist."""
+    labels = [
+        prompt_ui.Choice(f"{w.kind.value} {w.amount} {w.unit} {w.product_id}") for w in plan.writes
+    ]
+    picked = prompt_ui.multiselect(labels, title="Apply which changes?")
+    if not picked:
+        render.console.print("[dim](nothing picked — the plan is unchanged)[/dim]")
+        return None
+    return dataclass_replace(plan, writes=tuple(plan.writes[i] for i in picked))
+
+
+def _build_agent(llm, data_dir: Path, key: bytes, *, model: ModelPreset, view: _AskView):  # noqa: ANN202
+    """Every `AgentRunner` this module constructs, in one place — four call
+    sites across the two decision loops each had to be updated in step
+    whenever the constructor gained an argument (`debug` in §43, `show_usage`
+    here), and two of them are inside `except` branches where a missed
+    argument surfaces only on a retry."""
+    return llm.AgentRunner(data_dir, key, model=model, debug=view.debug, show_usage=view.stats)
+
+
+def _decide_prompt(plan: AgentPlan, *, dry_run: bool, defer: bool) -> str:
+    """One decision, from the arrow-key menu on a terminal and from the
+    printed option table plus a typed line everywhere else — `prompt_ui.select`
+    picks between them, and returns the same strings either way."""
+    options = _decision_options(
+        dry_run,
+        defer=defer,
+        pick=len(plan.writes) > 1 and prompt_ui.interactive(),
+    )
+    return prompt_ui.select(options, default="a").strip()
 
 
 def _print_dry_run_preview(plan: AgentPlan) -> None:
@@ -588,13 +698,15 @@ def _prompt_edit(data_dir: Path, key: bytes, plan: AgentPlan) -> AgentPlan:
     return dataclass_replace(plan, writes=tuple(writes))
 
 
-def _ask_one(data_dir: Path, key: bytes, llm, prompt: str, *, dry_run: bool, debug: bool) -> None:
+def _ask_one(
+    data_dir: Path, key: bytes, llm, prompt: str, *, dry_run: bool, view: _AskView
+) -> None:
     """The original one-shot flow: exits the process on error or once the
     single request is resolved, since there is nothing else this
     invocation would do afterward."""
     model = llm.DEFAULT_MODEL_PRESET
     try:
-        agent = llm.AgentRunner(data_dir, key, model=model, debug=debug)
+        agent = _build_agent(llm, data_dir, key, model=model, view=view)
         plan = agent.propose(prompt)
     except FileNotFoundError as e:
         render.print_error(str(e))
@@ -604,7 +716,7 @@ def _ask_one(data_dir: Path, key: bytes, llm, prompt: str, *, dry_run: bool, deb
         raise typer.Exit(code=1) from e
 
     while True:
-        render.print_trace(plan.trace)
+        _show(data_dir, key, plan, view=view)
         if not plan.writes:
             if plan.reply_text:
                 render.console.print(plan.reply_text)
@@ -612,9 +724,7 @@ def _ask_one(data_dir: Path, key: bytes, llm, prompt: str, *, dry_run: bool, deb
                 render.console.print("[dim](--dry-run: this request produced no writes)[/dim]")
             return
 
-        render.print_plan(plan)
-        render.print_decision_options(_decision_options(dry_run))
-        answer = typer.prompt("Choice", default="a").strip()
+        answer = _decide_prompt(plan, dry_run=dry_run, defer=False)
         choice = answer.lower()
         if choice in ("a", "accept"):
             if dry_run:
@@ -633,10 +743,13 @@ def _ask_one(data_dir: Path, key: bytes, llm, prompt: str, *, dry_run: bool, deb
         if choice in ("e", "edit"):
             plan = _prompt_edit(data_dir, key, plan)
             continue
+        if choice in ("p", "pick"):
+            plan = _pick_writes(plan) or plan
+            continue
         if choice in ("g", "generate", "regenerate"):
             model = _prompt_regenerate(llm, agent.model)
             try:
-                agent = llm.AgentRunner(data_dir, key, model=model, debug=debug)
+                agent = _build_agent(llm, data_dir, key, model=model, view=view)
                 plan = agent.propose(prompt)
             except Exception as e:
                 render.print_error(f"Agent error: {e}")
@@ -645,7 +758,7 @@ def _ask_one(data_dir: Path, key: bytes, llm, prompt: str, *, dry_run: bool, deb
         if choice in ("s", "start", "start over"):
             prompt = _prompt_start_over(prompt)
             try:
-                agent = llm.AgentRunner(data_dir, key, model=model, debug=debug)
+                agent = _build_agent(llm, data_dir, key, model=model, view=view)
                 plan = agent.propose(prompt)
             except Exception as e:
                 render.print_error(f"Agent error: {e}")
@@ -660,7 +773,7 @@ def _ask_one(data_dir: Path, key: bytes, llm, prompt: str, *, dry_run: bool, deb
 
 
 def _ask_loop(
-    data_dir: Path, key: bytes, llm, *, first_prompt: str | None, dry_run: bool, debug: bool
+    data_dir: Path, key: bytes, llm, *, first_prompt: str | None, dry_run: bool, view: _AskView
 ) -> None:
     """Repeatedly prompts for a new request rather than exiting after one.
     Unlike `_ask_one`, a failure here is caught and queued (queue.py)
@@ -674,7 +787,7 @@ def _ask_loop(
         'one, or "quit" to exit.[/dim]'
     )
     if first_prompt is not None:
-        _ask_loop_request(data_dir, key, llm, first_prompt, dry_run=dry_run, debug=debug)
+        _ask_loop_request(data_dir, key, llm, first_prompt, dry_run=dry_run, view=view)
 
     while True:
         pending = queue.load(data_dir)
@@ -713,11 +826,11 @@ def _ask_loop(
                 render.print_error(f"No queued request at index {index_text!r}.")
                 continue
             _ask_loop_request(
-                data_dir, key, llm, item.prompt, dry_run=dry_run, debug=debug, retrying=item
+                data_dir, key, llm, item.prompt, dry_run=dry_run, view=view, retrying=item
             )
             continue
 
-        _ask_loop_request(data_dir, key, llm, answer, dry_run=dry_run, debug=debug)
+        _ask_loop_request(data_dir, key, llm, answer, dry_run=dry_run, view=view)
 
 
 def _ask_loop_request(
@@ -727,7 +840,7 @@ def _ask_loop_request(
     prompt: str,
     *,
     dry_run: bool,
-    debug: bool,
+    view: _AskView,
     retrying: queue.QueuedRequest | None = None,
 ) -> None:
     """One request within `_ask_loop`. `retrying` is the queue entry this
@@ -742,22 +855,20 @@ def _ask_loop_request(
         queue.enqueue(data_dir, prompt, reason=f"error: {e}", attempts=next_attempts)
 
     try:
-        agent = llm.AgentRunner(data_dir, key, model=model, debug=debug)
+        agent = _build_agent(llm, data_dir, key, model=model, view=view)
         plan = agent.propose(prompt)
     except Exception as e:
         _fail(e)
         return
 
     while True:
-        render.print_trace(plan.trace)
+        _show(data_dir, key, plan, view=view)
         if not plan.writes:
             if plan.reply_text:
                 render.console.print(plan.reply_text)
             return
 
-        render.print_plan(plan)
-        render.print_decision_options(_decision_options(dry_run, defer=True))
-        answer = typer.prompt("Choice", default="a").strip()
+        answer = _decide_prompt(plan, dry_run=dry_run, defer=True)
         choice = answer.lower()
         if choice in ("a", "accept"):
             if dry_run:
@@ -775,6 +886,9 @@ def _ask_loop_request(
         if choice in ("e", "edit"):
             plan = _prompt_edit(data_dir, key, plan)
             continue
+        if choice in ("p", "pick"):
+            plan = _pick_writes(plan) or plan
+            continue
         # `prompt` and `model` are reassigned in these two branches, not
         # shadowed — `_fail` closes over the same names, so a later failure
         # or defer on this new attempt enqueues what it actually ran, not
@@ -782,7 +896,7 @@ def _ask_loop_request(
         if choice in ("g", "generate", "regenerate"):
             model = _prompt_regenerate(llm, agent.model)
             try:
-                agent = llm.AgentRunner(data_dir, key, model=model, debug=debug)
+                agent = _build_agent(llm, data_dir, key, model=model, view=view)
                 plan = agent.propose(prompt)
             except Exception as e:
                 _fail(e)
@@ -791,7 +905,7 @@ def _ask_loop_request(
         if choice in ("s", "start", "start over"):
             prompt = _prompt_start_over(prompt)
             try:
-                agent = llm.AgentRunner(data_dir, key, model=model, debug=debug)
+                agent = _build_agent(llm, data_dir, key, model=model, view=view)
                 plan = agent.propose(prompt)
             except Exception as e:
                 _fail(e)

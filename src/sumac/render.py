@@ -4,18 +4,22 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from rich.console import Console
+from rich.markup import escape
+from rich.padding import Padding
 from rich.panel import Panel
 from rich.pretty import Pretty
 from rich.table import Table
+from rich.text import Text
 from rich.tree import Tree
 
-from sumac import config, events, ledger, models
+from sumac import config, events, ledger, models, review
 
 if TYPE_CHECKING:
-    from sumac.llm import AgentPlan, ToolCallRecord
+    from sumac.llm import AgentPlan, ProposedWrite, ToolCallRecord
 
 console = Console()
 error_console = Console(stderr=True)
@@ -335,14 +339,56 @@ def print_agent_tool_calls(tool_calls: object) -> None:
     console.print(Panel(Pretty(tool_calls, expand_all=False), title="TOOL CALLS"))
 
 
-def print_trace(trace: tuple[ToolCallRecord, ...]) -> None:
-    """The tool calls an `AgentRunner.propose`/`.revise` call actually made,
-    with their raw JSON results — shown before `print_plan`'s writes table or
-    a read-only reply, since neither on its own says what the agent searched
-    or found; added after real usage showed a plain final reply hides that
-    entirely (see `sumac/llm.py`'s `ToolCallRecord`). A no-op for an empty
+def _trace_summary(record: ToolCallRecord) -> str:
+    """One line's worth of what a tool call did — how many products a search
+    found, or the status a proposed write came back with. Falls back to the
+    head of the raw result for anything unrecognized, so a tool added later
+    still says something rather than nothing.
+
+    Defensive about the result's shape on purpose: a tool result is a string
+    this module did not build, and a preview that raised while summarizing a
+    trace would take down the decision it was drawn for."""
+    try:
+        parsed = json.loads(record.result)
+    except (json.JSONDecodeError, TypeError):
+        return record.result[:60]
+    if not isinstance(parsed, dict):
+        return record.result[:60]
+    if "products" in parsed and isinstance(parsed["products"], list):
+        products = parsed["products"]
+        locations = sum(len(p.get("locations", ())) for p in products if isinstance(p, dict))
+        n = len(products)
+        return (
+            f"{n} product{'' if n == 1 else 's'}, "
+            f"{locations} location{'' if locations == 1 else 's'}"
+        )
+    status = parsed.get("status")
+    if status == "rejected":
+        return f"rejected: {parsed.get('reason', '?')}"
+    if isinstance(status, str):
+        return status
+    return record.result[:60]
+
+
+def print_trace(trace: tuple[ToolCallRecord, ...], *, verbose: bool = False) -> None:
+    """What an `AgentRunner.propose`/`.revise` call actually looked up, shown
+    above the plan it produced — a plain final reply ("the jam is in the
+    fridge") otherwise hides the query and the match data behind it, with no
+    way to tell a vague answer from a genuinely empty result.
+
+    One line per call by default. The full table — every argument and the
+    raw JSON result verbatim — is what `verbose` restores, and what this
+    printed unconditionally before: a three-round request put a screen of
+    JSON between the person and the panel they were being asked to approve,
+    which is a poor default for the common case and the only useful view
+    when a tool result is what's actually in question. A no-op for an empty
     trace, matching `print_anomaly_banner`'s "nothing to say" behavior."""
     if not trace:
+        return
+    if not verbose:
+        for t in trace:
+            args = ", ".join(f"{k}={v!r}" for k, v in t.arguments.items())
+            console.print(f"[dim]· {t.name}({escape(args)}) → {escape(_trace_summary(t))}[/dim]")
         return
     table = Table(title=f"Tool calls ({len(trace)})")
     table.add_column("tool")
@@ -353,32 +399,107 @@ def print_trace(trace: tuple[ToolCallRecord, ...]) -> None:
     console.print(table)
 
 
-def print_plan(plan: AgentPlan) -> None:
+_KIND_MARK = {
+    "consumption": ("−", "yellow"),
+    "waste": ("−", "yellow"),
+    "movement": ("→", "cyan"),
+    "purchase": ("+", "green"),
+    "discovery": ("+", "green"),
+    "correction": ("±", "magenta"),
+}
+
+
+def _amount(value: Decimal | None, unit: str) -> str:
+    """A holding, or an em dash for none of it. `None` is "the location holds
+    none of this product", which reads as nothing rather than as zero — the
+    fold drops a zero entry entirely (`ledger._commit`), so there is no
+    stored `0` for this to be showing."""
+    return f"{value} {unit}" if value is not None else "—"
+
+
+def _effect_text(write: ProposedWrite) -> str:
+    """`before → after` per location touched, from the projection
+    `ledger.project` computed off the records `decide_change` itself
+    returned. Falls back to `current_amount`'s descriptive "already there"
+    when a write carries no projection — a `ProposedWrite` built by hand
+    (a test double, a scripted plan) renders as it did before `effects`
+    existed, rather than showing a blank column."""
+    if write.effects:
+        return "  ·  ".join(
+            f"{_amount(e.before, e.unit)} → {_amount(e.after, e.unit)}" for e in write.effects
+        )
+    if write.current_amount is not None:
+        return f"{write.current_amount} {write.unit} already there"
+    return ""
+
+
+def _where_text(write: ProposedWrite, locations: dict[str, models.Location]) -> str:
+    def name(location_id: str) -> str:
+        return config.location_path(locations, location_id) if locations else location_id
+
+    if write.from_location and write.to_location:
+        return f"{name(write.from_location)} → {name(write.to_location)}"
+    if write.from_location:
+        return name(write.from_location)
+    if write.to_location:
+        return name(write.to_location)
+    return ""
+
+
+def _indented(markup: str) -> None:
+    """A detail line under a write, indented four columns — as `Padding` so a
+    line long enough to wrap keeps its indent on every wrapped line instead
+    of falling back to column zero mid-sentence."""
+    console.print(Padding(Text.from_markup(markup), (0, 0, 0, 4)))
+
+
+def print_plan(
+    plan: AgentPlan,
+    *,
+    findings: tuple[tuple[review.Finding, ...], ...] = (),
+    locations: dict[str, models.Location] | None = None,
+    header: str = "",
+) -> None:
     """`sumac ask`'s preview: the accumulated, not-yet-committed writes an
-    `AgentRunner.propose`/`.revise` call resolved. One panel per write —
-    this is the one point in the CLI where the person is about to make a
-    real decision, so location, product, quantity, and "what's already
-    there" need to be readable at a glance, not abbreviated into a table
-    row. No computed "after" total: `decide_change`'s own shortfall
-    reconciliation at commit time can differ from a naive
-    current-minus-amount subtraction, and showing a number that turns out
-    wrong is worse than not showing one — "already there" is descriptive,
-    not a prediction."""
-    if len(plan.writes) > 1:
-        console.print(f"[bold]{len(plan.writes)} proposed changes:[/bold]")
-    for w in plan.writes:
-        lines = [f"[bold]{w.kind.value}[/bold]: {w.amount} {w.unit} of {w.product_id}"]
-        if w.from_location and w.to_location:
-            lines.append(f"{w.from_location} → {w.to_location}")
-        elif w.from_location:
-            lines.append(f"from {w.from_location}")
-        elif w.to_location:
-            lines.append(f"to {w.to_location}")
-        if w.current_amount is not None:
-            lines.append(f"[dim]{w.current_amount} {w.unit} already there[/dim]")
-        for warning in w.warnings:
-            lines.append(f"[yellow]⚠ {warning}[/yellow]")
-        console.print(Panel("\n".join(lines), title="Proposed change", expand=False))
+    `AgentRunner.propose`/`.revise` call resolved. This is the one point in
+    the CLI where a person is about to make a real decision, so each write
+    gets two lines — what it does, then where and what changes on the shelf
+    — rather than a table row that a narrow terminal would truncate away
+    exactly the number being decided on.
+
+    The "after" is not a subtraction. `ledger.project` folds the records
+    `decide_change` returned for that write, so a consumption exceeding the
+    recorded holding shows the zero its §3.5 reconciling `Counted` actually
+    produces, not the negative a current-minus-amount arithmetic would. It
+    still describes the moment the plan was proposed: `AgentRunner.commit`
+    re-decides against freshly reloaded state, and real time passes while
+    someone reads this.
+
+    `findings` (`review.review_plan`) is positional per write: badges on the
+    write's own line, one detail line each underneath. A write with nothing
+    flagged has an empty tuple and no extra lines."""
+    if header:
+        console.print(f"[bold]{header}[/bold]")
+
+    locations = locations or {}
+    for i, write in enumerate(plan.writes):
+        mark, colour = _KIND_MARK.get(write.kind.value, ("·", "white"))
+        per_write = findings[i] if i < len(findings) else ()
+        badges = "".join(f" [yellow]\\[{escape(f.label)}][/yellow]" for f in per_write)
+        subject = escape(f"{write.amount} {write.unit} of {write.product_id}")
+        console.print(f"[{colour}]{mark} {write.kind.value}[/{colour}]  {subject}{badges}")
+
+        where = escape(_where_text(write, locations))
+        effect = escape(_effect_text(write))
+        parts = [p for p in (f"[dim]{where}[/dim]" if where else "", effect) if p]
+        if parts:
+            _indented("   ".join(parts))
+        for f in per_write:
+            if f.explain:
+                _indented(f"[yellow]⚠ {escape(f.detail)}[/yellow]")
+        for warning in write.warnings:
+            _indented(f"[yellow]⚠ {escape(warning)}[/yellow]")
+
     if plan.reply_text:
         console.print(plan.reply_text)
 

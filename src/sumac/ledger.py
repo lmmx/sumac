@@ -332,10 +332,13 @@ def _apply_sides(
         _commit(state, loc_id, pid, q)
 
 
-def _fold(
-    records: list[_EventRecord], locations: dict[str, Location]
-) -> tuple[dict[str, dict[str, Quantity]], list[Anomaly]]:
-    """The pure event-folding core of `build_inventory`, split out so Phase 6's
+def _fold_into(
+    state: dict[str, dict[str, Quantity]],
+    records: list[_EventRecord],
+    locations: dict[str, Location],
+) -> list[Anomaly]:
+    """Applies `records` onto `state` in place, returning the anomalies raised
+    doing so. The pure event-folding core of `build_inventory`, split out so Phase 6's
     in-memory property tests (model agreement, fold determinism, upcaster
     round-trip) can drive it directly with hand-built events and a locations
     dict — no files, no crypto. Behaves identically to what `build_inventory`
@@ -345,7 +348,13 @@ def _fold(
     order), but a property test handing this function events straight out of
     a Hypothesis strategy shouldn't have to replicate that sort to get a
     meaningful result; sorting an already-sorted list is a no-op, so this
-    changes nothing for `build_inventory`'s existing callers."""
+    changes nothing for `build_inventory`'s existing callers.
+
+    `state` is a parameter rather than a local so `project` can fold a
+    handful of already-decided records onto a copy of a *populated*
+    inventory — the same event arithmetic, the same anomaly reporting,
+    starting from something other than empty. `_fold` passes an empty dict
+    and is otherwise unchanged."""
     records = sorted(records, key=lambda r: (r.ts, r.actor, r.id))
     anomalies: list[Anomaly] = []
 
@@ -371,7 +380,6 @@ def _fold(
         deduped.append(r)
     records = deduped
 
-    state: dict[str, dict[str, Quantity]] = {}
     baseline_ts: dict[str, datetime] = {}
 
     for r in records:
@@ -442,7 +450,57 @@ def _fold(
                 q = Quantity(amount, unit)
                 _apply_sides(state, locations, baseline_ts, anomalies, r, p, [(frm, -q), (to, q)])
 
-    return state, anomalies
+    return anomalies
+
+
+def _fold(
+    records: list[_EventRecord], locations: dict[str, Location]
+) -> tuple[dict[str, dict[str, Quantity]], list[Anomaly]]:
+    """`_fold_into` from empty — `build_inventory`'s own entry point, and the
+    signature Phase 6's property tests already drive."""
+    state: dict[str, dict[str, Quantity]] = {}
+    return state, _fold_into(state, records, locations)
+
+
+def _event_records(objs: list[dict]) -> list[_EventRecord]:
+    """Already-serialized record dicts (`decide.Write.obj`) parsed back into
+    the `_EventRecord` shape the fold consumes, through the same
+    `RecordSchema`/`upcast` path `_load_v2` uses on records read from disk —
+    a projection built any other way would be a second, drifting
+    interpretation of the same wire format."""
+    records: list[_EventRecord] = []
+    for obj in objs:
+        record = RecordSchema.model_validate(obj).to_domain()
+        payload = record.payload
+        event = (
+            upcast.upcast(record)
+            if isinstance(payload, (InventoryChange, InventorySnapshot))
+            else payload
+        )
+        records.append(_EventRecord(id=record.id, ts=record.ts, actor=record.actor, event=event))
+    return records
+
+
+def project(inventory: Inventory, locations: dict[str, Location], objs: list[dict]) -> Inventory:
+    """The inventory that folding `objs` onto `inventory` produces, without
+    writing anything.
+
+    Built for `sumac ask`'s preview: `decide.decide_change` already returns
+    the exact records a command would append, and this folds those records —
+    not the command's arguments — so the projection includes whatever
+    `decide` decided, the §3.5 shortfall `Counted` correction included. That
+    correction is precisely why `render.print_plan` has never shown an
+    "after" number computed by subtracting an amount from a current holding:
+    the two disagree exactly when a consumption exceeds what's on the shelf.
+
+    A projection describes the moment it was computed. `AgentRunner.commit`
+    re-decides against freshly reloaded state (docs/journal/
+    2026-09-01-ask-agent-design.md §14), so nothing here is ever replayed as
+    a write, and a plan accepted after real time has passed can commit
+    different records than these."""
+    state = {loc_id: dict(entries) for loc_id, entries in inventory.by_location.items()}
+    anomalies = _fold_into(state, _event_records(objs), locations)
+    return Inventory(by_location=state, anomalies=tuple(anomalies))
 
 
 def build_inventory(data_dir: Path, key: bytes, as_of: datetime | None = None) -> Inventory:

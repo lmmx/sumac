@@ -1119,3 +1119,96 @@ def test_build_runner_defaults_seed_to_none(monkeypatch: pytest.MonkeyPatch) -> 
     llm._build_runner(llm.DEFAULT_MODEL_PRESET)
 
     assert captured["seed"] is None
+
+
+# --- projected effects -------------------------------------------------
+
+
+def test_proposed_write_carries_the_projected_before_and_after(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    """`_propose_write` folds the records `decide_change` returned onto the
+    inventory it just read, so the preview can show the holding the write
+    lands on rather than only the one it starts from."""
+    _seed_pantry_with_jam(data_dir, key, osuser)
+    agent, _fake = _make_agent([], data_dir, key)
+
+    agent.tool_callbacks["sumac_consume_inventory"](
+        "sumac_consume_inventory",
+        {"product_id": "jam", "amount": "1", "unit": "jar", "from_location": "pantry"},
+    )
+
+    (write,) = agent._pending
+    assert write.effects == (
+        llm.LocationEffect(
+            location_id="pantry",
+            product_id="jam",
+            unit="jar",
+            before=Decimal(3),
+            after=Decimal(2),
+        ),
+    )
+
+
+def test_a_movement_projects_both_endpoints_source_first(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    _seed_pantry_with_jam(data_dir, key, osuser)
+    config.add_location(data_dir, key, osuser, Location(id="fridge", name="Fridge"))
+    agent, _fake = _make_agent([], data_dir, key)
+
+    agent.tool_callbacks["sumac_move_inventory"](
+        "sumac_move_inventory",
+        {
+            "product_id": "jam",
+            "amount": "1",
+            "unit": "jar",
+            "from_location": "pantry",
+            "to_location": "fridge",
+        },
+    )
+
+    (write,) = agent._pending
+    assert [(e.location_id, e.before, e.after) for e in write.effects] == [
+        ("pantry", Decimal(3), Decimal(2)),
+        ("fridge", None, Decimal(1)),
+    ]
+
+
+def test_projected_after_reflects_the_shortfall_correction_not_a_subtraction(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    """Consuming 5 of a recorded 3 emits §3.5's `Counted` first, so the
+    projected holding is zero — `3 - 5 = -2` is what this is not."""
+    _seed_pantry_with_jam(data_dir, key, osuser)
+    agent, _fake = _make_agent([], data_dir, key)
+
+    agent.tool_callbacks["sumac_consume_inventory"](
+        "sumac_consume_inventory",
+        {"product_id": "jam", "amount": "5", "unit": "jar", "from_location": "pantry"},
+    )
+
+    (write,) = agent._pending
+    (effect,) = write.effects
+    assert effect.before == Decimal(3)
+    assert effect.after is None  # zero drops out of the fold entirely
+
+
+def test_an_auto_registering_write_projects_without_its_config_record(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    """`decide_change` returns a config write alongside the log record when
+    it auto-registers an unknown product; only the log record is a delta
+    the fold can interpret."""
+    _seed_pantry_with_jam(data_dir, key, osuser)
+    agent, _fake = _make_agent([], data_dir, key)
+
+    agent.tool_callbacks["sumac_discover_inventory"](
+        "sumac_discover_inventory",
+        {"product_id": "chutney", "amount": "2", "unit": "jar", "to_location": "pantry"},
+    )
+
+    (write,) = agent._pending
+    assert [(e.location_id, e.before, e.after) for e in write.effects] == [
+        ("pantry", None, Decimal(2))
+    ]

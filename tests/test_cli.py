@@ -622,6 +622,7 @@ class _FakeAgentRunner:
     commits: ClassVar[list[llm.AgentPlan]] = []
     prompts: ClassVar[list[str]] = []
     models_used: ClassVar[list[llm.ModelPreset]] = []
+    usage_flags: ClassVar[list[bool]] = []
 
     def __init__(
         self,
@@ -630,12 +631,15 @@ class _FakeAgentRunner:
         *,
         model: llm.ModelPreset = llm.DEFAULT_MODEL_PRESET,
         debug: bool = False,
+        show_usage: bool = True,
     ) -> None:
         self.data_dir = data_dir
         self.key = key
         self.model = model
         self.debug = debug
+        self.show_usage = show_usage
         self.models_used.append(model)
+        self.usage_flags.append(show_usage)
 
     def _next(self) -> llm.AgentPlan:
         item = self.plans.pop(0)
@@ -669,7 +673,13 @@ def _patch_agent_runner(
     fake_cls = type(
         "_ScriptedAgentRunner",
         (_FakeAgentRunner,),
-        {"plans": plans, "commits": [], "prompts": [], "models_used": []},
+        {
+            "plans": plans,
+            "commits": [],
+            "prompts": [],
+            "models_used": [],
+            "usage_flags": [],
+        },
     )
     monkeypatch.setattr(llm, "AgentRunner", fake_cls)
     return fake_cls
@@ -901,16 +911,29 @@ def test_ask_plan_preview_shows_what_is_already_there(
     assert "3 jar already there" in result.output
 
 
+def _options(**kwargs: bool) -> dict[str, str]:
+    return {o.key: o.description for o in _decision_options(**kwargs)}
+
+
 def test_decision_options_include_every_choice() -> None:
-    non_defer = dict(_decision_options(dry_run=False))
+    non_defer = _options(dry_run=False)
     assert set(non_defer) == {"a", "r", "e", "g", "s", "(anything else)"}
     assert "d" not in non_defer
+    assert "p" not in non_defer
 
-    with_defer = dict(_decision_options(dry_run=False, defer=True))
-    assert "d" in with_defer
+    assert "d" in _options(dry_run=False, defer=True)
+    assert "p" in _options(dry_run=False, pick=True)
+    assert "--dry-run" in _options(dry_run=True)["a"]
 
-    dry_run_options = dict(_decision_options(dry_run=True))
-    assert "--dry-run" in dry_run_options["a"]
+
+def test_only_the_feedback_option_prompts_for_text() -> None:
+    """Every other option is one keystroke; the free-text row is the one
+    that cannot be, so it is the one `prompt_ui.select` opens an editor
+    for."""
+    text_options = [
+        o for o in _decision_options(dry_run=False, defer=True, pick=True) if o.prompt_for_text
+    ]
+    assert [o.key for o in text_options] == ["(anything else)"]
 
 
 # --- ask --loop / queue ----------------------------------------------------
@@ -1053,3 +1076,114 @@ def test_ask_loop_retry_with_invalid_index_reports_error_and_continues(
 
     assert result.exit_code == 0, result.output
     assert "No queued request at index" in result.output
+
+
+# --- ask preview (docs/journal/2026-09-04-ask-confirmation-ux.md) ----------
+
+
+def _effect_plan() -> llm.AgentPlan:
+    return llm.AgentPlan(
+        reply_text="",
+        writes=(
+            llm.ProposedWrite(
+                kind=ChangeKind.CONSUMPTION,
+                product_id="jam",
+                amount=Decimal(1),
+                unit="jar",
+                from_location="pantry",
+                to_location=None,
+                effects=(llm.LocationEffect("pantry", "jam", "jar", Decimal(3), Decimal(2)),),
+            ),
+        ),
+    )
+
+
+def _ungrounded_plan() -> llm.AgentPlan:
+    """The shape `docs/journal/2026-09-04-basmati-rice-unit-mismatch.md`
+    reconstructed: a product id in no search result and in no config
+    record."""
+    return llm.AgentPlan(
+        reply_text="",
+        writes=(
+            llm.ProposedWrite(
+                kind=ChangeKind.DISCOVERY,
+                product_id="Basmati Rice Bag",
+                amount=Decimal(1),
+                unit="bag",
+                from_location=None,
+                to_location="pantry",
+            ),
+        ),
+        trace=(
+            llm.ToolCallRecord(
+                name="sumac_find_inventory",
+                arguments={"query": "rice"},
+                result='{"products": [{"product_id": "Basmati Rice", "locations": []}]}',
+            ),
+        ),
+    )
+
+
+def test_ask_preview_shows_the_projected_before_and_after(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run(data_dir, "init")
+    _patch_agent_runner(monkeypatch, [_effect_plan()])
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam", input="r\n")
+
+    assert result.exit_code == 0, result.output
+    assert "3 jar → 2 jar" in result.output
+
+
+def test_ask_preview_badges_a_product_nothing_looked_up(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run(data_dir, "init")
+    _patch_agent_runner(monkeypatch, [_ungrounded_plan()])
+
+    result = _run(data_dir, "ask", "add a bag of basmati rice", input="r\n")
+
+    assert result.exit_code == 0, result.output
+    assert "[unverified]" in result.output
+    assert "names a product nothing looked up" in result.output
+
+
+def test_ask_trace_is_one_line_per_call_by_default(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The raw JSON table used to print above every plan; the summary says
+    what the call found without putting a screen of it there."""
+    _run(data_dir, "init")
+    _patch_agent_runner(monkeypatch, [_ungrounded_plan()])
+
+    result = _run(data_dir, "ask", "add a bag of basmati rice", input="r\n")
+
+    assert result.exit_code == 0, result.output
+    assert "1 product, 0 locations" in result.output
+    assert "location_path" not in result.output
+
+
+def test_ask_trace_flag_restores_the_raw_result(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run(data_dir, "init")
+    _patch_agent_runner(monkeypatch, [_ungrounded_plan()])
+
+    result = _run(data_dir, "ask", "add a bag of basmati rice", "--trace", input="r\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Tool calls (1)" in result.output
+
+
+def test_ask_stats_flag_reaches_the_agent(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`_print_usage`'s per-round lines are off unless asked for — the flag
+    is threaded into `AgentRunner`, not filtered at print time."""
+    _run(data_dir, "init")
+    fake_cls = _patch_agent_runner(monkeypatch, [_effect_plan(), _effect_plan()])
+
+    _run(data_dir, "ask", "consume 1 jar of jam", input="r\n")
+    assert fake_cls.usage_flags == [False]
+
+    _run(data_dir, "ask", "consume 1 jar of jam", "--stats", input="r\n")
+    assert fake_cls.usage_flags == [False, True]
