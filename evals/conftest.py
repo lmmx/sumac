@@ -285,18 +285,29 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
                 {
                     "scenario": r.scenario,
                     "category": r.category,
-                    "passed": r.passed,
-                    "checks": r.checks,
-                    "failures": r.failures,
                     "note": r.note,
-                    "duration_s": r.duration_s,
-                    "tokens_per_sec": r.tokens_per_sec,
-                    "trace": r.trace,
-                    "messages": r.messages,
-                    "classify_messages": r.classify_messages,
-                    "usage_history": r.usage_history,
-                    "terminal": r.terminal,
-                    "nudge_fired": r.nudge_fired,
+                    # A one-shot judgment computed after the run, by
+                    # comparing final state against expectations — kept
+                    # apart from "log" below, which is an ordered record of
+                    # what happened during the run. See
+                    # docs/journal/2026-09-04-trace-and-verdict-redesign.md.
+                    "verdict": {
+                        "passed": r.passed,
+                        "checks": r.checks,
+                        "failures": r.failures,
+                    },
+                    "metrics": {
+                        "duration_s": r.duration_s,
+                        "tokens_per_sec": r.tokens_per_sec,
+                    },
+                    "log": {
+                        "trace": r.trace,
+                        "messages": r.messages,
+                        "classify_messages": r.classify_messages,
+                        "usage_history": r.usage_history,
+                        "terminal": r.terminal,
+                        "nudge_fired": r.nudge_fired,
+                    },
                 }
                 for r in results
             ],

@@ -52,9 +52,13 @@ def _print_report(model_epochs: dict[str, list[dict]]) -> None:
     for model in models:
         epochs = model_epochs[model]
         results = [r for e in epochs for r in e["results"]]
-        passed = sum(1 for r in results if r["passed"])
-        rates = [r["tokens_per_sec"] for r in results if r.get("tokens_per_sec") is not None]
-        durations = [r["duration_s"] for r in results]
+        passed = sum(1 for r in results if r["verdict"]["passed"])
+        rates = [
+            r["metrics"]["tokens_per_sec"]
+            for r in results
+            if r["metrics"].get("tokens_per_sec") is not None
+        ]
+        durations = [r["metrics"]["duration_s"] for r in results]
         mean_rate = sum(rates) / len(rates) if rates else float("nan")
         mean_duration = sum(durations) / len(durations) if durations else float("nan")
         pass_rate = passed / len(results) * 100 if results else float("nan")
@@ -70,7 +74,7 @@ def _print_report(model_epochs: dict[str, list[dict]]) -> None:
         by_scenario: dict[str, list[bool]] = defaultdict(list)
         for epoch in model_epochs[model]:
             for r in epoch["results"]:
-                by_scenario[r["scenario"]].append(r["passed"])
+                by_scenario[r["scenario"]].append(r["verdict"]["passed"])
                 if r["scenario"] not in seen:
                     seen.add(r["scenario"])
                     scenario_order.append(r["scenario"])

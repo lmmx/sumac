@@ -158,12 +158,16 @@ dimension (`classification`, `product`, `amount`, `unit`, `location`, a `tool:<n
 called, `reply`, `outcome` for the ask-or-act scenarios). The final `assert` is what makes pytest
 report the test PASSED/FAILED by name; the `result` fixture captures the same `EvalResult`
 regardless, so a test that fails partway still shows exactly which checks it got right.
-`duration_s`/`tokens_per_sec`/`trace` aren't checks (nothing to pass or fail) — the `agent` fixture
-fills them in automatically from the real `AgentRunner` it built, no `evaluate_*` call needed for
-any of them. `trace` is every tool call the agent made across the whole scenario (name, arguments,
-result) — not shown in the console summary (too verbose for a table), but present in `--eval-json`
-output, which is where to actually look when a scenario's `checks` say *that* it failed but not
-*why*.
+`duration_s`/`tokens_per_sec`/`trace`/`messages`/`classify_messages`/`usage_history`/`terminal`/
+`nudge_fired` aren't checks (nothing to pass or fail) — the `agent` fixture fills them in
+automatically from the real `AgentRunner` it built, no `evaluate_*` call needed for any of them.
+`trace` is every tool call the agent made across the whole scenario (name, arguments, result);
+`messages` is the raw conversation the domain loop sent/received, including a plain-text-only
+round that produces no `trace` entry at all; `classify_messages` is the separate classifier
+round's own exchange, captured even when it rejects. None of this is shown in the console summary
+(too verbose for a table), but all of it is present in `--eval-json` output, which is where to
+actually look when a scenario's `checks` say *that* it failed but not *why*. See
+docs/journal/2026-09-04-trace-and-verdict-redesign.md for what each field closes.
 
 ### Reading the output
 
@@ -193,9 +197,12 @@ throughput (`EvalResult.tokens_per_sec`, from `mistralrs`' own per-round `Usage`
 tokens/summed generation-time across every round a scenario ran, not an average of per-round
 rates, which would over-weight short rounds), then every failing scenario with its specific failed
 checks, then how the ask-or-act scenarios resolved. `--eval-json PATH` additionally writes the
-same data as JSON, including each scenario's `duration_s`/`tokens_per_sec` and top-level
-`total_duration_s`/`mean_tokens_per_sec` — one run's worth; see "Comparing models" above for
-turning several of these into one table.
+same data as JSON: each scenario's one-shot judgment under `verdict` (`passed`/`checks`/
+`failures`), its performance numbers under `metrics` (`duration_s`/`tokens_per_sec`), and its
+execution record under `log` (`trace`/`messages`/`classify_messages`/`usage_history`/`terminal`/
+`nudge_fired`) — kept apart because a verdict is computed once after the run while a log is an
+ordered record of what happened during it — plus top-level `total_duration_s`/`mean_tokens_per_sec`
+— one run's worth; see "Comparing models" above for turning several of these into one table.
 
 ## Safety rails
 
