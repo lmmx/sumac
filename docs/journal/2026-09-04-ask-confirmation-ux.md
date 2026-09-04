@@ -320,6 +320,53 @@ tests for what it introduces.
 
 ---
 
+# 2026-09-04: A Valid Location Shown as a New One
+
+## Current State
+
+- A real run proposed `sumac_discover_inventory(to_location="Fridge Top Shelf")`, which the preview
+  rendered with a `[new location]` badge, a `'Fridge Top Shelf' is not a configured location`
+  warning, and an effect of `— → —` — no before, no after.
+- `decide.resolve_location` accepts a location's display path as readily as its id (an established
+  behaviour: a path pasted into `--to`), so that write resolved, passed the gate, and would have
+  committed to the right location — the same run rejected `to_location="fridge door"` with
+  `unknown_location`, which is what an actually-invalid location does.
+- Cause: `AgentRunner._propose_write` recorded the model's raw endpoint strings on its
+  `ProposedWrite` while `decide_change` resolved them to ids internally, so every downstream lookup
+  keyed on a string that is not a location id — `review.review_write` against `cfg.known_locations`,
+  `llm._effects` against `Inventory.at`, and `render._where_text` against `config.location_path`.
+  Reproduced against a two-location vault before the fix.
+- `decide._resolve_location` is now public as `decide.resolve_location`; `_propose_write` calls it
+  on both endpoints after `decide_change` returns — where it cannot raise, both having resolved
+  once already — and records the ids.
+- The duplicate-call guard (`candidate in self._pending`) now sees through a second call naming the
+  same location by its other name
+  (`test_the_same_write_named_two_ways_is_only_proposed_once`, tests/test_llm.py).
+- `llm._effects` returns `()` when `ledger.project` reports anomalies, rather than reading
+  before/after out of a fold that did not apply the records — `render.print_plan` falls back to
+  `current_amount`'s "already there", which says less and claims nothing.
+- `evals/evaluators.py`'s `_canon_location` existed to resolve those raw strings for scoring; its
+  first branch now answers every write, and it is kept as a guard against the regression rather than
+  removed.
+- `pytest` reports 382 passing tests repo-wide; `ruff format --check .`, `ruff check .`, and
+  `ty check` each report no findings.
+
+## Missing
+
+- `ProposedWrite.product_id` still holds the model's raw string. Unlike a location, `decide` does
+  not resolve a product to a different id — an unknown one auto-registers under the name given — so
+  there is nothing to resolve to, and `review`'s `new-product`/`near-match` findings are about
+  exactly that.
+- `ProposedWrite.amount`/`unit` hold what was requested, not `_resolve_product`'s canonical
+  `Quantity`, so a write in a convertible alt-unit previews in the unit asked for while the log
+  records the canonical one. `LocationEffect.unit` takes its unit from the projection rather than
+  the write, so the before/after line is already in the stored unit.
+- Nothing checks a proposed product name against the search results the agent itself received
+  beyond substring presence — "Ham Packet" alongside a `packet` unit is flagged `[unverified]`, not
+  identified as a unit duplicated into a product name.
+
+---
+
 # 2026-09-04: One Model Load Per Session, Not Per Request
 
 ## Current State

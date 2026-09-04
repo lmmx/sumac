@@ -906,6 +906,14 @@ def _effects(
     # schema mismatch.
     objs = [w.obj for w in decided if w.stream.startswith("log:")]
     projected = ledger.project(inventory, cfg.known_locations, objs)
+    if projected.anomalies:
+        # The fold could not apply these records — an endpoint it could not
+        # resolve, a unit that would not convert. Whatever the preview showed
+        # then would be arithmetic that did not happen: `render.print_plan`
+        # falls back to "already there" for a write with no effects, which
+        # says less and claims nothing. Reaching here at all means something
+        # upstream is wrong, since `decide_change` returned these records.
+        return ()
     effects: list[LocationEffect] = []
     for location_id in (from_location, to_location):
         if location_id is None:
@@ -1175,6 +1183,18 @@ class AgentRunner:
             )
         except Rejected as e:
             return _rejected(e.reason, {k: str(v) for k, v in e.detail.items()})
+
+        # The ids `decide_change` just resolved these to, not the strings the
+        # model supplied. `decide.resolve_location` accepts a display path
+        # ("Fridge > Top Shelf") as readily as an id, so a write can be
+        # entirely valid — and commit correctly — while its raw endpoint
+        # matches nothing in `known_locations`. Recording the raw string made
+        # the preview claim a configured location was new and show no
+        # before/after for it, since every lookup downstream is by id.
+        # Re-resolving cannot raise here: `decide_change` returned, so both
+        # already resolved once.
+        from_location = decide.resolve_location(from_location, "from", cfg)
+        to_location = decide.resolve_location(to_location, "to", cfg)
 
         # Before/after context for the human reviewing this, not domain
         # logic: a discovery's "current" location is where the product

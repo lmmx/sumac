@@ -1309,3 +1309,75 @@ def test_an_injected_backend_never_builds_or_caches(
     assert agent._runner is injected
     assert built == []
     assert llm._SHARED_RUNNER is None
+
+
+def test_a_display_path_endpoint_is_recorded_as_its_location_id(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    """`decide.resolve_location` accepts a display path as readily as an id,
+    so a write naming one is valid and commits correctly. Keeping the raw
+    string on the `ProposedWrite` made every lookup downstream miss: the
+    preview showed no before/after (`— → —`) and `review` reported a
+    configured location as new."""
+    _seed_pantry_with_jam(data_dir, key, osuser)
+    config.add_location(data_dir, key, osuser, Location(id="fridge", name="Fridge"))
+    config.add_location(
+        data_dir, key, osuser, Location(id="fridge-top", name="Top Shelf", parent_id="fridge")
+    )
+    agent, _fake = _make_agent([], data_dir, key)
+
+    agent.tool_callbacks["sumac_discover_inventory"](
+        "sumac_discover_inventory",
+        {
+            "product_id": "Ham",
+            "amount": "1",
+            "unit": "packet",
+            "to_location": "Fridge > Top Shelf",
+        },
+    )
+
+    (write,) = agent._pending
+    assert write.to_location == "fridge-top"
+    assert [(e.location_id, e.before, e.after) for e in write.effects] == [
+        ("fridge-top", None, Decimal(1))
+    ]
+
+
+def test_a_display_path_endpoint_is_not_reported_as_a_new_location(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    from sumac import review
+
+    _seed_pantry_with_jam(data_dir, key, osuser)
+    config.add_location(data_dir, key, osuser, Location(id="fridge", name="Fridge"))
+    agent, _fake = _make_agent([], data_dir, key)
+
+    agent.tool_callbacks["sumac_discover_inventory"](
+        "sumac_discover_inventory",
+        {"product_id": "jam", "amount": "1", "unit": "jar", "to_location": "Fridge"},
+    )
+
+    (write,) = agent._pending
+    cfg = config.build_config(data_dir, key)
+    assert "unknown-location" not in [f.code for f in review.review_write(write, cfg, "")]
+
+
+def test_the_same_write_named_two_ways_is_only_proposed_once(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    """Resolving before recording also makes the duplicate guard see through
+    a second call that names the same location by its display path."""
+    _seed_pantry_with_jam(data_dir, key, osuser)
+    config.add_location(data_dir, key, osuser, Location(id="fridge", name="Fridge"))
+    agent, _fake = _make_agent([], data_dir, key)
+
+    for endpoint in ("fridge", "Fridge"):
+        result = json.loads(
+            agent.tool_callbacks["sumac_discover_inventory"](
+                "sumac_discover_inventory",
+                {"product_id": "jam", "amount": "1", "unit": "jar", "to_location": endpoint},
+            )
+        )
+
+    assert result["status"] == "already_proposed"
+    assert len(agent._pending) == 1
