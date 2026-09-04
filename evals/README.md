@@ -86,6 +86,32 @@ runs/NAME.json` loop over every registry preset, finished with `jq -c -s -f eval
 runs/*.json` — the aggregation query from that same comparison, checked in instead of retyped by
 hand each time.
 
+### Comparing prompt variants
+
+Trying a different wording for `CLASSIFIER_PROMPT`/`_FIND_PROMPT`/`_ADD_PROMPT`/`_REMOVE_PROMPT`/
+`_EMPTY_PLAN_NUDGE` doesn't mean editing `src/sumac/llm.py` and reverting it — `PromptVariant`
+(`llm.py`, right after `_EMPTY_PLAN_NUDGE`'s own definition) is the same named-registry pattern
+`ModelPreset` already uses for model choice, applied to prompt text as a second, independent axis.
+Each field is read at exactly one call site in `AgentRunner`, so a new variant can't miss updating
+a use site — there's only ever the one per field.
+
+```python
+# in src/sumac/llm.py, next to PROMPT_VARIANTS's one "default" entry:
+PromptVariant("nudge-v2", empty_plan_nudge=_NUDGE_V2_TEXT)
+```
+
+```sh
+uv run pytest evals --eval-model qwen3.5-4b --eval-prompt-variant nudge-v2 \
+  --eval-json runs/nudge-v2.json
+```
+
+`--eval-prompt-variant` mirrors `--eval-model` exactly (`conftest.py`); `evals/report.jq` and
+`evals/epoch_report.py` both already read the `"prompt_variant"` field `--eval-json` writes
+alongside `"model"` — `epoch_report.py` groups by the pair, labeling a non-default variant as
+`model [variant]` in its tables. No new CLI subcommand and no cross-product orchestration script
+for every model × every variant — with one variant registered, neither would earn its keep yet;
+add them if/when there are enough variants to need listing or a full grid compared at once.
+
 ## What's here
 
 ```

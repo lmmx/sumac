@@ -1741,3 +1741,86 @@ real model or a real `--eval-json` write this session — same limitation as eve
   `add.multiple_products_with_omitted_amounts` — the reason this was built — hasn't been done yet.
   Re-running `scripts/epoch-benchmark.sh` now will capture it; the previous 10-epoch run's traces
   are gone, since this landed after that run finished.
+
+---
+
+# 2026-09-04: PromptVariant — Experimenting on Agent Behavior Without Editing the Source
+
+## Context
+
+The `_EMPTY_PLAN_NUDGE` fix discussed in the previous two entries had nowhere to go — trying a
+wording change meant editing the module-level constant in `src/sumac/llm.py`, running the suite,
+and reverting it. The user asked how to support this kind of experimentation without maintaining
+multiple repo copies and without a manual edit/test/revert cycle, and explicitly asked whether a
+different agent framework was needed. It wasn't: the exact problem was already solved once, for a
+different axis — `ModelPreset` (a named, swappable settings bundle selected via `sumac models
+list`/`--eval-model`, zero duplication, zero manual revert) is precisely this same shape of
+problem applied to model choice. The fix was to generalize that pattern to a second, independent
+axis rather than reach for new tooling.
+
+Confirmed by reading `llm.py` directly before designing anything: each constant worth varying —
+`CLASSIFIER_PROMPT`, `_PROMPT_BY_KIND[kind]`, `_EMPTY_PLAN_NUDGE` — is referenced at exactly one
+call site in `AgentRunner` (`_classify`, `propose()`, `_maybe_force_action` respectively). Small,
+low-risk refactor, not a wide one.
+
+## Current State
+
+- `src/sumac/llm.py`: new `PromptVariant` (frozen dataclass, placed right after
+  `_EMPTY_PLAN_NUDGE`'s own definition since its field defaults reference `CLASSIFIER_PROMPT`,
+  `_PROMPT_BY_KIND`, `_EMPTY_PLAN_NUDGE`) — `name`, `classifier_prompt`, `prompt_by_kind: dict`,
+  `empty_plan_nudge`, each defaulting to the current constant. `prompt_by_kind` is a dict (not
+  three flat fields) so a variant can override just one `QueryKind`'s prompt without restating the
+  other two. `PROMPT_VARIANTS`/`_PROMPT_VARIANTS_BY_NAME`/`prompt_variant()`/
+  `DEFAULT_PROMPT_VARIANT` mirror `MODEL_PRESETS`/`model_preset()`/`DEFAULT_MODEL_PRESET` exactly.
+  One entry so far: `PromptVariant("default")`, every field defaulted — reproduces current
+  behavior exactly.
+- `AgentRunner.__init__` gained `prompt_variant: PromptVariant = DEFAULT_PROMPT_VARIANT`
+  (keyword-only, backward compatible — no existing `AgentRunner(...)` call site needed a change,
+  confirmed by grepping every one in `src/`, `tests/`, `evals/`) and a matching `prompt_variant`
+  read-only property. The three call sites now read `self._prompt_variant.classifier_prompt` /
+  `.prompt_by_kind[kind]` / `.empty_plan_nudge` instead of the bare module constants.
+- Not touched: `sumac ask`'s CLI. It has no `--model` flag today either (only the interactive "g"
+  regenerate prompt selects a model), so a `--prompt-variant` flag there alone would be new,
+  asymmetric surface — out of scope for what was asked (eval-driven experimentation), can follow
+  the same pattern later.
+- `evals/conftest.py`: new `--eval-prompt-variant` option mirroring `--eval-model`;
+  `agent_runner_factory` resolves it and passes `prompt_variant=` into `AgentRunner(...)`;
+  `--eval-json`'s payload gained a top-level `"prompt_variant"` field, sibling to `"model"` — kept
+  separate rather than folded into `"model"` as a composite string, so the raw JSON stays honest
+  and either axis can be sliced without string-parsing. (While in there: fixed `--eval-json`'s help
+  text, which still said "no comparison tool exists yet" — both `report.jq` and `epoch_report.py`
+  do now.)
+- `evals/report.jq`: `prompt_variant` added to the projected per-run object (one line).
+- `evals/epoch_report.py`: groups by a computed label (`model`, or `model [variant]` when the
+  variant isn't `"default"`) instead of bare model name; missing `"prompt_variant"` on an
+  older/pre-this-change JSON file defaults to `"default"`, so existing `runs/epochs/` data still
+  aggregates correctly. Also fixed a real column-alignment bug this surfaced: both tables' column
+  widths were hardcoded (16/20 chars) and silently ran together once a label like `qwen3.5-9b
+  [nudge-v2]` (22 chars) exceeded them — now computed from the longest label actually present,
+  shared between both tables.
+- `evals/README.md`: new "Comparing prompt variants" subsection (what `PromptVariant` is, the
+  one-call-site-per-field fact, the manual invocation shape — no new CLI subcommand or
+  cross-product orchestration script built for this, deliberately, matching the "don't bloat"
+  constraint the user set; those are cheap to add once there are enough variants to need them).
+
+## Verified this session
+
+`ruff check`/`ruff format --check`/`ty check` clean on every edited file (`llm.py`, `conftest.py`,
+`epoch_report.py`, `report.jq` isn't Python but was smoke-tested directly, `README.md`). Grepped
+every `AgentRunner(` call site repo-wide to confirm none needed a change. `evals/report.jq`
+re-verified against a synthetic run JSON carrying `"prompt_variant"`. `evals/epoch_report.py`
+functionally smoke-tested against synthetic two-variant data (same model, two prompt variants,
+one showing a real pass-rate difference) — correctly grouped and labeled the two, and the
+column-width fix confirmed directly (before the fix, the two model/variant columns visibly ran
+together with no separation; after, clean alignment). Also confirmed backward compatibility: a
+synthetic epoch JSON with no `"prompt_variant"` field at all still aggregates correctly under the
+plain model name, no `[default]` suffix shown.
+
+## Missing
+
+- No real model run this session — same limitation as everything else here. The actual
+  `_EMPTY_PLAN_NUDGE` wording experiment discussed two entries back is still just discussed, not
+  drafted as a real `PromptVariant` entry or run.
+- `sumac ask --prompt-variant` (interactive use, not just eval-driven) is a plausible future
+  addition, same shape as `sumac ask`'s still-missing `--model` flag — neither built, both would
+  follow the same pattern if wanted.

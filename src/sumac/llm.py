@@ -48,7 +48,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
@@ -446,6 +446,53 @@ _EMPTY_PLAN_NUDGE = (
 )
 
 
+# --- Prompt variants -----------------------------------------------------------
+# The same problem `ModelPreset` solves for "which model" — comparing options
+# without editing the source and reverting it back — applies to the prompt
+# text itself. `PromptVariant` is that same registry/lookup/default shape
+# applied to a second, independent axis. Each field here is referenced at
+# exactly one call site in `AgentRunner` (`classifier_prompt` in `_classify`,
+# `prompt_by_kind` in `propose()`, `empty_plan_nudge` in `_maybe_force_action`)
+# — a new variant genuinely cannot miss updating a use site, because there's
+# only ever the one. See docs/journal/2026-09-02-eval-suite.md.
+
+
+@dataclass(frozen=True, slots=True)
+class PromptVariant:
+    name: str
+    classifier_prompt: str = CLASSIFIER_PROMPT
+    prompt_by_kind: dict[QueryKind, str] = field(default_factory=lambda: dict(_PROMPT_BY_KIND))
+    empty_plan_nudge: str = _EMPTY_PLAN_NUDGE
+
+
+PROMPT_VARIANTS: tuple[PromptVariant, ...] = (
+    PromptVariant("default"),  # every field defaults — reproduces current behavior exactly
+    # Overrides only empty_plan_nudge — see docs/journal/2026-09-02-eval-suite.md for the
+    # diagnosed failure this targets (a forced-retry round that repeats a search instead of
+    # transitioning to the tool that actually changes inventory). Unverified until run.
+    PromptVariant(
+        "nudge-v2",
+        empty_plan_nudge=(
+            "This request needs a change to inventory, but no change has been made yet — "
+            "a description isn't the same as making it. Continue from the conversation "
+            "above rather than starting over: if you already have what you need for an "
+            "item, make that change now; only search again for an item you haven't "
+            "looked up yet."
+        ),
+    ),
+)
+
+_PROMPT_VARIANTS_BY_NAME: dict[str, PromptVariant] = {v.name: v for v in PROMPT_VARIANTS}
+
+
+def prompt_variant(name: str) -> PromptVariant:
+    """Raises `KeyError` for an unknown name — same contract as `model_preset()`."""
+    return _PROMPT_VARIANTS_BY_NAME[name]
+
+
+DEFAULT_PROMPT_VARIANT = PROMPT_VARIANTS[0]
+
+
 # --- Orchestration types ------------------------------------------------------
 
 
@@ -622,6 +669,7 @@ class AgentRunner:
         key: bytes,
         *,
         model: ModelPreset = DEFAULT_MODEL_PRESET,
+        prompt_variant: PromptVariant = DEFAULT_PROMPT_VARIANT,
         runner: SendsCompletions | None = None,
         debug: bool = False,
         temperature: float = DEFAULT_TEMPERATURE,
@@ -632,6 +680,7 @@ class AgentRunner:
         self._data_dir = data_dir
         self._key = key
         self._model = model
+        self._prompt_variant = prompt_variant
         self._debug = debug
         self._temperature = temperature
         self._top_p = top_p
@@ -667,6 +716,11 @@ class AgentRunner:
         retry prompt to default to "same model as last time" rather than
         forcing a choice on every retry."""
         return self._model
+
+    @property
+    def prompt_variant(self) -> PromptVariant:
+        """Which `PromptVariant` this instance is running — mirrors `model`."""
+        return self._prompt_variant
 
     @property
     def tokens_per_sec(self) -> float | None:
@@ -886,7 +940,7 @@ class AgentRunner:
         design journal for why this is a separate step rather than folded
         into one prompt covering every tool."""
         messages = [
-            {"role": "system", "content": CLASSIFIER_PROMPT},
+            {"role": "system", "content": self._prompt_variant.classifier_prompt},
             {"role": "user", "content": prompt},
         ]
         request = self._build_request(messages, [_CLASSIFY_SCHEMA_JSON])
@@ -986,7 +1040,7 @@ class AgentRunner:
         if plan.writes or self._kind not in (QueryKind.ADD, QueryKind.REMOVE):
             return plan
         assert self._messages is not None
-        self._messages.append({"role": "user", "content": _EMPTY_PLAN_NUDGE})
+        self._messages.append({"role": "user", "content": self._prompt_variant.empty_plan_nudge})
         return self._run_loop()
 
     def _maybe_self_review(self, plan: AgentPlan) -> AgentPlan:
@@ -1018,7 +1072,7 @@ class AgentRunner:
         self._schemas = _SCHEMAS_BY_KIND[kind]
         self._allowed = _TOOL_NAMES_BY_KIND[kind]
         self._messages = [
-            {"role": "system", "content": _PROMPT_BY_KIND[kind]},
+            {"role": "system", "content": self._prompt_variant.prompt_by_kind[kind]},
             {"role": "user", "content": prompt},
         ]
         plan = self._maybe_self_review(self._maybe_force_action(self._run_loop()))

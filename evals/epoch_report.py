@@ -11,10 +11,13 @@ up consistently, or was that one run noise."
 
 Usage: `uv run python -m evals.epoch_report runs/epochs/*/`
 
-Each argument is a directory of `epoch-NN.json` files — one model's worth,
-written by `scripts/epoch-benchmark.sh`. The model name is read from each
-file's own `"model"` field, not the directory name, so a mixed or
-mis-organised directory still groups correctly.
+Each argument is a directory of `epoch-NN.json` files — one model (and,
+independently, one prompt variant)'s worth, written by
+`scripts/epoch-benchmark.sh` or a manual `pytest --eval-json` run. Grouping
+is read from each file's own `"model"`/`"prompt_variant"` fields, not the
+directory name, so a mixed or mis-organised directory still groups
+correctly; a file with no `"prompt_variant"` field (written before that was
+added) is treated as `"default"`.
 """
 
 from __future__ import annotations
@@ -29,12 +32,21 @@ def _load_epochs(directory: Path) -> list[dict]:
     return [json.loads(p.read_text()) for p in sorted(directory.glob("epoch-*.json"))]
 
 
+def _group_label(epoch: dict) -> str:
+    variant = epoch.get("prompt_variant", "default")
+    return epoch["model"] if variant == "default" else f"{epoch['model']} [{variant}]"
+
+
 def _print_report(model_epochs: dict[str, list[dict]]) -> None:
     models = sorted(model_epochs)
+    # Wide enough for the longest label ("model [prompt-variant]" can run past
+    # any fixed width) — computed once, shared by both tables below so a long
+    # label can't run its column into the next one.
+    label_width = max(20, max((len(m) for m in models), default=0) + 2)
 
     print("EPOCH COMPARISON")
     print(
-        f"  {'model':20s} {'epochs':>7s} {'attempts':>9s} "
+        f"  {'model':{label_width}s} {'epochs':>7s} {'attempts':>9s} "
         f"{'pass_rate':>10s} {'tok/s':>8s} {'time/scenario':>14s}"
     )
     for model in models:
@@ -47,7 +59,7 @@ def _print_report(model_epochs: dict[str, list[dict]]) -> None:
         mean_duration = sum(durations) / len(durations) if durations else float("nan")
         pass_rate = passed / len(results) * 100 if results else float("nan")
         print(
-            f"  {model:20s} {len(epochs):7d} {len(results):9d} "
+            f"  {model:{label_width}s} {len(epochs):7d} {len(results):9d} "
             f"{pass_rate:9.1f}% {mean_rate:8.1f} {mean_duration:13.1f}s"
         )
 
@@ -68,13 +80,14 @@ def _print_report(model_epochs: dict[str, list[dict]]) -> None:
         outcomes = per_model_scenario[model].get(scenario, [])
         return sum(outcomes), len(outcomes)
 
-    header = "  " + f"{'scenario':45s}" + "".join(f"{m:>16s}" for m in models)
+    header = "  " + f"{'scenario':45s}" + "".join(m.rjust(label_width) for m in models)
     rows: list[str] = []
     disagreements: list[str] = []
     always_failing: list[str] = []
     for scenario in scenario_order:
         cell_counts = [counts(m, scenario) for m in models]
-        row = "  " + f"{scenario:45s}" + "".join(f"{p}/{t}".rjust(16) for p, t in cell_counts)
+        cells = "".join(f"{p}/{t}".rjust(label_width) for p, t in cell_counts)
+        row = "  " + f"{scenario:45s}" + cells
         rows.append(row)
         raw_passes = [p for p, _ in cell_counts]
         if max(raw_passes) - min(raw_passes) > 1:
@@ -113,7 +126,7 @@ def main(argv: list[str]) -> None:
             print(f"warning: no epoch-*.json files in {directory}", file=sys.stderr)
             continue
         for epoch in epochs:
-            model_epochs[epoch["model"]].append(epoch)
+            model_epochs[_group_label(epoch)].append(epoch)
 
     if not model_epochs:
         print("no epoch data found", file=sys.stderr)

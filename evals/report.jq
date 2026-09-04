@@ -1,5 +1,6 @@
 map({
   model,
+  prompt_variant,
   scenarios: (.results | length),
   passed: ([.results[] | select(.passed)] | length),
   pass_rate: (([.results[] | select(.passed)] | length) / (.results | length) * 100),

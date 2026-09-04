@@ -31,6 +31,14 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="ModelPreset name (default: llm.DEFAULT_MODEL_PRESET).",
     )
     parser.addoption(
+        "--eval-prompt-variant",
+        action="store",
+        type=str,
+        default=None,
+        help="PromptVariant name (default: llm.DEFAULT_PROMPT_VARIANT) — for comparing "
+        "a prompt/wording change without editing src/sumac/llm.py and reverting it.",
+    )
+    parser.addoption(
         "--eval-seed",
         action="store",
         type=int,
@@ -49,8 +57,8 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         type=str,
         default=None,
         help="Write this session's scenario results to this JSON path, for a later "
-        "comparison against a different model/prompt run (no comparison tool exists "
-        "yet — see docs/journal/2026-09-02-eval-suite.md).",
+        "comparison against a different model/prompt run — see evals/report.jq, "
+        "evals/epoch_report.py, and scripts/*.sh.",
     )
 
 
@@ -133,6 +141,10 @@ def agent_runner_factory(request: pytest.FixtureRequest, inventory: tuple[Path, 
 
     model_name = request.config.getoption("--eval-model") or llm.DEFAULT_MODEL_PRESET.name
     model = llm.model_preset(model_name)
+    variant_name = (
+        request.config.getoption("--eval-prompt-variant") or llm.DEFAULT_PROMPT_VARIANT.name
+    )
+    variant = llm.prompt_variant(variant_name)
     if not llm.is_cached(model):
         pytest.skip(
             f"{model.quantized_model_id}/{model.quantized_filename} not in the local "
@@ -152,7 +164,12 @@ def agent_runner_factory(request: pytest.FixtureRequest, inventory: tuple[Path, 
         # `AgentRunner` never requests — same narrowing `llm.py` itself
         # does at its one `_build_runner` call site.
         return llm.AgentRunner(
-            data_dir, key, model=model, runner=cast(llm.SendsCompletions, base_runner), debug=debug
+            data_dir,
+            key,
+            model=model,
+            prompt_variant=variant,
+            runner=cast(llm.SendsCompletions, base_runner),
+            debug=debug,
         )
 
     return make
@@ -249,9 +266,11 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         from sumac import llm
 
         model_name = config.getoption("--eval-model") or llm.DEFAULT_MODEL_PRESET.name
+        variant_name = config.getoption("--eval-prompt-variant") or llm.DEFAULT_PROMPT_VARIANT.name
         rates = [r.tokens_per_sec for r in results if r.tokens_per_sec is not None]
         payload = {
             "model": model_name,
+            "prompt_variant": variant_name,
             "seed": config.getoption("--eval-seed"),
             "total_duration_s": sum(r.duration_s for r in results),
             "mean_tokens_per_sec": sum(rates) / len(rates) if rates else None,
