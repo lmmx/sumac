@@ -47,7 +47,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -566,6 +566,15 @@ class ToolCallRecord:
     name: str
     arguments: dict
     result: str
+    # The pre-parse response body verbatim, when the active backend
+    # provides one — only a remote HTTP backend ever does (local mistral.rs
+    # has no comparable "raw wire format" to capture). What a tool-call
+    # parser mismatch on the serving side is actually diagnosed from: if a
+    # misconfigured parser makes `tool_calls` come back empty because the
+    # model's real call landed as unparsed text, this is the only place
+    # that evidence survives. See
+    # docs/journal/2026-09-04-modal-remote-inference-backend.md.
+    raw_response: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -575,14 +584,76 @@ class AgentPlan:
     trace: tuple[ToolCallRecord, ...] = ()
 
 
+class ChatResponseUsage(Protocol):
+    """The subset of `mistralrs.Usage` (or an equivalent populated by a
+    remote backend) anything in this module ever reads — see the "exact
+    minimal response shape" audit in
+    docs/journal/2026-09-04-modal-remote-inference-backend.md. Declared as
+    read-only `@property` members, not plain attributes: nothing here ever
+    writes one back, and a read-only member is covariant, which is what
+    lets a real `mistralrs.Usage` (and any other concrete field type)
+    satisfy this Protocol structurally without an exact type match."""
+
+    @property
+    def prompt_tokens(self) -> int: ...
+    @property
+    def completion_tokens(self) -> int: ...
+    @property
+    def avg_compl_tok_per_sec(self) -> float: ...
+    @property
+    def total_time_sec(self) -> float: ...
+
+
+class ChatResponseFunctionCall(Protocol):
+    @property
+    def name(self) -> str: ...
+    @property
+    def arguments(self) -> str: ...  # a JSON string, parsed with json.loads
+
+
+class ChatResponseToolCall(Protocol):
+    @property
+    def function(self) -> ChatResponseFunctionCall: ...
+
+
+class ChatResponseMessage(Protocol):
+    @property
+    def content(self) -> str | None: ...
+    @property
+    def tool_calls(self) -> Sequence[ChatResponseToolCall] | None: ...
+
+
+class ChatResponseChoice(Protocol):
+    @property
+    def message(self) -> ChatResponseMessage: ...
+
+
+class ChatResponse(Protocol):
+    """The narrowed response shape every `SendsCompletions` implementation
+    must satisfy structurally. A real `mistralrs.ChatCompletionResponse`
+    already does, with no wrapping; `usage` is `None`-tolerant, matching
+    `_record_usage` below (a fake `SendsCompletions` in tests has none)."""
+
+    @property
+    def choices(self) -> Sequence[ChatResponseChoice]: ...
+    @property
+    def usage(self) -> ChatResponseUsage | None: ...
+
+
 class SendsCompletions(Protocol):
-    """The one `mistralrs.Runner` method `AgentRunner` actually calls — a
-    real `Runner` satisfies this structurally; tests pass a hand-built fake
-    instead, with no real model or GGUF download involved."""
+    """The one method `AgentRunner` actually calls to get a completion —
+    a real `mistralrs.Runner` satisfies this only once wrapped in
+    `_LocalMistralRsBackend` below, since `mistralrs.ChatCompletionRequest`
+    is an opaque PyO3 object no other backend can construct or read back.
+    `request` is therefore the plain dict `_build_request` produces, not
+    that type — see
+    docs/journal/2026-09-04-modal-remote-inference-backend.md for why.
+    Tests pass a hand-built fake instead, with no real model or GGUF
+    download involved."""
 
     def send_chat_completion_request(
-        self, request: mistralrs.ChatCompletionRequest, model_id: str | None = None
-    ) -> mistralrs.ChatCompletionResponse: ...
+        self, request: dict, model_id: str | None = None
+    ) -> ChatResponse: ...
 
 
 def _lfm_literal(value: object) -> str:
@@ -648,7 +719,7 @@ def _rejected(reason: str, detail: dict) -> str:
     )
 
 
-def _round_preview(message: mistralrs.ResponseMessage, limit: int = 100) -> str:
+def _round_preview(message: ChatResponseMessage, limit: int = 100) -> str:
     """What the model actually did this round, truncated — a tool call's
     name and arguments, or its plain-text reply."""
     if message.tool_calls:
@@ -659,7 +730,7 @@ def _round_preview(message: mistralrs.ResponseMessage, limit: int = 100) -> str:
     return text if len(text) <= limit else text[:limit] + "..."
 
 
-def _print_usage(response: mistralrs.ChatCompletionResponse, round_num: int) -> None:
+def _print_usage(response: ChatResponse, round_num: int) -> None:
     """Per-round token/timing numbers from mistral.rs's own `Usage`, labeled
     with `round_num` and a preview of what the round actually produced. A
     no-op for a fake `SendsCompletions` in tests, which has no real
@@ -675,7 +746,45 @@ def _print_usage(response: mistralrs.ChatCompletionResponse, round_num: int) -> 
     )
 
 
-def _build_runner(model: ModelPreset, *, seed: int | None = None) -> mistralrs.Runner:
+class _LocalMistralRsBackend:
+    """Wraps a real `mistralrs.Runner` to satisfy `SendsCompletions`'s
+    plain-dict request contract. The one place, for the local backend, that
+    turns `_build_request`'s dict back into a real
+    `mistralrs.ChatCompletionRequest` — immediately before calling the
+    engine. A Modal-backed `SendsCompletions` instead serializes the same
+    dict to an OpenAI-style JSON body; both backends see identical kwargs.
+    See docs/journal/2026-09-04-modal-remote-inference-backend.md."""
+
+    def __init__(self, runner: mistralrs.Runner) -> None:
+        self._runner = runner
+
+    def send_chat_completion_request(
+        self, request: dict, model_id: str | None = None
+    ) -> mistralrs.ChatCompletionResponse:
+        # `tool_choice` is always the string "auto" today (see
+        # `_build_request`) — the only `mistralrs.ToolChoice` variant besides
+        # `NoTools`, which nothing here ever requests.
+        real_request = mistralrs.ChatCompletionRequest(
+            messages=request["messages"],
+            model=request["model"],
+            tool_schemas=request["tool_schemas"],
+            tool_choice=mistralrs.ToolChoice.Auto,
+            enable_thinking=request["enable_thinking"],
+            temperature=request["temperature"],
+            top_p=request["top_p"],
+            max_tokens=request["max_tokens"],
+        )
+        # `Runner.send_chat_completion_request` also returns a chunk
+        # iterator when `stream=True`; `real_request` never sets it, so
+        # narrowing to the non-streaming shape here is safe for every
+        # request this module actually sends.
+        return cast(
+            mistralrs.ChatCompletionResponse,
+            self._runner.send_chat_completion_request(real_request, model_id=model_id),
+        )
+
+
+def _build_runner(model: ModelPreset, *, seed: int | None = None) -> SendsCompletions:
     # No `tool_callbacks` here — see the module docstring for why:
     # `AgentRunner` dispatches tool calls itself instead (`_run_loop`).
     # `seed` is `None` for interactive `sumac ask` use (no fixed seed — the
@@ -693,7 +802,8 @@ def _build_runner(model: ModelPreset, *, seed: int | None = None) -> mistralrs.R
     # `Which.GGUF` is a nested dataclass, not a `Which` subclass, in the
     # installed 0.9.2 stub — the mismatch below is a stub-modeling gap, not a
     # real one; `Which.GGUF(...)` is mistral.rs's own documented construction.
-    return mistralrs.Runner(which=which, seed=seed)  # ty: ignore[invalid-argument-type]
+    runner = mistralrs.Runner(which=which, seed=seed)  # ty: ignore[invalid-argument-type]
+    return _LocalMistralRsBackend(runner)
 
 
 class AgentRunner:
@@ -746,13 +856,7 @@ class AgentRunner:
             "sumac_discover_inventory": self._sumac_discover_inventory,
         }
         self._runner: SendsCompletions = (
-            runner
-            if runner is not None
-            # `Runner.send_chat_completion_request` also returns a chunk
-            # iterator when `stream=True`; `_build_request` never sets it, so
-            # narrowing to the non-streaming `SendsCompletions` shape here is
-            # safe for every request this class actually sends.
-            else cast(SendsCompletions, _build_runner(model, seed=seed))
+            runner if runner is not None else _build_runner(model, seed=seed)
         )
 
     @property
@@ -993,19 +1097,30 @@ class AgentRunner:
 
     # -- request plumbing (client-side loop — see module docstring) ---------
 
-    def _build_request(
-        self, messages: list[dict[str, str]], schemas: list[str]
-    ) -> mistralrs.ChatCompletionRequest:
-        return mistralrs.ChatCompletionRequest(
-            messages=messages,
-            model=self._model.quantized_model_id,
-            tool_schemas=schemas,
-            tool_choice=mistralrs.ToolChoice.Auto,
-            enable_thinking=False,
-            temperature=self._temperature,
-            top_p=self._top_p,
-            max_tokens=self._max_tokens,
-        )
+    def _build_request(self, messages: list[dict[str, str]], schemas: list[str]) -> dict:
+        """A plain dict of every kwarg this module's one request shape ever
+        sends — not a real `mistralrs.ChatCompletionRequest`, which is an
+        opaque PyO3 object no non-mistralrs backend can construct, and which
+        can't be read back once built even by mistral.rs's own code (see
+        docs/journal/2026-09-04-modal-remote-inference-backend.md). Every
+        `SendsCompletions` implementation gets this identical dict;
+        `_LocalMistralRsBackend` is the one place that turns it back into a
+        real `mistralrs.ChatCompletionRequest`, immediately before calling
+        the engine."""
+        return {
+            "messages": messages,
+            "model": self._model.quantized_model_id,
+            "tool_schemas": schemas,
+            # The only value `mistralrs.ToolChoice` this module ever
+            # requests — nothing here ever varies it (see the journal entry
+            # above) — carried as a plain string so a non-mistralrs backend
+            # can pass it straight through without importing `mistralrs`.
+            "tool_choice": "auto",
+            "enable_thinking": False,
+            "temperature": self._temperature,
+            "top_p": self._top_p,
+            "max_tokens": self._max_tokens,
+        }
 
     def classify(self, prompt: str) -> QueryKind:
         """Public alias for `_classify` — the routing-only entry point an
@@ -1014,7 +1129,7 @@ class AgentRunner:
         docs/journal/2026-09-02-eval-suite.md."""
         return self._classify(prompt)
 
-    def _record_usage(self, response: mistralrs.ChatCompletionResponse, round_num: int) -> None:
+    def _record_usage(self, response: ChatResponse, round_num: int) -> None:
         """Prints the round's usage line (`_print_usage`) and folds its
         token/timing numbers into `tokens_per_sec`'s running totals — a
         no-op for the latter beyond the print for a fake `SendsCompletions`
@@ -1051,7 +1166,12 @@ class AgentRunner:
             messages.append({"role": "assistant", "content": message.content or ""})
             self._classify_messages = messages
             self._record_call(
-                ToolCallRecord(name="classify_request", arguments={}, result=message.content or "")
+                ToolCallRecord(
+                    name="classify_request",
+                    arguments={},
+                    result=message.content or "",
+                    raw_response=getattr(response, "raw_body", None),
+                )
             )
             return QueryKind.REJECT
         call = message.tool_calls[0].function
@@ -1066,7 +1186,12 @@ class AgentRunner:
         )
         self._classify_messages = messages
         self._record_call(
-            ToolCallRecord(name="classify_request", arguments=args, result=json.dumps(args))
+            ToolCallRecord(
+                name="classify_request",
+                arguments=args,
+                result=json.dumps(args),
+                raw_response=getattr(response, "raw_body", None),
+            )
         )
         try:
             return QueryKind(args.get("kind"))
@@ -1119,7 +1244,14 @@ class AgentRunner:
                 # this one call rather than crash or silently dispatch the
                 # wrong domain action.
                 result = _rejected("tool_not_available", {"name": call.name})
-            self._record_call(ToolCallRecord(name=call.name, arguments=args, result=result))
+            self._record_call(
+                ToolCallRecord(
+                    name=call.name,
+                    arguments=args,
+                    result=result,
+                    raw_response=getattr(response, "raw_body", None),
+                )
+            )
             self._messages.append(
                 {
                     "role": "assistant",

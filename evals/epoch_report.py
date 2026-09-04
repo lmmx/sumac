@@ -33,8 +33,17 @@ def _load_epochs(directory: Path) -> list[dict]:
 
 
 def _group_label(epoch: dict) -> str:
+    """Groups by model + prompt_variant, same as before, plus `backend`
+    (added for the Modal backend — a file with no `"backend"` field was
+    written before that existed and is treated as `"local"`). A Modal and
+    a local epoch for the same model/variant are never the same benchmark
+    — see docs/journal/2026-09-04-modal-remote-inference-backend.md's
+    "quantization parity" and "usage accounting" sections on why comparing
+    them directly is misleading — so they must never silently share a row."""
     variant = epoch.get("prompt_variant", "default")
-    return epoch["model"] if variant == "default" else f"{epoch['model']} [{variant}]"
+    label = epoch["model"] if variant == "default" else f"{epoch['model']} [{variant}]"
+    backend = epoch.get("backend", "local")
+    return label if backend == "local" else f"{label} ({backend})"
 
 
 def _print_report(model_epochs: dict[str, list[dict]]) -> None:

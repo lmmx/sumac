@@ -1047,54 +1047,29 @@ def test_classify_public_alias_delegates_to_private_method(
 def test_build_request_passes_default_sampling_config(
     data_dir: Path, key: bytes, osuser: str
 ) -> None:
-    """`ChatCompletionRequest` is an opaque PyO3 object — none of its fields
-    are readable back off a real instance (unlike the `@dataclass` its own
-    `.pyi` stub decorates it with, which describes construction, not the
-    runtime type). Capturing the kwargs `_build_request` passes, via a
-    stand-in swapped in for `mistralrs.ChatCompletionRequest` itself, is the
-    only way to confirm what reached it."""
-    captured: dict = {}
+    """`_build_request` returns a plain dict, not a real (opaque, PyO3)
+    `mistralrs.ChatCompletionRequest` — see
+    docs/journal/2026-09-04-modal-remote-inference-backend.md. Every
+    `SendsCompletions` backend, not just mistral.rs, can be tested against
+    this dict directly."""
+    agent, _fake = _make_agent([], data_dir, key)
+    request = agent._build_request([{"role": "user", "content": "hi"}], [])
 
-    class _CapturingRequest:
-        def __init__(self, **kwargs: object) -> None:
-            captured.update(kwargs)
-
-    monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr(llm.mistralrs, "ChatCompletionRequest", _CapturingRequest)
-    try:
-        agent, _fake = _make_agent([], data_dir, key)
-        agent._build_request([{"role": "user", "content": "hi"}], [])
-    finally:
-        monkeypatch.undo()
-
-    assert captured["temperature"] == llm.DEFAULT_TEMPERATURE
-    assert captured["top_p"] == llm.DEFAULT_TOP_P
-    assert captured["max_tokens"] == llm.DEFAULT_MAX_TOKENS
+    assert request["temperature"] == llm.DEFAULT_TEMPERATURE
+    assert request["top_p"] == llm.DEFAULT_TOP_P
+    assert request["max_tokens"] == llm.DEFAULT_MAX_TOKENS
 
 
 def test_build_request_passes_custom_sampling_config(
     data_dir: Path, key: bytes, osuser: str
 ) -> None:
-    captured: dict = {}
+    fake = FakeRunner([])
+    agent = llm.AgentRunner(data_dir, key, runner=fake, temperature=0.7, top_p=0.5, max_tokens=256)
+    request = agent._build_request([{"role": "user", "content": "hi"}], [])
 
-    class _CapturingRequest:
-        def __init__(self, **kwargs: object) -> None:
-            captured.update(kwargs)
-
-    monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr(llm.mistralrs, "ChatCompletionRequest", _CapturingRequest)
-    try:
-        fake = FakeRunner([])
-        agent = llm.AgentRunner(
-            data_dir, key, runner=fake, temperature=0.7, top_p=0.5, max_tokens=256
-        )
-        agent._build_request([{"role": "user", "content": "hi"}], [])
-    finally:
-        monkeypatch.undo()
-
-    assert captured["temperature"] == 0.7
-    assert captured["top_p"] == 0.5
-    assert captured["max_tokens"] == 256
+    assert request["temperature"] == 0.7
+    assert request["top_p"] == 0.5
+    assert request["max_tokens"] == 256
 
 
 def test_build_runner_passes_seed_to_mistralrs_runner(monkeypatch: pytest.MonkeyPatch) -> None:

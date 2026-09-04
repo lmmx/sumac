@@ -10,12 +10,17 @@ merely unlikely.
 from __future__ import annotations
 
 import json
+import os
 import random
 import time
 from collections import Counter
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from sumac import modal_backend
 
 from evals import fixtures as eval_fixtures
 from evals.evaluators import EvalResult
@@ -51,6 +56,28 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         action="store_true",
         default=False,
         help="Print raw agent request/response diagnostics (AgentRunner(debug=True)).",
+    )
+    parser.addoption(
+        "--eval-backend",
+        action="store",
+        type=str,
+        default="local",
+        choices=["local", "modal"],
+        help="Which SendsCompletions backend to run model-gated scenarios against. "
+        "'local' (default) loads a real mistralrs.Runner from the Hugging Face cache. "
+        "'modal' talks HTTP to a deployed Modal/vLLM endpoint instead — opt-in, for "
+        "faster iteration only; local mistralrs remains the authoritative benchmark "
+        "regardless of which backend a run used. See "
+        "docs/journal/2026-09-04-modal-remote-inference-backend.md.",
+    )
+    parser.addoption(
+        "--eval-modal-endpoint",
+        action="store",
+        type=str,
+        default=None,
+        help="Modal endpoint base URL for --eval-backend modal (e.g. "
+        "https://<workspace>--<app>-server.modal.direct, printed by 'modal deploy'). "
+        "Falls back to the SUMAC_MODAL_ENDPOINT environment variable.",
     )
     parser.addoption(
         "--eval-json",
@@ -166,15 +193,60 @@ def cfg(inventory: tuple[Path, bytes]) -> sumac_config.Config:
     return sumac_config.build_config(data_dir, key)
 
 
+# `ModelPreset.name` -> the vLLM `--served-model-name` a Modal deployment
+# for that preset is expected to use. Only presets actually deployed to
+# Modal belong here — see modal/serve_qwen3_5_4b.py. `--eval-model` keeps
+# meaning "which ModelPreset" regardless of backend; this is the one place
+# that resolves it to a served endpoint name for the modal backend, so
+# llm.ModelPreset itself doesn't need to know Modal exists.
+_MODAL_SERVED_MODEL_NAMES: dict[str, str] = {
+    "qwen3.5-4b": "qwen3.5-4b-instruct",
+}
+
+
+def _build_modal_runner(config: pytest.Config, model) -> modal_backend.ModalCompletions:
+    """Builds the Modal-backed `SendsCompletions` and runs its deploy-time
+    gate (docs/journal/2026-09-04-modal-remote-inference-backend.md) before
+    handing it back. A hard `pytest.UsageError` here aborts the whole
+    session rather than skipping one test — a misconfigured serving stack
+    (wrong --tool-call-parser, thinking left on, ...) must never be allowed
+    to read as 'every scenario failed for a model reason'."""
+    from sumac import modal_backend
+
+    served_name = _MODAL_SERVED_MODEL_NAMES.get(model.name)
+    if served_name is None:
+        raise pytest.UsageError(
+            f"--eval-backend modal has no known Modal deployment for model {model.name!r} — "
+            "add it to _MODAL_SERVED_MODEL_NAMES in evals/conftest.py once deployed."
+        )
+    endpoint = config.getoption("--eval-modal-endpoint") or os.environ.get("SUMAC_MODAL_ENDPOINT")
+    if not endpoint:
+        raise pytest.UsageError(
+            "--eval-backend modal requires --eval-modal-endpoint or SUMAC_MODAL_ENDPOINT."
+        )
+    try:
+        modal_backend.verify_tool_calling(endpoint, served_name)
+    except (modal_backend.ModalTransportError, modal_backend.ModalToolGateError) as e:
+        raise pytest.UsageError(
+            f"Modal deploy-time gate failed against {endpoint} — refusing to run evals: {e}"
+        ) from e
+    return modal_backend.ModalCompletions(endpoint, served_name)
+
+
 @pytest.fixture(scope="session")
 def agent_runner_factory(request: pytest.FixtureRequest, inventory: tuple[Path, bytes]):
     """Model-gated tests only (`pytest.mark.model`). Returns a zero-arg
     factory building a fresh `AgentRunner` over one shared real
-    `mistralrs.Runner` — a fresh wrapper per test (no leaked conversation
-    state) over one loaded model (expensive to reload). Skips — never
-    errors, never attempts a network download — when the GGUF isn't
-    already in the local cache; see `llm.is_cached`."""
-    pytest.importorskip("mistralrs")
+    `SendsCompletions` backend — a fresh wrapper per test (no leaked
+    conversation state) over one loaded/connected backend (expensive to
+    reload/reconnect). `--eval-backend` (default `local`) picks
+    `mistralrs.Runner` vs. a Modal-backed HTTP client — see
+    docs/journal/2026-09-04-modal-remote-inference-backend.md. The local
+    path skips — never errors, never attempts a network download — when
+    the GGUF isn't already in the local cache; see `llm.is_cached`. The
+    modal path errors instead (`_build_modal_runner`), since a backend
+    misconfiguration there is a real problem, not an expected local
+    absence."""
     from typing import cast
 
     from sumac import llm
@@ -185,24 +257,31 @@ def agent_runner_factory(request: pytest.FixtureRequest, inventory: tuple[Path, 
         request.config.getoption("--eval-prompt-variant") or llm.DEFAULT_PROMPT_VARIANT.name
     )
     variant = llm.prompt_variant(variant_name)
-    if not llm.is_cached(model):
-        pytest.skip(
-            f"{model.quantized_model_id}/{model.quantized_filename} not in the local "
-            "Hugging Face cache — refusing to trigger a network download from a test fixture"
-        )
-    seed_value = request.config.getoption("--eval-seed")
-    try:
-        base_runner = llm._build_runner(model, seed=seed_value)
-    except Exception as e:  # noqa: BLE001 - last-resort guard; the cache check above is primary
-        pytest.skip(f"could not load {model.quantized_model_id}: {e}")
+    backend_name = request.config.getoption("--eval-backend")
+
+    if backend_name == "modal":
+        base_runner = _build_modal_runner(request.config, model)
+    else:
+        pytest.importorskip("mistralrs")
+        if not llm.is_cached(model):
+            pytest.skip(
+                f"{model.quantized_model_id}/{model.quantized_filename} not in the local "
+                "Hugging Face cache — refusing to trigger a network download from a test fixture"
+            )
+        seed_value = request.config.getoption("--eval-seed")
+        try:
+            base_runner = llm._build_runner(model, seed=seed_value)
+        except Exception as e:  # noqa: BLE001 - last-resort guard; the cache check above is primary
+            pytest.skip(f"could not load {model.quantized_model_id}: {e}")
 
     data_dir, key = inventory
     debug = request.config.getoption("--eval-debug")
 
     def make() -> llm.AgentRunner:
-        # `_build_runner`'s own return type covers streaming too, which
-        # `AgentRunner` never requests — same narrowing `llm.py` itself
-        # does at its one `_build_runner` call site.
+        # `base_runner` is either backend's real `SendsCompletions` — a
+        # `_LocalMistralRsBackend` or a `modal_backend.ModalCompletions`,
+        # both structural matches, hence the cast rather than a shared base
+        # class.
         return llm.AgentRunner(
             data_dir,
             key,
@@ -232,7 +311,13 @@ def agent(agent_runner_factory, result):
     yield a
     result.tokens_per_sec = a.tokens_per_sec
     result.trace = [
-        {"name": t.name, "arguments": t.arguments, "result": t.result} for t in a.trace_history
+        {
+            "name": t.name,
+            "arguments": t.arguments,
+            "result": t.result,
+            "raw_response": t.raw_response,
+        }
+        for t in a.trace_history
     ]
     result.messages = list(a.messages) if a.messages is not None else None
     result.classify_messages = (
@@ -309,6 +394,7 @@ def _build_eval_payload(
     scenario_order: list[str] | None,
     log_file_name: str,
     results: list[EvalResult],
+    backend_name: str = "local",
 ) -> dict:
     """The verdict/metrics half of `--eval-json`'s output — everything a
     reader wants on every pass (did it pass, how long did it take), kept
@@ -316,11 +402,17 @@ def _build_eval_payload(
     the execution-record half written to the `.jsonl` sidecar named here as
     `log_file`; factored apart from `pytest_sessionfinish` so both halves
     are unit-testable without a real model or pytest session — see
-    `tests/test_eval_conftest.py`."""
+    `tests/test_eval_conftest.py`. `backend_name` (`"local"`/`"modal"`) is
+    the one piece of cross-backend provenance this file carries — see
+    `epoch_report.py`'s `_group_label`, which refuses to fold a `modal`
+    epoch into the same row as a `local` one for exactly the reasons in
+    docs/journal/2026-09-04-modal-remote-inference-backend.md's
+    "quantization parity"/"usage accounting" sections."""
     rates = [r.tokens_per_sec for r in results if r.tokens_per_sec is not None]
     return {
         "model": model_name,
         "prompt_variant": variant_name,
+        "backend": backend_name,
         "seed": seed,
         # The reproducible per-epoch shuffle `pytest_collection_modifyitems`
         # applied — `None` when `seed` was `None`, since nothing was
@@ -405,6 +497,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
             scenario_order=getattr(config, "_eval_scenario_order", None),
             log_file_name=log_path.name,
             results=results,
+            backend_name=config.getoption("--eval-backend"),
         )
         out.write_text(json.dumps(payload, indent=2))
         with log_path.open("w") as f:
