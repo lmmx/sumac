@@ -239,11 +239,47 @@ def scene_checklist() -> None:
     version redraws this on every keypress."""
     plan = _compound()
     choices = [
-        prompt_ui.Choice(f"{w.kind.value} {w.amount} {w.unit} {w.product_id}", checked=i != 2)
+        prompt_ui.Choice(render.write_summary(w, LOCATIONS), checked=i != 2)
         for i, w in enumerate(plan.writes)
     ]
     render.console.print(
         prompt_ui._checklist(choices, [c.checked for c in choices], 2, "Apply which changes?")
+    )
+
+
+def scene_edit() -> None:
+    """`e`'s two menus: which change, then which field — drawn at one cursor
+    position each. The live versions redraw on every keypress."""
+    plan = _compound()
+    write = plan.writes[2]
+    picker = [
+        prompt_ui.Option(str(i), render.write_summary(w, LOCATIONS))
+        for i, w in enumerate(plan.writes)
+    ]
+    picker.append(prompt_ui.Option("c", "Cancel — edit nothing"))
+    render.console.print(
+        prompt_ui._menu(picker, 2, "Edit which change?", "↑/↓ move · enter choose · esc cancel")
+    )
+
+    fields = [
+        prompt_ui.Option(key, f"{label:8s} {value}")
+        for key, label, value in (
+            ("p", "product", write.product_id),
+            ("u", "unit", write.unit),
+            ("n", "amount", write.amount),
+            ("f", "from", write.from_location),
+        )
+    ]
+    fields.append(prompt_ui.Option("d", "Done — re-check this change"))
+    fields.append(prompt_ui.Option("c", "Cancel — discard these edits"))
+    render.console.print()
+    render.console.print(
+        prompt_ui._menu(
+            fields,
+            2,
+            f"Editing: {render.write_summary(write, LOCATIONS)}",
+            "↑/↓ move · enter choose · esc cancel",
+        )
     )
 
 
@@ -263,6 +299,7 @@ SCENES = {
     "trace": scene_trace,
     "typed": scene_typed,
     "checklist": scene_checklist,
+    "edit": scene_edit,
 }
 
 

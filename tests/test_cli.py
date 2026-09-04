@@ -11,9 +11,9 @@ from sealedlog import Vault
 from sealedlog.errors import WrongPassphraseError
 from typer.testing import CliRunner
 
-from sumac import ledger, llm, paths, queue, store
+from sumac import ledger, llm, paths, prompt_ui, queue, store
 from sumac import vault as sumac_vault
-from sumac.cli import _decision_options, app
+from sumac.cli import _decision_options, _editable_fields, app
 from sumac.errors import RetireNonemptyError, VaultExistsError
 from sumac.models import ChangeKind
 
@@ -1198,3 +1198,103 @@ def test_ask_debug_implies_stats(data_dir: Path, monkeypatch: pytest.MonkeyPatch
     _run(data_dir, "ask", "consume 1 jar of jam", "--debug", input="r\n")
 
     assert fake_cls.usage_flags == [True]
+
+
+# --- edit, as a field menu -------------------------------------------------
+
+
+def _patch_menu(
+    monkeypatch: pytest.MonkeyPatch, selections: list[str], entries: list[str] | None = None
+) -> None:
+    """Drives the interactive path off a terminal: `prompt_ui.select` answers
+    from `selections` in order (the decision prompt and the edit menus all go
+    through it), and `typer.prompt` from `entries` for the one field being
+    retyped."""
+    import typer as typer_module
+
+    monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
+    picks = iter(selections)
+    monkeypatch.setattr(prompt_ui, "select", lambda *a, **k: next(picks))
+    typed = iter(entries or [])
+    monkeypatch.setattr(typer_module, "prompt", lambda *a, **k: next(typed))
+
+
+def test_ask_edit_menu_retypes_only_the_chosen_field(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`e` then the amount row then done — product, unit and location are
+    never asked for, which is the whole difference from walking every field
+    in order and pressing Enter through the ones already right."""
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "add", "purchase", "jam", "3", "jar", "--to", "pantry")
+    _patch_agent_runner(monkeypatch, [_consumption_plan(amount="1")])
+    _patch_menu(monkeypatch, selections=["e", "n", "d", "a"], entries=["2"])
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam")
+
+    assert result.exit_code == 0, result.output
+    assert "Edit applied" in result.output
+    assert "Recorded consumption of 2 jar jam" in result.output
+
+
+def test_ask_edit_menu_cancel_leaves_the_plan_unchanged(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "add", "purchase", "jam", "3", "jar", "--to", "pantry")
+    fake_cls = _patch_agent_runner(monkeypatch, [_consumption_plan(amount="1")])
+    _patch_menu(monkeypatch, selections=["e", "c", "r"])
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam")
+
+    assert result.exit_code == 0, result.output
+    assert "Edit applied" not in result.output
+    assert fake_cls.commits == []
+
+
+def test_ask_edit_menu_escape_cancels_the_edit_not_the_plan(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Escape inside the field menu answers "r", which means cancel *this
+    edit* — the plan comes back for another decision rather than being
+    discarded."""
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "add", "purchase", "jam", "3", "jar", "--to", "pantry")
+    _patch_agent_runner(monkeypatch, [_consumption_plan(amount="1")])
+    _patch_menu(monkeypatch, selections=["e", "r", "a"])
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam")
+
+    assert result.exit_code == 0, result.output
+    assert "Recorded consumption of 1 jar jam" in result.output
+
+
+def test_edit_menu_offers_only_the_endpoints_a_write_has() -> None:
+    """A purchase carrying a `from_location` is rejected by
+    `decide_change`, so offering to fill one in could only ever produce a
+    rejection."""
+    consumption = _consumption_plan().writes[0]
+    discovery = llm.ProposedWrite(
+        kind=ChangeKind.DISCOVERY,
+        product_id="bananas",
+        amount=Decimal(1),
+        unit="bag",
+        from_location=None,
+        to_location="fridge-door",
+    )
+
+    assert [row[2] for row in _editable_fields(consumption)] == [
+        "product_id",
+        "unit",
+        "amount",
+        "from_location",
+    ]
+    assert [row[2] for row in _editable_fields(discovery)] == [
+        "product_id",
+        "unit",
+        "amount",
+        "to_location",
+    ]

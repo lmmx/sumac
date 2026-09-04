@@ -40,7 +40,7 @@ from sumac.errors import (
 )
 
 if TYPE_CHECKING:
-    from sumac.llm import AgentPlan, ModelPreset
+    from sumac.llm import AgentPlan, ModelPreset, ProposedWrite
 from sumac.models import ChangeKind
 from sumac.passphrase import get_key, resolve_passphrase
 
@@ -557,15 +557,14 @@ def _show(data_dir: Path, key: bytes, plan: AgentPlan, *, view: _AskView) -> Non
     )
 
 
-def _pick_writes(plan: AgentPlan) -> AgentPlan | None:
+def _pick_writes(data_dir: Path, key: bytes, plan: AgentPlan) -> AgentPlan | None:
     """A plan narrowed to the writes left checked, or `None` if the person
     cancelled or unchecked everything. Deliberately does not commit what was
     picked: the narrowed plan goes back through the same preview and the
     same accept prompt, so the subset is seen before it is written rather
     than applied straight out of a checklist."""
-    labels = [
-        prompt_ui.Choice(f"{w.kind.value} {w.amount} {w.unit} {w.product_id}") for w in plan.writes
-    ]
+    locations = ledger.load_locations_or_empty(data_dir, key)
+    labels = [prompt_ui.Choice(render.write_summary(w, locations)) for w in plan.writes]
     picked = prompt_ui.multiselect(labels, title="Apply which changes?")
     if not picked:
         render.console.print("[dim](nothing picked — the plan is unchanged)[/dim]")
@@ -636,55 +635,152 @@ def _prompt_start_over(current_prompt: str) -> str:
     return typer.prompt("Prompt", default=current_prompt)
 
 
-def _prompt_edit(data_dir: Path, key: bytes, plan: AgentPlan) -> AgentPlan:
-    """Manually corrects one proposed write's fields directly — no model
-    call at all, and the fastest fix for something the model got mostly
-    right (a mistyped product name it had spelled correctly moments
-    earlier in a tool result, a location one digit off). Re-validated
-    through the same `decide_change` gate every model-proposed write
-    already goes through, so a typo in the correction itself can't reach
-    `commit` unchecked — "regenerate"/"start over" are the tools for a
-    model reasoning past correcting, this is only for its typing."""
-    writes = list(plan.writes)
-    if len(writes) > 1:
-        for i, w in enumerate(writes):
-            render.console.print(
-                f"  [{i}] {w.kind.value} {w.amount} {w.unit} {w.product_id} "
-                f"(from {w.from_location} to {w.to_location})"
-            )
+# (key, column label, `ProposedWrite` field) for every field `e` can change.
+# The endpoint rows are dropped for a write that has no such endpoint —
+# `decide_change` rejects a purchase carrying a `from_location`, so offering
+# to fill one in would only ever produce a rejection.
+_EDIT_FIELDS = (
+    ("p", "product", "product_id"),
+    ("u", "unit", "unit"),
+    ("n", "amount", "amount"),
+    ("f", "from", "from_location"),
+    ("t", "to", "to_location"),
+)
+
+
+def _editable_fields(write: ProposedWrite) -> list[tuple[str, str, str]]:
+    return [
+        row
+        for row in _EDIT_FIELDS
+        if row[2] not in ("from_location", "to_location") or getattr(write, row[2]) is not None
+    ]
+
+
+def _choose_write_to_edit(plan: AgentPlan, locations: dict[str, models.Location]) -> int | None:
+    """Which write `e` acts on. One write needs no choosing; more than one
+    gets the same menu every other decision in this command uses, and the
+    numbered list plus a typed index off a terminal."""
+    if len(plan.writes) == 1:
+        return 0
+
+    if not prompt_ui.interactive():
+        for i, w in enumerate(plan.writes):
+            render.console.print(f"  [{i}] {render.write_summary(w, locations)}")
         try:
             index = int(typer.prompt("Edit which one? (number)", default="0"))
-            w = writes[index]
-        except (ValueError, IndexError):
+        except ValueError:
+            index = -1
+        if not 0 <= index < len(plan.writes):
             render.print_error("Not a valid index — nothing edited.")
-            return plan
-    else:
-        index, w = 0, writes[0]
+            return None
+        return index
 
-    product_id = typer.prompt("product_id", default=w.product_id)
-    unit = typer.prompt("unit", default=w.unit)
-    amount_text = typer.prompt("amount", default=str(w.amount))
-    from_location = w.from_location
-    if from_location is not None:
-        from_location = typer.prompt("from_location", default=from_location)
-    to_location = w.to_location
-    if to_location is not None:
-        to_location = typer.prompt("to_location", default=to_location)
+    options = [
+        prompt_ui.Option(str(i), render.write_summary(w, locations))
+        for i, w in enumerate(plan.writes)
+    ]
+    options.append(prompt_ui.Option("c", "Cancel — edit nothing"))
+    answer = prompt_ui.select(options, default="0", title="Edit which change?")
+    return int(answer) if answer.isdigit() else None
 
+
+def _edit_fields_by_menu(
+    write: ProposedWrite, locations: dict[str, models.Location]
+) -> dict[str, str | None] | None:
+    """Pick a field, retype that one, repeat until done — rather than walking
+    every field in order and pressing Enter through the ones that were
+    already right, which is what correcting a single mistyped location used
+    to cost. Values are shown on their own rows, so the menu doubles as the
+    record of what has been changed so far.
+
+    Returns the edited values, or `None` if cancelled. Nothing is validated
+    or applied here; `_apply_edit` does both, once, on the way out."""
+    fields = _editable_fields(write)
+    # Seeded from every field, not just the editable ones: an endpoint this
+    # write does not have still has to reach `_apply_edit` as `None` rather
+    # than be missing, since `decide_change` distinguishes the two.
+    values: dict[str, str | None] = {
+        "product_id": write.product_id,
+        "unit": write.unit,
+        "amount": str(write.amount),
+        "from_location": write.from_location,
+        "to_location": write.to_location,
+    }
+
+    while True:
+        options = [
+            prompt_ui.Option(key, f"{label:8s} {values[field]}") for key, label, field in fields
+        ]
+        options.append(prompt_ui.Option("d", "Done — re-check this change"))
+        options.append(prompt_ui.Option("c", "Cancel — discard these edits"))
+        answer = prompt_ui.select(
+            options,
+            default=fields[0][0],
+            title=f"Editing: {render.write_summary(write, locations)}",
+        )
+        if answer == "d":
+            return values
+        # "r" is what `prompt_ui.select` answers for Escape — cancelling an
+        # edit, here, not rejecting the plan: the caller returns the plan
+        # unchanged and asks for a decision on it again.
+        if answer in ("c", "r"):
+            return None
+        match = next((row for row in fields if row[0] == answer), None)
+        if match is not None:
+            values[match[2]] = typer.prompt(match[1], default=values[match[2]] or "")
+
+
+def _edit_fields_by_walkthrough(write: ProposedWrite) -> dict[str, str | None]:
+    """Every field in order, each defaulting to what it already holds — the
+    only shape a piped or scripted answer can take, and unchanged from what
+    `e` has always read."""
+    values: dict[str, str | None] = {
+        "product_id": typer.prompt("product_id", default=write.product_id),
+        "unit": typer.prompt("unit", default=write.unit),
+        "amount": typer.prompt("amount", default=str(write.amount)),
+        "from_location": write.from_location,
+        "to_location": write.to_location,
+    }
+    if write.from_location is not None:
+        values["from_location"] = typer.prompt("from_location", default=write.from_location)
+    if write.to_location is not None:
+        values["to_location"] = typer.prompt("to_location", default=write.to_location)
+    return values
+
+
+def _apply_edit(
+    data_dir: Path,
+    key: bytes,
+    plan: AgentPlan,
+    index: int,
+    values: dict[str, str | None],
+) -> AgentPlan:
+    """Re-validates the edited write through the same `decide_change` gate
+    every model-proposed write already passes, so a typo in the correction
+    itself cannot reach `commit` unchecked."""
+    write = plan.writes[index]
     try:
-        amount = Decimal(amount_text)
+        amount = Decimal(values["amount"] or "")
     except InvalidOperation:
-        render.print_error(f"Not a valid amount: {amount_text!r} — nothing edited.")
+        render.print_error(f"Not a valid amount: {values['amount']!r} — nothing edited.")
         return plan
 
+    edited = dataclass_replace(
+        write,
+        product_id=values["product_id"] or "",
+        amount=amount,
+        unit=values["unit"] or "",
+        from_location=values["from_location"],
+        to_location=values["to_location"],
+    )
     try:
         _writes, messages = decide.decide_change(
-            kind=w.kind,
-            product_id=product_id,
-            amount=amount,
-            unit=unit,
-            from_location=from_location,
-            to_location=to_location,
+            kind=edited.kind,
+            product_id=edited.product_id,
+            amount=edited.amount,
+            unit=edited.unit,
+            from_location=edited.from_location,
+            to_location=edited.to_location,
             actor=paths.current_user(),
             occurred_at=datetime.now(UTC),
             inventory=ledger.build_inventory(data_dir, key),
@@ -694,17 +790,37 @@ def _prompt_edit(data_dir: Path, key: bytes, plan: AgentPlan) -> AgentPlan:
         render.print_error(f"Edit rejected: {e}")
         return plan
 
-    writes[index] = dataclass_replace(
-        w,
-        product_id=product_id,
-        amount=amount,
-        unit=unit,
-        from_location=from_location,
-        to_location=to_location,
-        warnings=tuple(messages),
-    )
+    writes = list(plan.writes)
+    # `effects` is dropped rather than recomputed: it described the write the
+    # model proposed, and this is a different one. `render.print_plan` falls
+    # back to `current_amount` for a write without a projection, so the
+    # edited row still says what is there — it just stops claiming an
+    # "after" computed for the amount that was replaced.
+    writes[index] = dataclass_replace(edited, warnings=tuple(messages), effects=())
     render.print_success("Edit applied — nothing written yet, decide again below.")
     return dataclass_replace(plan, writes=tuple(writes))
+
+
+def _prompt_edit(data_dir: Path, key: bytes, plan: AgentPlan) -> AgentPlan:
+    """Manually corrects one proposed write's fields directly — no model
+    call at all, and the fastest fix for something the model got mostly
+    right (a mistyped product name it had spelled correctly moments
+    earlier in a tool result, a location one digit off). "Regenerate" and
+    "start over" are the tools for a model reasoning past correcting; this
+    is only for its typing."""
+    locations = ledger.load_locations_or_empty(data_dir, key)
+    index = _choose_write_to_edit(plan, locations)
+    if index is None:
+        return plan
+    write = plan.writes[index]
+    values = (
+        _edit_fields_by_menu(write, locations)
+        if prompt_ui.interactive()
+        else _edit_fields_by_walkthrough(write)
+    )
+    if values is None:
+        return plan
+    return _apply_edit(data_dir, key, plan, index, values)
 
 
 def _ask_one(
@@ -753,7 +869,7 @@ def _ask_one(
             plan = _prompt_edit(data_dir, key, plan)
             continue
         if choice in ("p", "pick"):
-            plan = _pick_writes(plan) or plan
+            plan = _pick_writes(data_dir, key, plan) or plan
             continue
         if choice in ("g", "generate", "regenerate"):
             model = _prompt_regenerate(llm, agent.model)
@@ -896,7 +1012,7 @@ def _ask_loop_request(
             plan = _prompt_edit(data_dir, key, plan)
             continue
         if choice in ("p", "pick"):
-            plan = _pick_writes(plan) or plan
+            plan = _pick_writes(data_dir, key, plan) or plan
             continue
         # `prompt` and `model` are reassigned in these two branches, not
         # shadowed — `_fail` closes over the same names, so a later failure

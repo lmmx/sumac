@@ -453,6 +453,17 @@ def _indented(markup: str) -> None:
     console.print(Padding(Text.from_markup(markup), (0, 0, 0, 4), expand=False))
 
 
+def write_summary(write: ProposedWrite, locations: dict[str, models.Location] | None = None) -> str:
+    """One line naming a write, for a menu row or a picker. The same label
+    everywhere a write has to be identified rather than reviewed, so the
+    checklist, the edit picker, and the dry-run preview do not each invent
+    their own phrasing — and none of them says "(from None to fridge-door)",
+    which is what a raw field dump reads like to the person choosing."""
+    where = _where_text(write, locations or {})
+    subject = f"{write.kind.value} {write.amount} {write.unit} {write.product_id}"
+    return f"{subject} · {where}" if where else subject
+
+
 def print_plan(
     plan: AgentPlan,
     *,

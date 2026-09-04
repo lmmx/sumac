@@ -320,6 +320,52 @@ tests for what it introduces.
 
 ---
 
+# 2026-09-04: `e` Given the Same Menu as Every Other Decision
+
+## Current State
+
+- `e` (Edit) reached `_prompt_edit`'s original numbered `typer.prompt("Edit which one? (number)")`
+  on a terminal, unchanged by the keypress-menu work — `p`'s checklist and the decision prompt were
+  the only two interactions converted, and a real run landed on the numbered one.
+- `cli._prompt_edit` now reads which write to edit through `cli._choose_write_to_edit` — one write
+  skips the question, more than one gets `prompt_ui.select` on a terminal and the numbered list plus
+  a typed index otherwise — and which fields to change through `cli._edit_fields_by_menu`
+  (interactive) or `cli._edit_fields_by_walkthrough` (everything else).
+- `_edit_fields_by_menu` shows one row per editable field carrying its current value, retypes only
+  the field chosen, and redraws until "Done" — correcting one mistyped location no longer costs an
+  Enter through each of the four fields that were already right.
+- `_edit_fields_by_walkthrough` prompts product_id, unit, amount, then whichever endpoints the write
+  has, each defaulting to its current value — the same sequence and the same prompts `e` has always
+  read, so `tests/test_cli.py`'s two piped edit tests pass unchanged.
+- `cli._editable_fields` drops the `from_location`/`to_location` row for a write that has no such
+  endpoint — `decide_change` rejects a purchase carrying a `from_location`, so a row offering to
+  fill one in could only ever produce a rejection.
+- `_edit_fields_by_menu` seeds its value dict from all five fields, not just the editable ones, so
+  an endpoint the write does not have reaches `_apply_edit` as `None` rather than missing.
+- `cli._apply_edit` validates through `decide.decide_change` and returns the plan unchanged on
+  `Rejected` or an unparseable amount, as `_prompt_edit` always did, and drops the edited write's
+  `effects` — the projection described the write the model proposed, not this one, and
+  `render.print_plan` falls back to `current_amount` for a write without one.
+- `prompt_ui.select` answering `"r"` for Escape means "cancel this edit" inside the field menu:
+  `_edit_fields_by_menu` returns `None`, `_prompt_edit` returns the plan unchanged, and the decision
+  prompt asks again (`test_ask_edit_menu_escape_cancels_the_edit_not_the_plan`, tests/test_cli.py).
+- `render.write_summary(write, locations)` is the one label for a write in a menu row, used by the
+  edit picker, `cli._pick_writes`' checklist, and the preview harness — replacing `_prompt_edit`'s
+  `(from None to fridge-door)` field dump and `_pick_writes`' own location-less phrasing.
+- `scripts/preview-ask-ui.py` gains an `edit` scene drawing both menus.
+- `pytest` reports 371 passing tests repo-wide; `ruff format --check .`, `ruff check .`, and
+  `ty check` each report no findings.
+
+## Missing
+
+- The interactive edit path is tested with `prompt_ui.select` monkeypatched
+  (`tests/test_cli.py`'s `_patch_menu`), not over a pty — `tests/test_prompt_ui_pty.py` covers
+  `select` itself, so what is untested is `_prompt_edit`'s wiring against real keypresses.
+- No edit menu row shows a location's display path; `from`/`to` show the raw id, which is what has
+  to be retyped.
+
+---
+
 # 2026-09-04: Arrow Keys Read as Escape — Fixed
 
 ## Current State
