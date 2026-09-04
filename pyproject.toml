@@ -1,6 +1,6 @@
 [project]
 name = "sumac-home"
-version = "0.1.4"
+version = "0.1.5"
 description = "Home grocery inventory app"
 readme = "README.md"
 requires-python = ">=3.12"
