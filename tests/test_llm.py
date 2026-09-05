@@ -47,7 +47,8 @@ def _final_round(content: str) -> ScriptedResponse:
 
 
 def _classify_round(kind: str) -> ScriptedResponse:
-    return _tool_round("classify_request", {"kind": kind})
+    # `_classify` reads grammar-constrained plain content, not a tool call.
+    return _final_round(kind)
 
 
 class FakeRunner:
@@ -386,8 +387,6 @@ def test_propose_resolves_a_consume_call_into_a_pending_write(
             {"product_id": "jam", "amount": "1", "unit": "jar", "from_location": "pantry"},
         ),
         _final_round("consumed 1 jar of jam"),
-        # self-review round: model is satisfied, no further tool calls.
-        _final_round("looks correct"),
     ]
     agent, fake = _make_agent(responses, data_dir, key)
 
@@ -402,7 +401,11 @@ def test_propose_resolves_a_consume_call_into_a_pending_write(
     assert w.from_location == "pantry"
     # Nothing committed yet — still a dry run.
     assert ledger.build_inventory(data_dir, key).at("pantry")["jam"].amount == Decimal(3)
-    assert len(fake.requests) == 5
+    # classify + find + consume + final reply — no self-review round: the
+    # single write's product_id/unit/from_location all came straight out of
+    # the preceding sumac_find_inventory result, so it's search-grounded and
+    # `_maybe_self_review` skips it (see `_write_is_grounded`).
+    assert len(fake.requests) == 4
 
     # The trace records the classification and both domain calls, in order,
     # with their raw results — not just the final "consumed 1 jar of jam"
@@ -828,26 +831,6 @@ def test_add_prompt_directs_searching_for_context_before_guessing_a_location() -
     assert "never guess a location" in text
 
 
-def test_add_amount_delta_variant_states_amount_is_a_delta_not_a_total() -> None:
-    """A real qwen3.5-4b trace (docs/journal/2026-09-04-basmati-rice-unit-
-    mismatch.md's sibling failure, add.discriminator_variant_not_confused)
-    worked out the correct resulting total in its own reply text but passed
-    that total as sumac_discover_inventory's amount instead of the delta —
-    decide.py/the fold already add the delta to what's on record, so the
-    total double-counts it. Guards the `add-amount-delta` PromptVariant
-    candidate's wording, and that `default` is untouched — this is an
-    opt-in variant, not yet promoted."""
-    variant = llm.prompt_variant("add-amount-delta")
-    text = " ".join(variant.prompt_by_kind[llm.QueryKind.ADD].split())
-    assert "not the total" in text
-    assert "grand total" in text
-    assert text != " ".join(llm._ADD_PROMPT.split())
-
-    default_text = " ".join(llm.DEFAULT_PROMPT_VARIANT.prompt_by_kind[llm.QueryKind.ADD].split())
-    assert default_text == " ".join(llm._ADD_PROMPT.split())
-    assert "total" not in default_text
-
-
 def test_rejected_hint_travels_with_the_rejection_not_the_prompt() -> None:
     """The original single-prompt design told the model how to react to a
     "rejected" tool result unconditionally, on every request — a real
@@ -1049,10 +1032,8 @@ def test_build_request_passes_default_sampling_config(
     data_dir: Path, key: bytes, osuser: str
 ) -> None:
     """`_build_request` returns a plain dict, not a real (opaque, PyO3)
-    `mistralrs.ChatCompletionRequest` — see
-    docs/journal/2026-09-04-modal-remote-inference-backend.md. Every
-    `SendsCompletions` backend, not just mistral.rs, can be tested against
-    this dict directly."""
+    `mistralrs.ChatCompletionRequest`. Every `SendsCompletions` backend, not
+    just mistral.rs, can be tested against this dict directly."""
     agent, _fake = _make_agent([], data_dir, key)
     request = agent._build_request([{"role": "user", "content": "hi"}], [])
 
@@ -1078,9 +1059,8 @@ def test_build_request_carries_seed_for_a_per_request_backend(
 ) -> None:
     """`_LocalMistralRsBackend` ignores this key (the real engine is seeded
     once at `Runner` construction) — it's carried for a per-request
-    backend (Modal) that has no other way to reproduce a run. Previously
-    missing entirely; see
-    docs/journal/2026-09-04-modal-remote-inference-backend.md."""
+    backend that has no other way to reproduce a run. No such backend
+    exists today."""
     fake = FakeRunner([])
     agent = llm.AgentRunner(data_dir, key, runner=fake, seed=12345)
     request = agent._build_request([{"role": "user", "content": "hi"}], [])

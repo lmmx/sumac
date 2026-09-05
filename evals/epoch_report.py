@@ -33,13 +33,12 @@ def _load_epochs(directory: Path) -> list[dict]:
 
 
 def _group_label(epoch: dict) -> str:
-    """Groups by model + prompt_variant, same as before, plus `backend`
-    (added for the Modal backend — a file with no `"backend"` field was
-    written before that existed and is treated as `"local"`). A Modal and
-    a local epoch for the same model/variant are never the same benchmark
-    — see docs/journal/2026-09-04-modal-remote-inference-backend.md's
-    "quantization parity" and "usage accounting" sections on why comparing
-    them directly is misleading — so they must never silently share a row."""
+    """Groups by model + prompt_variant, same as before, plus `backend` (a
+    file with no `"backend"` field was written before that field existed
+    and is treated as `"local"`). Every current epoch is `"local"`; the
+    check against a non-`"local"` label is kept so an old committed epoch
+    with a different value still labels itself distinctly rather than
+    silently sharing a row."""
     variant = epoch.get("prompt_variant", "default")
     label = epoch["model"] if variant == "default" else f"{epoch['model']} [{variant}]"
     backend = epoch.get("backend", "local")

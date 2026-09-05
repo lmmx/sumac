@@ -180,37 +180,25 @@ class QueryKind(StrEnum):
     REJECT = "reject"
 
 
-_CLASSIFY_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "classify_request",
-        "description": "Classify the person's request. Call this exactly once, with no other text.",
-        "strict": True,
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "kind": {
-                    "type": "string",
-                    "enum": ["find", "add", "remove", "reject"],
-                    "description": (
-                        "find: locate or ask about something already in inventory, "
-                        "nothing changes. add: record new or additional stock of a "
-                        "product. remove: record that stock was used, thrown away, "
-                        "or moved elsewhere. reject: anything else, or too vague to "
-                        "act on."
-                    ),
-                }
-            },
-            "required": ["kind"],
-            "additionalProperties": False,
-        },
-    },
-}
-_CLASSIFY_SCHEMA_JSON = json.dumps(_CLASSIFY_SCHEMA)
+# Grammar-constrained rather than a `classify_request` tool call: llguidance
+# forces the whole completion to match this regex, so the response is one of
+# these four words verbatim and nothing else can be sampled — no envelope to
+# parse, no malformed-call fallback to reach. See
+# docs/journal/2026-09-05-mistralrs-latency-budget.md finding #2; previously
+# a `<tool_call>{"name": "classify_request", ...}</tool_call>` wrapper cost
+# 27 completion tokens to carry a four-way choice.
+_CLASSIFY_GRAMMAR = "find|add|remove|reject"
+_CLASSIFY_MAX_TOKENS = 8
 
 CLASSIFIER_PROMPT = """\
-You classify one household inventory request. Call classify_request exactly
-once with the single best-fitting kind. Do not answer the request itself.
+You classify one household inventory request. Reply with exactly one word,
+the single best-fitting kind, and nothing else — do not answer the request
+itself.
+
+find: locate or ask about something already in inventory, nothing changes.
+add: record new or additional stock of a product.
+remove: record that stock was used, thrown away, or moved elsewhere.
+reject: anything else, or too vague to act on.
 """
 
 _REJECT_REPLY = "This doesn't look like a request to find, add, or remove something from inventory."
@@ -568,8 +556,7 @@ class ToolCallRecord:
     # parser mismatch on the serving side is actually diagnosed from: if a
     # misconfigured parser makes `tool_calls` come back empty because the
     # model's real call landed as unparsed text, this is the only place
-    # that evidence survives. See
-    # docs/journal/2026-09-04-modal-remote-inference-backend.md.
+    # that evidence survives.
     raw_response: str | None = None
 
 
@@ -582,9 +569,7 @@ class AgentPlan:
 
 class ChatResponseUsage(Protocol):
     """The subset of `mistralrs.Usage` (or an equivalent populated by a
-    remote backend) anything in this module ever reads — see the "exact
-    minimal response shape" audit in
-    docs/journal/2026-09-04-modal-remote-inference-backend.md. Declared as
+    remote backend) anything in this module ever reads. Declared as
     read-only `@property` members, not plain attributes: nothing here ever
     writes one back, and a read-only member is covariant, which is what
     lets a real `mistralrs.Usage` (and any other concrete field type)
@@ -642,10 +627,8 @@ class SendsCompletions(Protocol):
     `_LocalMistralRsBackend` below, since `mistralrs.ChatCompletionRequest`
     is an opaque PyO3 object no other backend can construct or read back.
     `request` is therefore the plain dict `_build_request` produces, not
-    that type — see
-    docs/journal/2026-09-04-modal-remote-inference-backend.md for why.
-    Tests pass a hand-built fake instead, with no real model or GGUF
-    download involved."""
+    that type. Tests pass a hand-built fake instead, with no real model or
+    GGUF download involved."""
 
     def send_chat_completion_request(
         self, request: dict, model_id: str | None = None
@@ -770,12 +753,10 @@ def _print_usage(response: ChatResponse, round_num: int) -> None:
 
 class _LocalMistralRsBackend:
     """Wraps a real `mistralrs.Runner` to satisfy `SendsCompletions`'s
-    plain-dict request contract. The one place, for the local backend, that
-    turns `_build_request`'s dict back into a real
-    `mistralrs.ChatCompletionRequest` — immediately before calling the
-    engine. A Modal-backed `SendsCompletions` instead serializes the same
-    dict to an OpenAI-style JSON body; both backends see identical kwargs.
-    See docs/journal/2026-09-04-modal-remote-inference-backend.md."""
+    plain-dict request contract. The one place that turns `_build_request`'s
+    dict back into a real `mistralrs.ChatCompletionRequest` — immediately
+    before calling the engine. Any other `SendsCompletions` implementation
+    consumes the same plain-dict shape."""
 
     def __init__(self, runner: mistralrs.Runner) -> None:
         self._runner = runner
@@ -795,6 +776,8 @@ class _LocalMistralRsBackend:
             temperature=request["temperature"],
             top_p=request["top_p"],
             max_tokens=request["max_tokens"],
+            grammar=request["grammar"],
+            grammar_type=request["grammar_type"],
         )
         # `Runner.send_chat_completion_request` also returns a chunk
         # iterator when `stream=True`; `real_request` never sets it, so
@@ -976,11 +959,9 @@ class AgentRunner:
         # Session-level for the local backend (`_build_runner(seed=...)`
         # seeds the whole `mistralrs.Runner`, not a per-request field — see
         # `_LocalMistralRsBackend`, which ignores this dict key entirely).
-        # Carried into every request dict anyway so a per-request backend
-        # (Modal) has something to seed with — previously not threaded
-        # through at all, meaning every Modal request ran with vLLM's own
-        # unseeded default and no run was reproducible. See
-        # docs/journal/2026-09-04-modal-remote-inference-backend.md.
+        # Carried into every request dict anyway for a per-request backend to
+        # seed itself with — no such backend exists today, but the field
+        # costs nothing to keep for the next one.
         self._seed = seed
         self._messages: list[dict[str, str]] | None = None
         self._kind: QueryKind | None = None
@@ -992,6 +973,12 @@ class AgentRunner:
         # so an identical repeat is returned labelled rather than appearing
         # to be a fresh result.
         self._searched: dict[str, dict] = {}
+        # `build_inventory` decrypts the whole sealed log; nothing can write
+        # between `propose()`/`revise()` and `commit()` by construction, so
+        # one read serves every tool callback in the call. `commit()` does
+        # not use this — it deliberately re-reads per write, since a prior
+        # write in the same commit changes what the next one sees.
+        self._inventory_cache: ledger.Inventory | None = None
         self._trace_history: list[ToolCallRecord] = []
         self._classify_messages: list[dict[str, str]] | None = None
         self._usage_history: list[dict[str, float | int]] = []
@@ -1105,6 +1092,11 @@ class AgentRunner:
         self._trace.append(record)
         self._trace_history.append(record)
 
+    def _build_inventory(self) -> ledger.Inventory:
+        if self._inventory_cache is None:
+            self._inventory_cache = ledger.build_inventory(self._data_dir, self._key)
+        return self._inventory_cache
+
     # -- tool callbacks -------------------------------------------------------
 
     def _sumac_find_inventory(self, _name: str, args: dict) -> str:
@@ -1135,7 +1127,7 @@ class AgentRunner:
                     ),
                 }
             )
-        inventory = ledger.build_inventory(self._data_dir, self._key)
+        inventory = self._build_inventory()
         locations = ledger.load_locations_or_empty(self._data_dir, self._key)
         products: dict[str, dict] = {}
         for m in ledger.search_inventory(inventory, query):
@@ -1202,7 +1194,7 @@ class AgentRunner:
             return _rejected("invalid_amount", {"value": args["amount"]})
 
         cfg = config.build_config(self._data_dir, self._key)
-        inventory = ledger.build_inventory(self._data_dir, self._key)
+        inventory = self._build_inventory()
         try:
             decided, messages = decide.decide_change(
                 kind=kind,
@@ -1307,16 +1299,29 @@ class AgentRunner:
 
     # -- request plumbing (client-side loop — see module docstring) ---------
 
-    def _build_request(self, messages: list[dict[str, str]], schemas: list[str]) -> dict:
+    def _build_request(
+        self,
+        messages: list[dict[str, str]],
+        schemas: list[str],
+        *,
+        grammar: str | None = None,
+        grammar_type: str | None = None,
+        max_tokens: int | None = None,
+    ) -> dict:
         """A plain dict of every kwarg this module's one request shape ever
         sends — not a real `mistralrs.ChatCompletionRequest`, which is an
         opaque PyO3 object no non-mistralrs backend can construct, and which
-        can't be read back once built even by mistral.rs's own code (see
-        docs/journal/2026-09-04-modal-remote-inference-backend.md). Every
+        can't be read back once built even by mistral.rs's own code. Every
         `SendsCompletions` implementation gets this identical dict;
         `_LocalMistralRsBackend` is the one place that turns it back into a
         real `mistralrs.ChatCompletionRequest`, immediately before calling
-        the engine."""
+        the engine.
+
+        `grammar`/`grammar_type` are `_classify`'s only caller today (see
+        `_CLASSIFY_GRAMMAR`) — `_LocalMistralRsBackend` forwards them to
+        llguidance. Any future non-mistralrs `SendsCompletions` that ignores
+        these two keys runs the classify request unconstrained rather than
+        failing — worth checking for on the way in, if one gets added."""
         return {
             "messages": messages,
             "model": self._model.quantized_model_id,
@@ -1329,11 +1334,15 @@ class AgentRunner:
             "enable_thinking": False,
             "temperature": self._temperature,
             "top_p": self._top_p,
-            "max_tokens": self._max_tokens,
+            "max_tokens": max_tokens if max_tokens is not None else self._max_tokens,
+            "grammar": grammar,
+            "grammar_type": grammar_type,
             # `_LocalMistralRsBackend` ignores this — the local engine is
             # already seeded once at `Runner` construction, not per
-            # request. A per-request backend (Modal) uses it for whatever
-            # reproducibility a stateless HTTP request can offer.
+            # request. Carried for a per-request backend to use for
+            # whatever reproducibility a stateless HTTP request can offer;
+            # no such backend exists today (see `self._seed`'s own comment
+            # in `__init__`).
             "seed": self._seed,
         }
 
@@ -1369,48 +1378,40 @@ class AgentRunner:
         """One single-purpose call, made before the model sees any domain
         tool: which of find/add/remove this request is, or reject. See the
         design journal for why this is a separate step rather than folded
-        into one prompt covering every tool."""
+        into one prompt covering every tool.
+
+        Grammar-constrained to `_CLASSIFY_GRAMMAR` rather than a tool call —
+        the response is one of the four bare words, read straight off
+        `message.content`. A response that somehow doesn't match one of
+        them (an ungrammared backend; see `_build_request`'s docstring)
+        falls back to REJECT the same way an unparseable tool call used
+        to."""
         messages = [
             {"role": "system", "content": self._prompt_variant.classifier_prompt},
             {"role": "user", "content": prompt},
         ]
-        request = self._build_request(messages, [_CLASSIFY_SCHEMA_JSON])
+        request = self._build_request(
+            messages,
+            [],
+            grammar=_CLASSIFY_GRAMMAR,
+            grammar_type="regex",
+            max_tokens=_CLASSIFY_MAX_TOKENS,
+        )
         response = self._runner.send_chat_completion_request(request)
         self._record_usage(response, 0)
-        message = response.choices[0].message
-        if not message.tool_calls:
-            messages.append({"role": "assistant", "content": message.content or ""})
-            self._classify_messages = messages
-            self._record_call(
-                ToolCallRecord(
-                    name="classify_request",
-                    arguments={},
-                    result=message.content or "",
-                    raw_response=getattr(response, "raw_body", None),
-                )
-            )
-            return QueryKind.REJECT
-        call = message.tool_calls[0].function
-        args = json.loads(call.arguments)
-        messages.append(
-            {
-                "role": "assistant",
-                "content": _render_tool_call(
-                    call.name, args, call.arguments, self._model.tool_call_format
-                ),
-            }
-        )
+        content = (response.choices[0].message.content or "").strip()
+        messages.append({"role": "assistant", "content": content})
         self._classify_messages = messages
         self._record_call(
             ToolCallRecord(
                 name="classify_request",
-                arguments=args,
-                result=json.dumps(args),
+                arguments={"kind": content},
+                result=content,
                 raw_response=getattr(response, "raw_body", None),
             )
         )
         try:
-            return QueryKind(args.get("kind"))
+            return QueryKind(content)
         except ValueError:
             return QueryKind.REJECT
 
@@ -1505,14 +1506,43 @@ class AgentRunner:
         self._nudge_fired = True
         return self._run_loop()
 
+    def _write_is_grounded(self, w: ProposedWrite) -> bool:
+        """Whether `w`'s product_id/unit/from_location were all read out of
+        a prior `sumac_find_inventory` result rather than invented — the
+        distinction findings #1 and #7 of
+        docs/journal/2026-09-05-mistralrs-latency-budget.md turn on:
+        self-review changed the plan in 1 of 280 reviewed scenarios, and a
+        write built entirely from search results is not where that miss is
+        going to live."""
+        for result in self._searched.values():
+            for product in result["products"]:
+                if product["product_id"] != w.product_id:
+                    continue
+                locs = product["locations"]
+                if not any(loc["unit"] == w.unit for loc in locs):
+                    continue
+                if w.from_location is None or any(
+                    loc["location_id"] == w.from_location for loc in locs
+                ):
+                    return True
+        return False
+
     def _maybe_self_review(self, plan: AgentPlan) -> AgentPlan:
         """The model checks its own plan against the original request. A
         round that makes no new tool calls means the model is satisfied
         with `plan` as it stands — stop and keep it. A round that does make
         new tool calls replaces `plan` and, if rounds remain, is itself
-        reviewed again."""
+        reviewed again.
+
+        Skipped when every write is a single, search-grounded write (see
+        `_write_is_grounded`) — the case #1 in
+        docs/journal/2026-09-05-mistralrs-latency-budget.md measured as
+        0.4 % effective. Multiple writes, or any write not traceable to a
+        search result, still get reviewed."""
         assert self._messages is not None
         if not plan.writes:
+            return plan
+        if len(plan.writes) == 1 and self._write_is_grounded(plan.writes[0]):
             return plan
         for _ in range(SELF_REVIEW_ROUNDS):
             self._messages.append({"role": "user", "content": _SELF_REVIEW_MESSAGE})
@@ -1527,6 +1557,7 @@ class AgentRunner:
     def propose(self, prompt: str) -> AgentPlan:
         self._trace = []
         self._searched = {}
+        self._inventory_cache = None
         kind = self._classify(prompt)
         self._kind = kind
         if kind is QueryKind.REJECT:
@@ -1549,6 +1580,7 @@ class AgentRunner:
         self._messages.append({"role": "user", "content": feedback})
         self._trace = []
         self._searched = {}
+        self._inventory_cache = None
         plan = self._maybe_self_review(self._maybe_force_action(self._run_loop()))
         return replace(plan, trace=tuple(self._trace))
 

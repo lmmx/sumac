@@ -112,35 +112,6 @@ alongside `"model"` — `epoch_report.py` groups by the pair, labeling a non-def
 for every model × every variant — with one variant registered, neither would earn its keep yet;
 add them if/when there are enough variants to need listing or a full grid compared at once.
 
-## Running against Modal instead of local `mistralrs`
-
-Local `mistralrs` epochs are slow to iterate against — 20 epochs against the fastest registered
-model is still on the order of 15 minutes for one prompt-wording guess. `--eval-backend modal`
-(default: `local`) runs the same scenarios against a deployed Modal/vLLM endpoint over HTTP
-instead — see `docs/MODAL.md` for deploying one, and
-`docs/journal/2026-09-04-modal-remote-inference-backend.md` for the full design rationale and the
-fidelity risks it deliberately doesn't paper over (quantization mismatch chief among them).
-
-```sh
-export SUMAC_MODAL_ENDPOINT=https://<your-workspace>--sumac-qwen3-5-4b-server.<region>.modal.direct
-uv run pytest evals --eval-backend modal --eval-model qwen3.5-4b
-```
-
-(`--eval-modal-endpoint` works in place of the environment variable if you'd rather pass it per
-invocation.) `--eval-model` still means "which `ModelPreset`" exactly as it does locally —
-`conftest.py`'s `_MODAL_SERVED_MODEL_NAMES` resolves it to whichever `--served-model-name` that
-model's Modal deployment was launched with. Before any scenario runs, a deploy-time gate
-(`sumac.modal_backend.verify_tool_calling`) sends one fixed request through the endpoint and
-confirms tool calls actually round-trip correctly — a misconfigured serving stack fails the whole
-session loudly (`pytest.UsageError`) rather than reading as every scenario failing for a model
-reason.
-
-**Modal is a fast, non-authoritative filter, never a replacement for the local benchmark above.** A
-prompt that scores well on Modal — especially against a quantized deployment, or in few epochs —
-still needs a local `mistralrs` confirming run before being treated as a verified improvement.
-`--eval-json`'s output records which backend produced each epoch, and `epoch_report.py` never folds
-a Modal epoch into the same row as a local one for exactly this reason.
-
 ## What's here
 
 ```

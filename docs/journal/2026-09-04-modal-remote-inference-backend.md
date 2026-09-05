@@ -1,5 +1,13 @@
 # sumac: Modal Remote Inference Backend — Spec, Not Implemented
 
+**Removed 2026-09-05:** the Modal backend this entry specifies was later implemented
+(`src/sumac/modal_backend.py`, `modal_deploy/`, `docs/MODAL.md`, the `--eval-backend modal` eval
+option — not chronicled in a journal entry of its own) and has now been deleted. It measured
+consistently slower than local `mistralrs`, and the fidelity risks this entry flags below
+("quantization parity," "usage accounting") never got resolved into something worth maintaining
+two inference paths for. Kept here as the record of the design and the tradeoffs considered at the
+time; nothing below reflects current code.
+
 **Status:** specification only, per explicit request — no code in this entry, meant to be handed
 to a future implementing session as a planning doc. Follows directly from this session's
 `add-amount-delta` `PromptVariant` work (`docs/journal/2026-09-04-basmati-rice-unit-mismatch.md`'s

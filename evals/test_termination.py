@@ -50,16 +50,16 @@ class _RepeatedRejectionRunner:
     def send_chat_completion_request(self, request, model_id=None):  # noqa: ANN001, ANN201
         self.rounds += 1
         if self.rounds == 1:
-            function = SimpleNamespace(
-                name="classify_request", arguments=json.dumps({"kind": "add"})
-            )
+            # `_classify` reads plain grammar-constrained content, not a
+            # tool call — see `llm._classify`.
+            message = SimpleNamespace(content="add", role="assistant", tool_calls=None)
         else:
             function = SimpleNamespace(
                 name="sumac_discover_inventory", arguments=json.dumps(self._BAD_CALL)
             )
-        message = SimpleNamespace(
-            content=None, role="assistant", tool_calls=[SimpleNamespace(function=function)]
-        )
+            message = SimpleNamespace(
+                content=None, role="assistant", tool_calls=[SimpleNamespace(function=function)]
+            )
         choice = SimpleNamespace(finish_reason="stop", index=0, message=message)
         return SimpleNamespace(choices=[choice])
 
