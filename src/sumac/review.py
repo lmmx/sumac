@@ -66,7 +66,11 @@ def review_write(write: ProposedWrite, cfg: config.Config, searched: str) -> tup
     product = cfg.known_products.get(write.product_id)
 
     if product is None:
-        if write.product_id.lower() not in searched:
+        # A product id the person typed into the edit menu is not the model
+        # producing a name from nowhere, which is the only thing `ungrounded`
+        # is about — everything else about a new product still applies, and
+        # `new-product` below still fires.
+        if write.product_id.lower() not in searched and "product_id" not in write.edited_fields:
             findings.append(
                 Finding(
                     "ungrounded",

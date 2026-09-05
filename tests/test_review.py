@@ -129,3 +129,33 @@ def test_a_single_flagged_change_still_says_what_is_flagged() -> None:
     findings = review.review_plan(_plan(_write("jam", to="shed")), CFG)
 
     assert review.headline(findings) == "1 change · 1 names a new location"
+
+
+def test_a_hand_typed_product_is_not_ungrounded_but_is_still_new() -> None:
+    write = llm.ProposedWrite(
+        kind=ChangeKind.DISCOVERY,
+        product_id="Billy Bear Ham",
+        amount=Decimal(1),
+        unit="packet",
+        from_location=None,
+        to_location="pantry",
+        edited_fields=frozenset({"product_id"}),
+    )
+
+    assert [f.code for f in review.review_write(write, CFG, "")] == ["new-product"]
+
+
+def test_editing_another_field_leaves_the_grounding_check_alone() -> None:
+    """Correcting an amount says nothing about where the product name came
+    from, so the model's invention is still reported."""
+    write = llm.ProposedWrite(
+        kind=ChangeKind.DISCOVERY,
+        product_id="Basmati Rice Bag",
+        amount=Decimal(1),
+        unit="bag",
+        from_location=None,
+        to_location="pantry",
+        edited_fields=frozenset({"amount"}),
+    )
+
+    assert "ungrounded" in [f.code for f in review.review_write(write, CFG, "")]

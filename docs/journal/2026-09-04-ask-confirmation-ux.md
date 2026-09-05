@@ -320,6 +320,47 @@ tests for what it introduces.
 
 ---
 
+# 2026-09-05: An Edited Plan Still Wearing the Model's Words
+
+## Current State
+
+- A real run edited a plan's product and location and got back a preview carrying the model's
+  original narration — "A packet of Ham has been added to the top shelf of the fridge." — under a
+  write that by then said `Billy Bear Ham` at `Fridge > Door Shelves`.
+- `cli._apply_edit` replaced `AgentPlan.writes` and left `reply_text` and `trace` as they were:
+  both describe what the model proposed, and after a hand edit neither describes the plan on
+  screen. Both now become `""`/`()` — they are already in the transcript above, where they are true
+  of the moment they were printed. `_pick_writes` does the same, for the same reason: the reply
+  narrates every change proposed, not the subset kept.
+- The same run showed the edited write with a location and no before/after: `_apply_edit` dropped
+  `effects` rather than recomputing them, and `render._effect_text`'s `current_amount` fallback was
+  itself empty for that write. `_apply_edit` now recomputes them from the records its own
+  `decide_change` call returned, through `llm.effects` (renamed from `_effects` for this caller).
+- `_apply_edit` also resolves the edited endpoints through `decide.resolve_location`, so a
+  hand-entered display path records as an id — the same reason `_propose_write` does.
+- `ProposedWrite.edited_fields: frozenset[str]` names the fields a person set by hand; `_apply_edit`
+  computes it by comparing the edited write against the original and unions it with what earlier
+  edits had already set.
+- `review.review_write` skips `ungrounded` when `"product_id"` is in `edited_fields`: the check asks
+  whether the *model* produced a name from nowhere, and a name typed into the edit menu by the
+  person reviewing the plan is not that. `new-product` still fires, as do the unit and location
+  checks, and editing any other field leaves the grounding check alone
+  (`test_editing_another_field_leaves_the_grounding_check_alone`, tests/test_review.py).
+- `pytest` reports 416 passing tests repo-wide; `ruff format --check .`, `ruff check .`, and
+  `ty check` each report no findings.
+
+## Missing
+
+- Nothing replaces the cleared `reply_text` — an edited plan has no sentence describing it, only its
+  rows. A generated summary of the edited write would be a different thing from the model's reply
+  and is not built.
+- `edited_fields` is not shown anywhere: the preview does not mark which values a person set, so an
+  edited write and a proposed one look alike apart from the badges that no longer fire.
+- `_pick_writes` clears `reply_text` for the whole plan even when the kept subset is the one the
+  reply described.
+
+---
+
 # 2026-09-04: Picking a Unit or a Product, or Typing a New One
 
 ## Current State

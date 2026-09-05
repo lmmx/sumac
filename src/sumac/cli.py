@@ -599,7 +599,14 @@ def _pick_writes(data_dir: Path, key: bytes, plan: AgentPlan) -> AgentPlan | Non
     if not picked:
         render.console.print("[dim](nothing picked — the plan is unchanged)[/dim]")
         return None
-    return dataclass_replace(plan, writes=tuple(plan.writes[i] for i in picked))
+    return dataclass_replace(
+        plan,
+        writes=tuple(plan.writes[i] for i in picked),
+        # As in `_apply_edit`: the model's reply describes every change it
+        # proposed, which is no longer what this plan holds.
+        reply_text="",
+        trace=(),
+    )
 
 
 def _build_agent(llm, data_dir: Path, key: bytes, *, model: ModelPreset, view: _AskView):  # noqa: ANN202
@@ -915,6 +922,8 @@ def _apply_edit(
     """Re-validates the edited write through the same `decide_change` gate
     every model-proposed write already passes, so a typo in the correction
     itself cannot reach `commit` unchecked."""
+    from sumac import llm  # local: only reachable from `ask`, which already imported it
+
     write = plan.writes[index]
     try:
         amount = Decimal(values["amount"] or "")
@@ -930,8 +939,10 @@ def _apply_edit(
         from_location=values["from_location"],
         to_location=values["to_location"],
     )
+    inventory = ledger.build_inventory(data_dir, key)
+    cfg = config.build_config(data_dir, key)
     try:
-        _writes, messages = decide.decide_change(
+        decided, messages = decide.decide_change(
             kind=edited.kind,
             product_id=edited.product_id,
             amount=edited.amount,
@@ -940,22 +951,53 @@ def _apply_edit(
             to_location=edited.to_location,
             actor=paths.current_user(),
             occurred_at=datetime.now(UTC),
-            inventory=ledger.build_inventory(data_dir, key),
-            cfg=config.build_config(data_dir, key),
+            inventory=inventory,
+            cfg=cfg,
         )
     except Rejected as e:
         render.print_error(f"Edit rejected: {e}")
         return plan
 
+    # The endpoints `decide` just resolved, for the same reason
+    # `_propose_write` records those and not what it was handed: a display
+    # path resolves, and every lookup downstream is by id.
+    edited = dataclass_replace(
+        edited,
+        from_location=decide.resolve_location(edited.from_location, "from", cfg),
+        to_location=decide.resolve_location(edited.to_location, "to", cfg),
+    )
     writes = list(plan.writes)
-    # `effects` is dropped rather than recomputed: it described the write the
-    # model proposed, and this is a different one. `render.print_plan` falls
-    # back to `current_amount` for a write without a projection, so the
-    # edited row still says what is there — it just stops claiming an
-    # "after" computed for the amount that was replaced.
-    writes[index] = dataclass_replace(edited, warnings=tuple(messages), effects=())
+    writes[index] = dataclass_replace(
+        edited,
+        warnings=tuple(messages),
+        # Recomputed, not carried over and not dropped: the projection
+        # belonged to the write the model proposed, and this is a different
+        # one — but it is just as computable, from the records `decide` just
+        # returned for it.
+        effects=llm.effects(
+            inventory,
+            cfg,
+            decided,
+            edited.product_id,
+            edited.unit,
+            edited.from_location,
+            edited.to_location,
+        ),
+        edited_fields=frozenset(
+            field
+            for field in ("product_id", "unit", "amount", "from_location", "to_location")
+            if getattr(edited, field) != getattr(write, field)
+        )
+        | write.edited_fields,
+    )
     render.print_success("Edit applied — nothing written yet, decide again below.")
-    return dataclass_replace(plan, writes=tuple(writes))
+    # The reply and the trace describe what the model proposed, and this plan
+    # is no longer that: the reply narrates the write that was just replaced
+    # ("A packet of Ham has been added...", after the ham became something
+    # else somewhere else), and reprinting the trace on the next pass reads
+    # as though the agent had run again. Both are already in the transcript
+    # above, where they are true of the moment they were printed.
+    return dataclass_replace(plan, writes=tuple(writes), reply_text="", trace=())
 
 
 def _prompt_edit(data_dir: Path, key: bytes, plan: AgentPlan) -> AgentPlan:

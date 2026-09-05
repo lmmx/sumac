@@ -584,6 +584,12 @@ class ProposedWrite:
     # a hand-built `ProposedWrite` renders exactly as it did before this
     # field existed.
     effects: tuple[LocationEffect, ...] = ()
+    # Which fields a person set by hand, via `sumac ask`'s edit menu. Empty
+    # for anything the model proposed. `review.review_write` reads it: its
+    # `ungrounded` check asks whether the *model* produced a name from
+    # nowhere, and a name typed deliberately by the person reviewing the plan
+    # is not that.
+    edited_fields: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -914,7 +920,7 @@ def release_shared_runner() -> None:
     _SHARED_RUNNER = None
 
 
-def _effects(
+def effects(
     inventory: ledger.Inventory,
     cfg: config.Config,
     decided: list[decide.Write],
@@ -934,7 +940,12 @@ def _effects(
     Endpoint order, source first, so a movement reads the way it happened.
     An unknown location is skipped rather than reported: `decide_change`
     already rejected before returning if an endpoint was invalid, so
-    anything reaching here is a location the projection could resolve."""
+    anything reaching here is a location the projection could resolve.
+
+    Public because a hand-edited write needs the same projection recomputed
+    for it: `cli._apply_edit` re-decides the edited write and calls this with
+    what came back, rather than leaving the preview with the projection of
+    the write the model proposed or with none at all."""
     # Log records only. `decide_change` returns config writes alongside them
     # when it auto-registers a product or location (decide.py's
     # `_resolve_product`), and those carry no inventory delta — a config
@@ -1300,7 +1311,7 @@ class AgentRunner:
             to_location=to_location,
             warnings=tuple(messages),
             current_amount=current_quantity.amount if current_quantity else None,
-            effects=_effects(inventory, cfg, decided, product_id, unit, from_location, to_location),
+            effects=effects(inventory, cfg, decided, product_id, unit, from_location, to_location),
         )
         if candidate in self._pending:
             # A real LFM2.5 run repeated an already-successful discover call

@@ -1507,3 +1507,86 @@ def test_ask_edit_picks_a_unit_and_allows_a_new_one(
     assert result.exit_code == 0, result.output
     assert offered == [["jar"]]  # the only unit this vault has ever used
     assert "Recorded consumption of 1 jar jam" in result.output
+
+
+def _edit_scenario(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "config", "add-location", "Fridge", "--id", "fridge")
+    _run(data_dir, "add", "purchase", "jam", "3", "jar", "--to", "pantry")
+    plan = llm.AgentPlan(
+        reply_text="A jar of jam has been consumed from the pantry.",
+        writes=(
+            llm.ProposedWrite(
+                kind=ChangeKind.CONSUMPTION,
+                product_id="jam",
+                amount=Decimal(1),
+                unit="jar",
+                from_location="pantry",
+                to_location=None,
+                effects=(llm.LocationEffect("pantry", "jam", "jar", Decimal(3), Decimal(2)),),
+            ),
+        ),
+        trace=(llm.ToolCallRecord("sumac_find_inventory", {"query": "jam"}, '{"products": []}'),),
+    )
+    _patch_agent_runner(monkeypatch, [plan])
+
+
+def test_an_edit_drops_the_reply_that_described_the_old_plan(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The model narrated the write it proposed; after that write is
+    replaced the sentence is no longer true of anything on screen."""
+    _edit_scenario(data_dir, monkeypatch)
+    _patch_menu(monkeypatch, selections=["e", "n", "d", "r"], entries=["2"])
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam")
+
+    assert result.exit_code == 0, result.output
+    before, after = result.output.split("Edit applied")
+    assert "A jar of jam has been consumed" in before
+    assert "A jar of jam has been consumed" not in after
+
+
+def test_an_edit_does_not_reprint_the_trace(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reprinting it on the next pass reads as though the agent ran again."""
+    _edit_scenario(data_dir, monkeypatch)
+    _patch_menu(monkeypatch, selections=["e", "n", "d", "r"], entries=["2"])
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam")
+
+    _before, after = result.output.split("Edit applied")
+    assert "sumac_find_inventory" not in after
+
+
+def test_an_edit_recomputes_the_before_and_after(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The projection belonged to the write the model proposed; the edited
+    one is a different write and just as computable."""
+    _edit_scenario(data_dir, monkeypatch)
+    _patch_menu(monkeypatch, selections=["e", "n", "d", "r"], entries=["2"])
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam")
+
+    _before, after = result.output.split("Edit applied")
+    assert "3 jar → 1 jar" in after
+
+
+def test_a_product_typed_by_hand_is_not_reported_as_ungrounded(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`ungrounded` asks whether the model produced a name from nowhere. A
+    name typed into the edit menu by the person reviewing the plan is not
+    that — though it is still a new product, and still says so."""
+    _edit_scenario(data_dir, monkeypatch)
+    _patch_menu(monkeypatch, selections=["e", "p", "d", "r"])
+    monkeypatch.setattr(prompt_ui, "pick", lambda *a, **k: "Billy Bear Ham")
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam")
+
+    _before, after = result.output.split("Edit applied")
+    assert "unverified" not in after
+    assert "new product" in after
