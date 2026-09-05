@@ -97,10 +97,18 @@ def _check_endpoint_shape(kind: ChangeKind, frm: str | None, to: str | None) -> 
         raise Rejected("missing_endpoint", kind=kind.value, value=f"{kind.value} does not take to")
 
 
-def _resolve_location(value: str | None, field: str, cfg: config.Config) -> str | None:
-    """`None` passes through unchanged — not every change has both endpoints.
-    Checks an exact `location_path` match before `near_matches`: a display
-    string pasted into `--to` (§3.5) is exact, a typo is only ever fuzzy."""
+def resolve_location(value: str | None, field: str, cfg: config.Config) -> str | None:
+    """The location id `value` names, or `None` for `None` — not every change
+    has both endpoints. Checks an exact `location_path` match before
+    `near_matches`: a display string pasted into `--to` (§3.5) is exact, a
+    typo is only ever fuzzy.
+
+    Public because a caller recording which location a command resolved to
+    needs the same answer `decide_change` reached internally, rather than the
+    string it was passed. `llm._propose_write` previously kept the raw string
+    on its `ProposedWrite`, so a display path — which resolves and writes
+    correctly — appeared in the preview as an unknown location with no
+    before/after."""
     if value is None:
         return None
     if value in cfg.active_locations:
@@ -512,8 +520,8 @@ def decide_change(
 
     _check_endpoint_shape(kind, from_location, to_location)
 
-    from_id = _resolve_location(from_location, "from", cfg)
-    to_id = _resolve_location(to_location, "to", cfg)
+    from_id = resolve_location(from_location, "from", cfg)
+    to_id = resolve_location(to_location, "to", cfg)
     if kind is ChangeKind.MOVEMENT and from_id == to_id:
         raise Rejected("noop_move", value=from_id)
 

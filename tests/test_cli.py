@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+from collections import Counter
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -11,9 +13,10 @@ from sealedlog import Vault
 from sealedlog.errors import WrongPassphraseError
 from typer.testing import CliRunner
 
-from sumac import ledger, llm, paths, queue, store
+from sumac import cli, ledger, llm, models, paths, prompt_ui, queue, store
 from sumac import vault as sumac_vault
-from sumac.cli import _decision_options, app
+from sumac.cli import _decision_options, _editable_fields, _set_rust_log, app
+from sumac.config import Config
 from sumac.errors import RetireNonemptyError, VaultExistsError
 from sumac.models import ChangeKind
 
@@ -622,6 +625,7 @@ class _FakeAgentRunner:
     commits: ClassVar[list[llm.AgentPlan]] = []
     prompts: ClassVar[list[str]] = []
     models_used: ClassVar[list[llm.ModelPreset]] = []
+    usage_flags: ClassVar[list[bool]] = []
 
     def __init__(
         self,
@@ -630,12 +634,15 @@ class _FakeAgentRunner:
         *,
         model: llm.ModelPreset = llm.DEFAULT_MODEL_PRESET,
         debug: bool = False,
+        show_usage: bool = True,
     ) -> None:
         self.data_dir = data_dir
         self.key = key
         self.model = model
         self.debug = debug
+        self.show_usage = show_usage
         self.models_used.append(model)
+        self.usage_flags.append(show_usage)
 
     def _next(self) -> llm.AgentPlan:
         item = self.plans.pop(0)
@@ -669,7 +676,13 @@ def _patch_agent_runner(
     fake_cls = type(
         "_ScriptedAgentRunner",
         (_FakeAgentRunner,),
-        {"plans": plans, "commits": [], "prompts": [], "models_used": []},
+        {
+            "plans": plans,
+            "commits": [],
+            "prompts": [],
+            "models_used": [],
+            "usage_flags": [],
+        },
     )
     monkeypatch.setattr(llm, "AgentRunner", fake_cls)
     return fake_cls
@@ -888,10 +901,9 @@ def test_ask_edit_with_an_invalid_amount_leaves_the_plan_unchanged(
 def test_ask_plan_preview_shows_what_is_already_there(
     data_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`current_amount`, captured at propose time, renders as descriptive
-    context — not a computed "after" total, since `decide_change`'s own
-    shortfall reconciliation at commit time can differ from a naive
-    subtraction."""
+    """`current_amount`, captured at propose time, renders as context rather
+    than a computed "after" total, since `decide_change`'s shortfall
+    reconciliation at commit time can differ from a subtraction."""
     _run(data_dir, "init")
     _patch_agent_runner(monkeypatch, [_consumption_plan(amount="1", current_amount="3")])
 
@@ -901,16 +913,28 @@ def test_ask_plan_preview_shows_what_is_already_there(
     assert "3 jar already there" in result.output
 
 
+def _options(**kwargs: bool) -> dict[str, str]:
+    return {o.key: o.description for o in _decision_options(**kwargs)}
+
+
 def test_decision_options_include_every_choice() -> None:
-    non_defer = dict(_decision_options(dry_run=False))
+    non_defer = _options(dry_run=False)
     assert set(non_defer) == {"a", "r", "e", "g", "s", "(anything else)"}
     assert "d" not in non_defer
+    assert "p" not in non_defer
 
-    with_defer = dict(_decision_options(dry_run=False, defer=True))
-    assert "d" in with_defer
+    assert "d" in _options(dry_run=False, defer=True)
+    assert "p" in _options(dry_run=False, pick=True)
+    assert "--dry-run" in _options(dry_run=True)["a"]
 
-    dry_run_options = dict(_decision_options(dry_run=True))
-    assert "--dry-run" in dry_run_options["a"]
+
+def test_only_the_feedback_option_prompts_for_text() -> None:
+    """Every other option is one keystroke; the free-text row cannot be, so
+    it is the one `prompt_ui.select` opens an editor for."""
+    text_options = [
+        o for o in _decision_options(dry_run=False, defer=True, pick=True) if o.prompt_for_text
+    ]
+    assert [o.key for o in text_options] == ["(anything else)"]
 
 
 # --- ask --loop / queue ----------------------------------------------------
@@ -1053,3 +1077,568 @@ def test_ask_loop_retry_with_invalid_index_reports_error_and_continues(
 
     assert result.exit_code == 0, result.output
     assert "No queued request at index" in result.output
+
+
+# --- ask preview (docs/journal/2026-09-04-ask-confirmation-ux.md) ----------
+
+
+def _effect_plan() -> llm.AgentPlan:
+    return llm.AgentPlan(
+        reply_text="",
+        writes=(
+            llm.ProposedWrite(
+                kind=ChangeKind.CONSUMPTION,
+                product_id="jam",
+                amount=Decimal(1),
+                unit="jar",
+                from_location="pantry",
+                to_location=None,
+                effects=(llm.LocationEffect("pantry", "jam", "jar", Decimal(3), Decimal(2)),),
+            ),
+        ),
+    )
+
+
+def _ungrounded_plan() -> llm.AgentPlan:
+    """The case `docs/journal/2026-09-04-basmati-rice-unit-mismatch.md`
+    reconstructed: a product id in no search result and in no config
+    record."""
+    return llm.AgentPlan(
+        reply_text="",
+        writes=(
+            llm.ProposedWrite(
+                kind=ChangeKind.DISCOVERY,
+                product_id="Basmati Rice Bag",
+                amount=Decimal(1),
+                unit="bag",
+                from_location=None,
+                to_location="pantry",
+            ),
+        ),
+        trace=(
+            llm.ToolCallRecord(
+                name="sumac_find_inventory",
+                arguments={"query": "rice"},
+                result='{"products": [{"product_id": "Basmati Rice", "locations": []}]}',
+            ),
+        ),
+    )
+
+
+def test_ask_preview_shows_the_projected_before_and_after(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run(data_dir, "init")
+    _patch_agent_runner(monkeypatch, [_effect_plan()])
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam", input="r\n")
+
+    assert result.exit_code == 0, result.output
+    assert "3 jar → 2 jar" in result.output
+
+
+def test_ask_preview_badges_a_product_nothing_looked_up(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run(data_dir, "init")
+    _patch_agent_runner(monkeypatch, [_ungrounded_plan()])
+
+    result = _run(data_dir, "ask", "add a bag of basmati rice", input="r\n")
+
+    assert result.exit_code == 0, result.output
+    assert "[unverified]" in result.output
+    assert "names a product nothing looked up" in result.output
+
+
+def test_ask_trace_is_one_line_per_call_by_default(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The raw JSON table previously printed above every plan; the summary
+    reports what the call found in one line instead."""
+    _run(data_dir, "init")
+    _patch_agent_runner(monkeypatch, [_ungrounded_plan()])
+
+    result = _run(data_dir, "ask", "add a bag of basmati rice", input="r\n")
+
+    assert result.exit_code == 0, result.output
+    assert "1 product, 0 locations" in result.output
+    assert "location_path" not in result.output
+
+
+def test_ask_trace_flag_restores_the_raw_result(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run(data_dir, "init")
+    _patch_agent_runner(monkeypatch, [_ungrounded_plan()])
+
+    result = _run(data_dir, "ask", "add a bag of basmati rice", "--trace", input="r\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Tool calls (1)" in result.output
+
+
+def test_ask_stats_flag_reaches_the_agent(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`_print_usage`'s per-round lines are off unless requested; the flag is
+    threaded into `AgentRunner` rather than filtered at print time."""
+    _run(data_dir, "init")
+    fake_cls = _patch_agent_runner(monkeypatch, [_effect_plan(), _effect_plan()])
+
+    _run(data_dir, "ask", "consume 1 jar of jam", input="r\n")
+    assert fake_cls.usage_flags == [False]
+
+    _run(data_dir, "ask", "consume 1 jar of jam", "--stats", input="r\n")
+    assert fake_cls.usage_flags == [False, True]
+
+
+def test_ask_debug_implies_stats(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--debug` is the strictly-more-verbose flag; it never shows fewer
+    numbers than the default would."""
+    _run(data_dir, "init")
+    fake_cls = _patch_agent_runner(monkeypatch, [_effect_plan()])
+
+    _run(data_dir, "ask", "consume 1 jar of jam", "--debug", input="r\n")
+
+    assert fake_cls.usage_flags == [True]
+
+
+# --- edit, as a field menu -------------------------------------------------
+
+
+def _patch_menu(
+    monkeypatch: pytest.MonkeyPatch,
+    selections: list[str],
+    entries: list[str] | None = None,
+    numbers: list[str] | None = None,
+) -> None:
+    """Drives the interactive path off a terminal: `prompt_ui.select` answers
+    from `selections` in order (the decision prompt and the edit menus both go
+    through it), `prompt_ui.number` from `numbers` for the amount field, and
+    `typer.prompt` from `entries` for the remaining free-text fields."""
+    import typer as typer_module
+
+    monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
+    picks = iter(selections)
+    monkeypatch.setattr(prompt_ui, "select", lambda *a, **k: next(picks))
+    typed = iter(entries or [])
+    monkeypatch.setattr(typer_module, "prompt", lambda *a, **k: next(typed))
+    amounts = iter(numbers or [])
+    monkeypatch.setattr(prompt_ui, "number", lambda *a, **k: next(amounts))
+
+
+def test_ask_edit_menu_retypes_only_the_chosen_field(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`e`, then the amount row, then done: product, unit and location are
+    not asked for, unlike the walkthrough, which asks for every field in
+    order."""
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "add", "purchase", "jam", "3", "jar", "--to", "pantry")
+    _patch_agent_runner(monkeypatch, [_consumption_plan(amount="1")])
+    _patch_menu(monkeypatch, selections=["e", "n", "d", "a"], numbers=["2"])
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam")
+
+    assert result.exit_code == 0, result.output
+    assert "Edit applied" in result.output
+    assert "Recorded consumption of 2 jar jam" in result.output
+
+
+def test_ask_edit_menu_cancel_leaves_the_plan_unchanged(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "add", "purchase", "jam", "3", "jar", "--to", "pantry")
+    fake_cls = _patch_agent_runner(monkeypatch, [_consumption_plan(amount="1")])
+    _patch_menu(monkeypatch, selections=["e", "c", "r"])
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam")
+
+    assert result.exit_code == 0, result.output
+    assert "Edit applied" not in result.output
+    assert fake_cls.commits == []
+
+
+def test_ask_edit_menu_escape_cancels_the_edit_not_the_plan(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Escape inside the field menu answers "r", meaning cancel this edit:
+    the plan returns for another decision rather than being discarded."""
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "add", "purchase", "jam", "3", "jar", "--to", "pantry")
+    _patch_agent_runner(monkeypatch, [_consumption_plan(amount="1")])
+    _patch_menu(monkeypatch, selections=["e", "r", "a"])
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam")
+
+    assert result.exit_code == 0, result.output
+    assert "Recorded consumption of 1 jar jam" in result.output
+
+
+def test_edit_menu_offers_only_the_endpoints_a_write_has() -> None:
+    """A purchase carrying a `from_location` is rejected by `decide_change`,
+    so offering to fill one in would produce a rejection."""
+    consumption = _consumption_plan().writes[0]
+    discovery = llm.ProposedWrite(
+        kind=ChangeKind.DISCOVERY,
+        product_id="bananas",
+        amount=Decimal(1),
+        unit="bag",
+        from_location=None,
+        to_location="fridge-door",
+    )
+
+    assert [row[2] for row in _editable_fields(consumption)] == [
+        "product_id",
+        "unit",
+        "amount",
+        "from_location",
+    ]
+    assert [row[2] for row in _editable_fields(discovery)] == [
+        "product_id",
+        "unit",
+        "amount",
+        "to_location",
+    ]
+
+
+# --- mistral.rs's own logging ----------------------------------------------
+
+
+def test_rust_log_defaults_to_warn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every line mistral.rs prints on a successful load is INFO, including
+    the GGUF chat template in full."""
+    monkeypatch.delenv("RUST_LOG", raising=False)
+
+    _set_rust_log(verbose=False)
+
+    assert os.environ["RUST_LOG"] == "warn"
+
+
+def test_rust_log_is_info_when_verbose(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("RUST_LOG", raising=False)
+
+    _set_rust_log(verbose=True)
+
+    assert os.environ["RUST_LOG"] == "info"
+
+
+def test_an_existing_rust_log_is_never_overridden(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A `RUST_LOG` set by the caller is kept, including a per-target filter
+    finer than either value this module chooses between."""
+    monkeypatch.setenv("RUST_LOG", "mistralrs_core::gguf::chat_template=off,info")
+
+    _set_rust_log(verbose=False)
+    _set_rust_log(verbose=True)
+
+    assert os.environ["RUST_LOG"] == "mistralrs_core::gguf::chat_template=off,info"
+
+
+def test_edit_location_rows_are_ordered_by_path_and_skip_retired() -> None:
+    """The order `sumac config show --locations-only` uses, so a container
+    and the locations nested under it stay together."""
+    from sumac.cli import _location_rows
+
+    locations = {
+        "pantry": models.Location(id="pantry", name="Pantry"),
+        "fridge": models.Location(id="fridge", name="Fridge"),
+        "fridge-door": models.Location(id="fridge-door", name="Door", parent_id="fridge"),
+        "old": models.Location(id="old", name="Old Shelf", retired=True),
+    }
+
+    rows = _location_rows(locations)
+
+    assert [row.value for row in rows] == ["fridge", "fridge-door", "pantry"]
+    assert "Fridge > Door" in rows[1].label
+    assert "fridge-door" in rows[1].search
+
+
+def test_ask_edit_picks_a_location_instead_of_typing_one(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Locations are a closed set — `decide` rejects an unconfigured one, and
+    there is no auto-registration — so the edit menu offers the layout rather
+    than a free-text field."""
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "config", "add-location", "Fridge", "--id", "fridge")
+    _run(data_dir, "add", "purchase", "jam", "3", "jar", "--to", "fridge")
+    _patch_agent_runner(monkeypatch, [_consumption_plan(amount="1")])
+    _patch_menu(monkeypatch, selections=["e", "f", "d", "a"])
+    picked: list[str | None] = []
+
+    def fake_pick(rows: list[prompt_ui.Row], *, title: str, current: str | None = None) -> str:
+        picked.append(current)
+        return "fridge"
+
+    monkeypatch.setattr(prompt_ui, "pick", fake_pick)
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam")
+
+    assert result.exit_code == 0, result.output
+    assert picked == ["pantry"]  # opened on the location the write already named
+    assert "Recorded consumption of 1 jar jam" in result.output
+
+
+def test_ask_edit_cancelling_the_location_picker_keeps_the_current_one(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "add", "purchase", "jam", "3", "jar", "--to", "pantry")
+    _patch_agent_runner(monkeypatch, [_consumption_plan(amount="1")])
+    _patch_menu(monkeypatch, selections=["e", "f", "d", "a"])
+    monkeypatch.setattr(prompt_ui, "pick", lambda *a, **k: None)
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam")
+
+    assert result.exit_code == 0, result.output
+    assert "Recorded consumption of 1 jar jam" in result.output
+
+
+def test_unit_rows_lead_with_the_units_already_used_for_the_product() -> None:
+    """A write in one of the product's own units converts; a write in any
+    other unit is recorded as a separately-tracked quantity with a warning."""
+    from sumac.cli import _unit_rows
+
+    products = {"jam": models.Product(id="jam", name="Jam", unit="jar")}
+    cfg = Config(
+        known_locations={},
+        active_locations={},
+        known_products=products,
+        active_products=products,
+        anomalies=(),
+    )
+    observed = {
+        "jam": Counter({"jar": 3}),
+        "milk": Counter({"l": 40, "carton": 2}),
+    }
+
+    rows = _unit_rows(observed, cfg, "jam")
+
+    assert [row.value for row in rows] == ["jar", "l", "carton"]
+    assert "already used for jam" in rows[0].label
+    assert "40 uses" in rows[1].label
+
+
+def test_unit_rows_include_a_registered_unit_never_yet_written() -> None:
+    from sumac.cli import _unit_rows
+
+    products = {
+        "rice": models.Product(id="rice", name="Rice", unit="jug", conversions={"bag": Decimal(2)})
+    }
+    cfg = Config(
+        known_locations={},
+        active_locations={},
+        known_products=products,
+        active_products=products,
+        anomalies=(),
+    )
+
+    rows = _unit_rows({}, cfg, "rice")
+
+    assert sorted(row.value for row in rows) == ["bag", "jug"]
+
+
+def test_product_rows_show_the_unit_and_skip_retired() -> None:
+    from sumac.cli import _product_rows
+
+    products = {
+        "jam": models.Product(id="jam", name="Strawberry Jam", unit="jar"),
+        "old": models.Product(id="old", name="Old", unit="ct", retired=True),
+    }
+    cfg = Config(
+        known_locations={},
+        active_locations={},
+        known_products=products,
+        active_products={"jam": products["jam"]},
+        anomalies=(),
+    )
+
+    rows = _product_rows(cfg)
+
+    assert [row.value for row in rows] == ["jam"]
+    assert rows[0].label == "jam  (jar)"
+    assert "Strawberry Jam" in rows[0].search  # the display name filters too
+
+
+def test_ask_edit_picks_a_product_and_allows_a_new_one(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "add", "purchase", "jam", "3", "jar", "--to", "pantry")
+    _patch_agent_runner(monkeypatch, [_consumption_plan(amount="1")])
+    _patch_menu(monkeypatch, selections=["e", "p", "d", "a"])
+    seen: list[tuple[str, bool]] = []
+
+    def fake_pick(rows, *, title, current=None, allow_new=False, new_hint="new"):
+        seen.append((title, allow_new))
+        return "jam"
+
+    monkeypatch.setattr(prompt_ui, "pick", fake_pick)
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam")
+
+    assert result.exit_code == 0, result.output
+    assert seen == [("Which product?", True)]
+
+
+def test_ask_edit_picks_a_unit_and_allows_a_new_one(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "add", "purchase", "jam", "3", "jar", "--to", "pantry")
+    _patch_agent_runner(monkeypatch, [_consumption_plan(amount="1")])
+    _patch_menu(monkeypatch, selections=["e", "u", "d", "a"])
+    offered: list[list[str]] = []
+
+    def fake_pick(rows, *, title, current=None, allow_new=False, new_hint="new"):
+        offered.append([row.value for row in rows])
+        assert allow_new is True
+        return "jar"
+
+    monkeypatch.setattr(prompt_ui, "pick", fake_pick)
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam")
+
+    assert result.exit_code == 0, result.output
+    assert offered == [["jar"]]  # the only unit this vault has ever used
+    assert "Recorded consumption of 1 jar jam" in result.output
+
+
+def _edit_scenario(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "config", "add-location", "Fridge", "--id", "fridge")
+    _run(data_dir, "add", "purchase", "jam", "3", "jar", "--to", "pantry")
+    plan = llm.AgentPlan(
+        reply_text="A jar of jam has been consumed from the pantry.",
+        writes=(
+            llm.ProposedWrite(
+                kind=ChangeKind.CONSUMPTION,
+                product_id="jam",
+                amount=Decimal(1),
+                unit="jar",
+                from_location="pantry",
+                to_location=None,
+                effects=(llm.LocationEffect("pantry", "jam", "jar", Decimal(3), Decimal(2)),),
+            ),
+        ),
+        trace=(llm.ToolCallRecord("sumac_find_inventory", {"query": "jam"}, '{"products": []}'),),
+    )
+    _patch_agent_runner(monkeypatch, [plan])
+
+
+def test_an_edit_drops_the_reply_that_described_the_old_plan(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The model's reply described the write it proposed; after that write is
+    replaced, the sentence describes nothing on screen."""
+    _edit_scenario(data_dir, monkeypatch)
+    _patch_menu(monkeypatch, selections=["e", "n", "d", "r"], numbers=["2"])
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam")
+
+    assert result.exit_code == 0, result.output
+    before, after = result.output.split("Edit applied")
+    assert "A jar of jam has been consumed" in before
+    assert "A jar of jam has been consumed" not in after
+
+
+def test_an_edit_does_not_reprint_the_trace(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reprinting it on the next pass suggests the agent ran again."""
+    _edit_scenario(data_dir, monkeypatch)
+    _patch_menu(monkeypatch, selections=["e", "n", "d", "r"], numbers=["2"])
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam")
+
+    _before, after = result.output.split("Edit applied")
+    assert "sumac_find_inventory" not in after
+
+
+def test_an_edit_recomputes_the_before_and_after(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The projection described the write the model proposed; the edited one
+    is a different write, and its projection is equally computable."""
+    _edit_scenario(data_dir, monkeypatch)
+    _patch_menu(monkeypatch, selections=["e", "n", "d", "r"], numbers=["2"])
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam")
+
+    _before, after = result.output.split("Edit applied")
+    assert "3 jar → 1 jar" in after
+
+
+def test_a_product_typed_by_hand_is_not_reported_as_ungrounded(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`ungrounded` reports a name the model produced without a source. A
+    name typed into the edit menu has one, though it is still a new product
+    and is still reported as one."""
+    _edit_scenario(data_dir, monkeypatch)
+    _patch_menu(monkeypatch, selections=["e", "p", "d", "r"])
+    monkeypatch.setattr(prompt_ui, "pick", lambda *a, **k: "Billy Bear Ham")
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam")
+
+    _before, after = result.output.split("Edit applied")
+    assert "unverified" not in after
+    assert "new product" in after
+
+
+def test_a_rejected_edit_returns_to_the_menu_with_the_edits_intact(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fifth field being wrong should not discard four correct ones. The
+    menu returns with the typed values retained, so correcting it takes one
+    field rather than all five again."""
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "add", "purchase", "jam", "3", "jar", "--to", "pantry")
+    _run(data_dir, "config", "add-product", "Gone", "ct", "--id", "gone")
+    _run(data_dir, "config", "retire-product", "gone")
+    _patch_agent_runner(monkeypatch, [_consumption_plan(amount="1")])
+    resumed: list[dict[str, str | None]] = []
+    real_menu = cli._edit_fields_by_menu
+
+    def spy_menu(data_dir, key, write, locations, resume=None):
+        if resume is not None:
+            resumed.append(dict(resume))
+        return real_menu(data_dir, key, write, locations, resume)
+
+    monkeypatch.setattr(cli, "_edit_fields_by_menu", spy_menu)
+    # First pass picks a retired product (rejected), second corrects it.
+    _patch_menu(monkeypatch, selections=["e", "p", "d", "p", "d", "a"])
+    picks = iter(["gone", "jam"])
+    monkeypatch.setattr(prompt_ui, "pick", lambda *a, **k: next(picks))
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam")
+
+    assert result.exit_code == 0, result.output
+    assert "Edit rejected" in result.output
+    assert resumed and resumed[0]["product_id"] == "gone"  # the menu came back holding it
+    assert "Recorded consumption of 1 jar jam" in result.output
+
+
+def test_a_rejected_edit_off_a_terminal_still_leaves_the_plan_alone(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A piped answer cannot react to a rejection, so the walkthrough stays
+    one pass: re-prompting would consume the next scripted line."""
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "add", "purchase", "jam", "3", "jar", "--to", "pantry")
+    fake_cls = _patch_agent_runner(monkeypatch, [_consumption_plan(amount="1")])
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam", input="e\n\n\nnot-a-number\n\nr\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Not a valid amount" in result.output
+    assert fake_cls.commits == []

@@ -45,9 +45,14 @@ def _canon_unit(unit: str) -> str:
 def _canon_location(cfg: sumac_config.Config, value: str | None) -> str | None:
     """Resolves a display path to its location id, passes an id through
     unchanged, and returns any other value unchanged — an unresolvable
-    location scores as a mismatch rather than raising, matching how
-    `ProposedWrite.from_location`/`to_location` hold the model's raw,
-    unresolved string."""
+    location scores as a mismatch rather than raising.
+
+    `ProposedWrite.from_location`/`to_location` now hold the id
+    `decide.resolve_location` reached, not the model's raw string, so the
+    first branch below answers every write this suite produces. Kept as
+    written: it is idempotent on an id, and it would still resolve a future
+    regression that restored the raw string, which would otherwise produce
+    silent location mismatches."""
     if value is None:
         return None
     if value in cfg.known_locations:

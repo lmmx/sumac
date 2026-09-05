@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -225,8 +226,16 @@ _FIND_INVENTORY_SCHEMA = {
     "function": {
         "name": "sumac_find_inventory",
         "description": (
-            "Search current inventory by product name, case-insensitive. "
-            'Returns {"products": [...]}, one entry per distinct product '
+            "Search current inventory by product name, and the location "
+            "layout by location name, case-insensitive. "
+            'Returns {"products": [...], "locations": [...]}. '
+            '"locations" holds every place whose name or path matched — each '
+            'with "location_id" and "location_path" — and is how a place '
+            'named in plain words ("the fridge", "the top shelf") becomes a '
+            "location_id you can pass to another tool. Search for the place "
+            "before writing to it if you do not already have its id from a "
+            "result in this conversation. "
+            '"products" has one entry per distinct product '
             "name that matched — never one row per location. Each entry "
             'has "product_id" (its exact spelling as stored), '
             '"is_exact_match" (true only when the product\'s name exactly '
@@ -538,6 +547,22 @@ DEFAULT_PROMPT_VARIANT = PROMPT_VARIANTS[0]
 
 
 @dataclass(frozen=True, slots=True)
+class LocationEffect:
+    """What one location holds of one product before and after a single
+    proposed write. Both numbers come from `ledger.project`'s fold of the
+    records `decide.decide_change` returned for that write, not from
+    subtracting an amount from a holding. `None` means the location holds none
+    of the product on that side: `before=None` is a first arrival,
+    `after=None` is the last of it being removed."""
+
+    location_id: str
+    product_id: str
+    unit: str
+    before: Decimal | None
+    after: Decimal | None
+
+
+@dataclass(frozen=True, slots=True)
 class ProposedWrite:
     kind: ChangeKind
     product_id: str
@@ -552,6 +577,17 @@ class ProposedWrite:
     # than just the delta, without a second inventory query at render time
     # that could reflect a different moment than the one actually decided.
     current_amount: Decimal | None = None
+    # Per-location before/after for this write, in endpoint order (a
+    # movement's source then its destination). Empty when the write was built
+    # without a projection; `render.print_plan` then falls back to
+    # `current_amount`'s "already there" line, so a hand-built
+    # `ProposedWrite` renders as it did before this field existed.
+    effects: tuple[LocationEffect, ...] = ()
+    # Which fields a person set by hand, via `sumac ask`'s edit menu. Empty
+    # for anything the model proposed. `review.review_write` reads it: its
+    # `ungrounded` check reports a name the model produced without a source,
+    # and a name typed by the person reviewing the plan has one.
+    edited_fields: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -706,6 +742,32 @@ _REJECTION_HINT = (
 )
 
 
+# One search result can name many shelves. The count is returned in full even
+# when the list is truncated, so a broad query is identifiable as one to
+# narrow rather than appearing to be the whole layout.
+_MAX_LOCATION_MATCHES = 20
+
+
+def _location_candidates(cfg: config.Config, value: str, limit: int = 20) -> list[dict[str, str]]:
+    """Locations to offer after `value` failed to resolve: those whose id or
+    display path shares a word with it, or the first `limit` of them when none
+    does, so the rejection always names some valid locations."""
+    words = {w for w in re.split(r"\W+", value.lower()) if len(w) > 2}
+    everything = [
+        {"location_id": loc_id, "location_path": config.location_path(cfg.known_locations, loc_id)}
+        for loc_id in sorted(cfg.active_locations)
+    ]
+    matching = [
+        candidate
+        for candidate in everything
+        if any(
+            word in candidate["location_id"].lower() or word in candidate["location_path"].lower()
+            for word in words
+        )
+    ]
+    return (matching or everything)[:limit]
+
+
 def _rejected(reason: str, detail: dict) -> str:
     """Every rejected tool result carries its own retry guidance, rather
     than a prompt stating it unconditionally on every request regardless
@@ -806,13 +868,121 @@ def _build_runner(model: ModelPreset, *, seed: int | None = None) -> SendsComple
     return _LocalMistralRsBackend(runner)
 
 
+# The most recently built backend, and what it was built for. `sumac ask
+# --loop` constructs a fresh `AgentRunner` per request deliberately, so that
+# each request is a separate conversation with no memory of the last. The
+# model behind it does not need reloading for that: `AgentRunner` holds every
+# piece of per-request state (`_messages`, `_pending`, `_trace`) itself, and
+# a request carries its whole history in `send_chat_completion_request`, so
+# the backend holds no state this module depends on. `evals/conftest.py` has
+# shared one `base_runner` across every scenario in a run since the eval suite
+# existed; this applies the same reuse to the interactive loop.
+_SHARED_RUNNER: tuple[tuple[str, int | None], SendsCompletions] | None = None
+
+
+def shared_runner(model: ModelPreset, *, seed: int | None = None) -> SendsCompletions:
+    """A backend for `model`, reusing the last one when it matches, so a
+    `--loop` session loads the model once rather than once per request.
+
+    Holds exactly one and drops it before building the next: two GGUFs
+    resident at once can exhaust a GPU that fits either alone when switching
+    models mid-session. Dropping this module's reference is all it can do —
+    a caller still holding the previous `AgentRunner` keeps that backend
+    alive until the caller releases it.
+
+    Reuse has one observable effect, the same one `evals/` already accounts
+    for: mistral.rs's RNG stream and prefix cache carry across requests, so a
+    request's sampling depends on what ran before it in the session
+    (docs/journal/2026-09-04-trace-and-verdict-redesign.md). That has no cost
+    in an interactive session, where no two runs are being compared, and
+    "regenerate" still resamples because the stream has advanced.
+
+    `AgentRunner` builds its own backend when handed one, so `evals/` and the
+    benchmark scripts continue to control when a model is loaded."""
+    global _SHARED_RUNNER
+    cache_key = (model.name, seed)
+    if _SHARED_RUNNER is not None and _SHARED_RUNNER[0] == cache_key:
+        return _SHARED_RUNNER[1]
+    _SHARED_RUNNER = None
+    _SHARED_RUNNER = (cache_key, _build_runner(model, seed=seed))
+    return _SHARED_RUNNER[1]
+
+
+def release_shared_runner() -> None:
+    """Drops the cached backend, for a caller that is finished with the
+    model. Nothing in `sumac ask` calls it, since a session ends with the
+    process."""
+    global _SHARED_RUNNER
+    _SHARED_RUNNER = None
+
+
+def effects(
+    inventory: ledger.Inventory,
+    cfg: config.Config,
+    decided: list[decide.Write],
+    product_id: str,
+    unit: str,
+    from_location: str | None,
+    to_location: str | None,
+) -> tuple[LocationEffect, ...]:
+    """The before/after this write produces at each endpoint it names, read
+    from `ledger.project`'s fold of `decided` — the records `decide_change`
+    just returned for this write, which for a consumption exceeding the
+    recorded holding include §3.5's reconciling `Counted` alongside the
+    `Consumed`. Projecting the records rather than subtracting the amount
+    gives the same "after" a commit would produce, in that case as well as the
+    ordinary one.
+
+    Endpoint order, source first, matching the order of a movement. An unknown
+    location is skipped rather than reported: `decide_change` rejects an
+    invalid endpoint before returning, so anything reaching here is a location
+    the projection could resolve.
+
+    Public because a hand-edited write needs the same projection recomputed:
+    `cli._apply_edit` re-decides the edited write and calls this with the
+    result, rather than leaving the preview showing the projection of the
+    write the model proposed, or none at all."""
+    # Log records only. `decide_change` returns config writes alongside them
+    # when it auto-registers a product or location (decide.py's
+    # `_resolve_product`), and those carry no inventory delta; a config record
+    # reaching the fold is a schema mismatch, not a projection.
+    objs = [w.obj for w in decided if w.stream.startswith("log:")]
+    projected = ledger.project(inventory, cfg.known_locations, objs)
+    if projected.anomalies:
+        # The fold could not apply these records: an endpoint it could not
+        # resolve, or a unit that would not convert. Reporting a before/after
+        # here would report arithmetic that did not occur, so no effects are
+        # returned and `render.print_plan` falls back to "already there".
+        # Reaching this branch indicates a fault upstream, since
+        # `decide_change` returned these records.
+        return ()
+    effects: list[LocationEffect] = []
+    for location_id in (from_location, to_location):
+        if location_id is None:
+            continue
+        before = inventory.at(location_id).get(product_id)
+        after = projected.at(location_id).get(product_id)
+        effects.append(
+            LocationEffect(
+                location_id=location_id,
+                product_id=product_id,
+                unit=quantity.unit if (quantity := after or before) is not None else unit,
+                before=before.amount if before else None,
+                after=after.amount if after else None,
+            )
+        )
+    return tuple(effects)
+
+
 class AgentRunner:
     """`data_dir`/`key` are closed over by the tool callbacks below,
     matching `cli.py`'s existing `AgentRunner(data_dir, key)` construction.
-    Pass `runner` to substitute a fake `SendsCompletions` in tests instead
-    of building a real `mistralrs.Runner`. Tool calls are dispatched by
-    this class itself, client-side — see the module docstring — rather
-    than registered on the `Runner`."""
+    Pass `runner` to substitute a fake `SendsCompletions` in tests, or a
+    backend of the caller's own, instead of the shared one this otherwise
+    builds (`shared_runner`), which is reused across instances rather than
+    loading the model again for each. Tool calls are dispatched by this class
+    itself, client-side — see the module docstring — rather than registered on
+    the `Runner`."""
 
     def __init__(
         self,
@@ -823,6 +993,7 @@ class AgentRunner:
         prompt_variant: PromptVariant = DEFAULT_PROMPT_VARIANT,
         runner: SendsCompletions | None = None,
         debug: bool = False,
+        show_usage: bool = True,
         temperature: float = DEFAULT_TEMPERATURE,
         top_p: float = DEFAULT_TOP_P,
         max_tokens: int = DEFAULT_MAX_TOKENS,
@@ -833,6 +1004,12 @@ class AgentRunner:
         self._model = model
         self._prompt_variant = prompt_variant
         self._debug = debug
+        # Per-round token/timing lines. Defaults on, matching what every
+        # existing caller (`evals/`, the benchmark scripts) already receives;
+        # `sumac ask` passes `--stats` through so the lines are not printed
+        # above a plan being read. `usage_history` carries the same numbers
+        # programmatically either way, so disabling the print loses no data.
+        self._show_usage = show_usage
         self._temperature = temperature
         self._top_p = top_p
         self._max_tokens = max_tokens
@@ -851,6 +1028,10 @@ class AgentRunner:
         self._allowed: frozenset[str] = frozenset()
         self._pending: list[ProposedWrite] = []
         self._trace: list[ToolCallRecord] = []
+        # Searches already answered in the current `propose`/`revise` call,
+        # so an identical repeat is returned labelled rather than appearing
+        # to be a fresh result.
+        self._searched: dict[str, dict] = {}
         self._trace_history: list[ToolCallRecord] = []
         self._classify_messages: list[dict[str, str]] | None = None
         self._usage_history: list[dict[str, float | int]] = []
@@ -864,8 +1045,14 @@ class AgentRunner:
             "sumac_move_inventory": self._sumac_move_inventory,
             "sumac_discover_inventory": self._sumac_discover_inventory,
         }
+        # `shared_runner`, not `_build_runner`: `sumac ask --loop` builds a
+        # fresh `AgentRunner` per request, since each request is a separate
+        # conversation, and reloading the GGUF for each added seconds of
+        # latency to every request. A caller needing its own backend passes
+        # one; `evals/conftest.py` builds exactly one per run that way, and
+        # has since the suite existed.
         self._runner: SendsCompletions = (
-            runner if runner is not None else _build_runner(model, seed=seed)
+            runner if runner is not None else shared_runner(model, seed=seed)
         )
 
     @property
@@ -972,6 +1159,22 @@ class AgentRunner:
         `search_inventory`'s tier order (exact, then whole-word, then
         substring) without naming the tiers themselves."""
         query = str(args.get("query", ""))
+        if query in self._searched:
+            # A real run searched "fridge" seventeen times in a row, each time
+            # receiving the same empty result, until the round cap stopped it.
+            # Returning the same answer again is not sufficient, since the
+            # model already has it, so the answer is labelled as a repeat.
+            return json.dumps(
+                {
+                    **self._searched[query],
+                    "repeated_query": True,
+                    "hint": (
+                        "This exact search already ran in this request and returned this same "
+                        "result. Running it again returns nothing new. Act on what it returned, "
+                        "or explain in plain text what you could not find."
+                    ),
+                }
+            )
         inventory = ledger.build_inventory(self._data_dir, self._key)
         locations = ledger.load_locations_or_empty(self._data_dir, self._key)
         products: dict[str, dict] = {}
@@ -992,7 +1195,21 @@ class AgentRunner:
                     "unit": m.quantity.unit,
                 }
             )
-        return json.dumps({"products": list(products.values())})
+        # Location matches alongside product matches: `query` is whatever the
+        # person's sentence named, and a phrase like "the fridge" names a
+        # place rather than a product. Without this, the only route to a
+        # location id was to guess one, be rejected, and guess again.
+        matched = config.search_locations(locations, query)
+        result = {
+            "products": list(products.values()),
+            "locations": [
+                {"location_id": loc.id, "location_path": config.location_path(locations, loc.id)}
+                for loc in matched[:_MAX_LOCATION_MATCHES]
+            ],
+            "location_match_count": len(matched),
+        }
+        self._searched[query] = result
+        return json.dumps(result)
 
     def _propose_write(self, name: str, args: dict) -> str:
         # A real LFM2.5 run produced `_amount` instead of `amount` — the
@@ -1027,7 +1244,7 @@ class AgentRunner:
         cfg = config.build_config(self._data_dir, self._key)
         inventory = ledger.build_inventory(self._data_dir, self._key)
         try:
-            _writes, messages = decide.decide_change(
+            decided, messages = decide.decide_change(
                 kind=kind,
                 product_id=product_id,
                 amount=amount,
@@ -1040,7 +1257,30 @@ class AgentRunner:
                 cfg=cfg,
             )
         except Rejected as e:
-            return _rejected(e.reason, {k: str(v) for k, v in e.detail.items()})
+            # `object` values, not `str`: every `decide` detail stringifies,
+            # but the candidate list below stays structured, so the model
+            # receives JSON rather than a Python repr inside a string.
+            detail: dict[str, object] = {k: str(v) for k, v in e.detail.items()}
+            if e.reason == "unknown_location":
+                # `decide`'s own `suggestions` are `near_matches` over ids,
+                # which a phrase ("top shelf of the fridge") does not score
+                # against. The candidates below are the locations whose path
+                # shares a word with the requested value.
+                detail["known_locations"] = _location_candidates(
+                    cfg, str(e.detail.get("value", ""))
+                )
+            return _rejected(e.reason, detail)
+
+        # The ids `decide_change` just resolved these to, not the strings the
+        # model supplied. `decide.resolve_location` accepts a display path
+        # ("Fridge > Top Shelf") as well as an id, so a write can be valid and
+        # commit correctly while its raw endpoint matches nothing in
+        # `known_locations`. Recording the raw string made the preview report
+        # a configured location as new and show no before/after for it, since
+        # every lookup downstream is by id. Re-resolving cannot raise here:
+        # `decide_change` returned, so both resolved once already.
+        from_location = decide.resolve_location(from_location, "from", cfg)
+        to_location = decide.resolve_location(to_location, "to", cfg)
 
         # Before/after context for the human reviewing this, not domain
         # logic: a discovery's "current" location is where the product
@@ -1061,6 +1301,7 @@ class AgentRunner:
             to_location=to_location,
             warnings=tuple(messages),
             current_amount=current_quantity.amount if current_quantity else None,
+            effects=effects(inventory, cfg, decided, product_id, unit, from_location, to_location),
         )
         if candidate in self._pending:
             # A real LFM2.5 run repeated an already-successful discover call
@@ -1144,11 +1385,12 @@ class AgentRunner:
         return self._classify(prompt)
 
     def _record_usage(self, response: ChatResponse, round_num: int) -> None:
-        """Prints the round's usage line (`_print_usage`) and folds its
-        token/timing numbers into `tokens_per_sec`'s running totals — a
-        no-op for the latter beyond the print for a fake `SendsCompletions`
-        with no real `.usage`."""
-        _print_usage(response, round_num)
+        """Prints the round's usage line (`_print_usage`, when `show_usage`)
+        and folds its token/timing numbers into `tokens_per_sec`'s running
+        totals — a no-op for the latter beyond the print for a fake
+        `SendsCompletions` with no real `.usage`."""
+        if self._show_usage:
+            _print_usage(response, round_num)
         usage = getattr(response, "usage", None)
         if usage is None:
             return
@@ -1324,6 +1566,7 @@ class AgentRunner:
 
     def propose(self, prompt: str) -> AgentPlan:
         self._trace = []
+        self._searched = {}
         kind = self._classify(prompt)
         self._kind = kind
         if kind is QueryKind.REJECT:
@@ -1345,6 +1588,7 @@ class AgentRunner:
             )
         self._messages.append({"role": "user", "content": feedback})
         self._trace = []
+        self._searched = {}
         plan = self._maybe_self_review(self._maybe_force_action(self._run_loop()))
         return replace(plan, trace=tuple(self._trace))
 

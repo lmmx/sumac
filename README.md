@@ -97,6 +97,55 @@ group, the rest of `sumac` works without it.
 uv sync --group ask          # CPU/Metal — no GPU required
 ```
 
+### Reviewing what it proposes
+
+`ask` never writes anything without showing you the plan first. Each proposed change is one line
+of what changes at that location — `Fridge > Door   3 jar → 2 jar` — where the "after" comes from
+folding the records the write-time gate decided on, so a consumption larger than the recorded stock
+shows the zero its reconciliation produces rather than a negative number.
+
+Alongside it, a few deterministic checks (no second model call) flag anything worth a closer look
+before you accept:
+
+| badge | what it means |
+| --- | --- |
+| `[unverified]` | the product name is in no search result and in no config record, so nothing the agent looked up supplied it |
+| `[new product]` | accepting registers a product that doesn't exist yet |
+| `[near-duplicate]` | the name is one edit away from a product you already have |
+| `[new unit]` | the product is tracked in a different unit, with no conversion configured |
+
+On a terminal the decision is an arrow-key menu (`↑`/`↓`, Enter, or the option's own letter; Esc
+rejects); piped or scripted, it prints the same options and reads a typed line. On a plan with
+more than one change, `p` opens a checklist to apply only some of them, and `e` picks a change and
+then the one field to change. Product, unit and location fields open a picker over what the vault
+already holds, filtered as you type — locations are the layout (a location has to be one that
+exists), products the registry, and units every unit ever recorded, the ones already used for that
+product first. Products and units also accept a value that isn't in the list: type it and the picker offers it as
+new, which is how `sumac add` treats it too. The amount field takes digits only, with the arrow keys
+stepping it up and down. Anything you type that
+isn't an option is feedback the agent revises the plan with.
+
+```sh
+sumac ask "move the ragu to the fridge" --dry-run   # show the plan, write nothing
+sumac ask "consume 1 jar of jam" --trace            # full tool-call arguments and raw results
+sumac ask "where is the rice?" --stats              # per-round token counts and tok/s
+sumac ask "find the butter" --stats --trace        # both, i.e. what was printed unconditionally before
+```
+
+`--debug` (raw per-round request/response dumps) implies `--stats`, and also restores mistral.rs's
+own load logs — the DType, tokenizer, device map and the whole GGUF chat template — which are
+otherwise suppressed. They are Rust `tracing` output filtered by `RUST_LOG`; set that yourself for
+anything finer, and sumac will not override it:
+
+```sh
+RUST_LOG=info sumac ask "find the butter"                              # all of it, without --debug
+RUST_LOG=mistralrs_core::gguf::chat_template=off,info sumac ask "..."  # everything but the template
+```
+
+In `--loop` mode the model is loaded once, on the first request, and reused for the rest of the
+session: a fresh conversation per request, with the same loaded model behind it. Switching model
+with `g` loads the new one and drops the old.
+
 ### NVIDIA GPU acceleration
 
 ```sh

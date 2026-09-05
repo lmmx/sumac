@@ -1035,3 +1035,102 @@ def test_search_inventory_is_case_insensitive() -> None:
     }
     exact = [m for m in matches if m.match_kind is ledger.MatchKind.EXACT]
     assert {m.product_id for m in exact} == {"Butter"}
+
+
+def test_project_folds_decided_writes_without_appending_them(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    """`project` performs the preview's arithmetic: the same fold, over
+    records `decide_change` returned but nothing appended, onto a copy of the
+    current inventory, leaving the on-disk state unchanged."""
+    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+    config.add_location(data_dir, key, osuser, models.Location(id="fridge", name="Fridge"))
+    config.add_product(data_dir, key, osuser, models.Product(id="milk", name="Milk", unit="l"))
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _change_obj("c1", T0, osuser, "purchase", "milk", "5", "l", to_location="pantry"),
+    )
+    inventory = ledger.build_inventory(data_dir, key)
+    cfg = config.build_config(data_dir, key)
+
+    writes, _messages = decide.decide_change(
+        kind=models.ChangeKind.MOVEMENT,
+        product_id="milk",
+        amount=Decimal("2"),
+        unit="l",
+        from_location="pantry",
+        to_location="fridge",
+        actor=osuser,
+        occurred_at=T0 + timedelta(minutes=1),
+        inventory=inventory,
+        cfg=cfg,
+    )
+    projected = ledger.project(
+        inventory, cfg.known_locations, [w.obj for w in writes if w.stream.startswith("log:")]
+    )
+
+    assert projected.at("pantry")["milk"].amount == Decimal("3")
+    assert projected.at("fridge")["milk"].amount == Decimal("2")
+    # Neither the source inventory object nor the log on disk moved.
+    assert inventory.at("pantry")["milk"].amount == Decimal("5")
+    assert inventory.at("fridge") == {}
+    assert ledger.build_inventory(data_dir, key).at("fridge") == {}
+
+
+def test_project_includes_the_shortfall_correction_a_subtraction_would_miss(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    """Consuming more than the log records emits §3.5's reconciling `Counted`
+    alongside the `Consumed`. Folding both gives zero; subtracting the amount
+    from the holding gives -2, which is why `render.print_plan` never computed
+    an "after" by subtraction."""
+    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+    config.add_product(data_dir, key, osuser, models.Product(id="flour", name="Flour", unit="kg"))
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _change_obj("c1", T0, osuser, "purchase", "flour", "3", "kg", to_location="pantry"),
+    )
+    inventory = ledger.build_inventory(data_dir, key)
+    cfg = config.build_config(data_dir, key)
+
+    writes, messages = decide.decide_change(
+        kind=models.ChangeKind.CONSUMPTION,
+        product_id="flour",
+        amount=Decimal("5"),
+        unit="kg",
+        from_location="pantry",
+        to_location=None,
+        actor=osuser,
+        occurred_at=T0 + timedelta(minutes=1),
+        inventory=inventory,
+        cfg=cfg,
+    )
+    assert any("adjusted" in m for m in messages)
+    projected = ledger.project(
+        inventory, cfg.known_locations, [w.obj for w in writes if w.stream.startswith("log:")]
+    )
+
+    assert inventory.at("pantry")["flour"].amount == Decimal("3")
+    assert "flour" not in projected.at("pantry")  # zero drops out, per `_commit`
+
+
+def test_project_over_no_writes_returns_the_same_holdings(
+    data_dir: Path, osuser: str, key: bytes
+) -> None:
+    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+    store.append(
+        data_dir,
+        key,
+        f"log:{osuser}",
+        _change_obj("c1", T0, osuser, "purchase", "milk", "5", "l", to_location="pantry"),
+    )
+    inventory = ledger.build_inventory(data_dir, key)
+    cfg = config.build_config(data_dir, key)
+
+    projected = ledger.project(inventory, cfg.known_locations, [])
+
+    assert projected.by_location == inventory.by_location

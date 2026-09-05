@@ -253,6 +253,32 @@ def descendants(locations: dict[str, models.Location], root_id: str) -> set[str]
     return result
 
 
+def search_locations(locations: dict[str, models.Location], query: str) -> list[models.Location]:
+    """Every active location whose id, name, or display path contains
+    `query`, case-insensitively, ordered by display path.
+
+    The counterpart to `ledger.search_inventory`, which matches products
+    only: an agent asked to put something on "the top shelf of the fridge"
+    must resolve that phrase to a location id, and searching the inventory for
+    "fridge" correctly returns nothing, since no product has that name.
+    Matching the path as well as the name lets a query for a container return
+    the locations nested inside it."""
+    lowered = query.strip().lower()
+    if not lowered:
+        return []
+    matches = [
+        loc
+        for loc_id, loc in locations.items()
+        if not loc.retired
+        and (
+            lowered in loc_id.lower()
+            or lowered in loc.name.lower()
+            or lowered in location_path(locations, loc_id).lower()
+        )
+    ]
+    return sorted(matches, key=lambda loc: location_path(locations, loc.id))
+
+
 def location_path(locations: dict[str, models.Location], location_id: str) -> str:
     """Root-to-leaf display path, e.g. 'Fridge > Door'. Falls back to the raw id
     for an unknown location."""

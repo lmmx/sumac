@@ -17,6 +17,7 @@ dispatch itself, or a final plain-text reply with no further tool call.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -1119,3 +1120,397 @@ def test_build_runner_defaults_seed_to_none(monkeypatch: pytest.MonkeyPatch) -> 
     llm._build_runner(llm.DEFAULT_MODEL_PRESET)
 
     assert captured["seed"] is None
+
+
+# --- projected effects -------------------------------------------------
+
+
+def test_proposed_write_carries_the_projected_before_and_after(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    """`_propose_write` folds the records `decide_change` returned onto the
+    inventory it just read, so the preview shows the resulting holding as well
+    as the starting one."""
+    _seed_pantry_with_jam(data_dir, key, osuser)
+    agent, _fake = _make_agent([], data_dir, key)
+
+    agent.tool_callbacks["sumac_consume_inventory"](
+        "sumac_consume_inventory",
+        {"product_id": "jam", "amount": "1", "unit": "jar", "from_location": "pantry"},
+    )
+
+    (write,) = agent._pending
+    assert write.effects == (
+        llm.LocationEffect(
+            location_id="pantry",
+            product_id="jam",
+            unit="jar",
+            before=Decimal(3),
+            after=Decimal(2),
+        ),
+    )
+
+
+def test_a_movement_projects_both_endpoints_source_first(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    _seed_pantry_with_jam(data_dir, key, osuser)
+    config.add_location(data_dir, key, osuser, Location(id="fridge", name="Fridge"))
+    agent, _fake = _make_agent([], data_dir, key)
+
+    agent.tool_callbacks["sumac_move_inventory"](
+        "sumac_move_inventory",
+        {
+            "product_id": "jam",
+            "amount": "1",
+            "unit": "jar",
+            "from_location": "pantry",
+            "to_location": "fridge",
+        },
+    )
+
+    (write,) = agent._pending
+    assert [(e.location_id, e.before, e.after) for e in write.effects] == [
+        ("pantry", Decimal(3), Decimal(2)),
+        ("fridge", None, Decimal(1)),
+    ]
+
+
+def test_projected_after_reflects_the_shortfall_correction_not_a_subtraction(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    """Consuming 5 of a recorded 3 emits §3.5's `Counted` first, so the
+    projected holding is zero rather than the -2 a subtraction gives."""
+    _seed_pantry_with_jam(data_dir, key, osuser)
+    agent, _fake = _make_agent([], data_dir, key)
+
+    agent.tool_callbacks["sumac_consume_inventory"](
+        "sumac_consume_inventory",
+        {"product_id": "jam", "amount": "5", "unit": "jar", "from_location": "pantry"},
+    )
+
+    (write,) = agent._pending
+    (effect,) = write.effects
+    assert effect.before == Decimal(3)
+    assert effect.after is None  # zero drops out of the fold entirely
+
+
+def test_an_auto_registering_write_projects_without_its_config_record(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    """`decide_change` returns a config write alongside the log record when it
+    auto-registers an unknown product; only the log record carries a delta the
+    fold can interpret."""
+    _seed_pantry_with_jam(data_dir, key, osuser)
+    agent, _fake = _make_agent([], data_dir, key)
+
+    agent.tool_callbacks["sumac_discover_inventory"](
+        "sumac_discover_inventory",
+        {"product_id": "chutney", "amount": "2", "unit": "jar", "to_location": "pantry"},
+    )
+
+    (write,) = agent._pending
+    assert [(e.location_id, e.before, e.after) for e in write.effects] == [
+        ("pantry", None, Decimal(2))
+    ]
+
+
+# --- the shared backend ------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _release_shared_runner() -> Iterator[None]:
+    """No cached backend persists between tests: one holding a fake would be
+    handed to whatever constructed an `AgentRunner` next."""
+    llm.release_shared_runner()
+    yield
+    llm.release_shared_runner()
+
+
+def _count_builds(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Records which model a backend is built for, without building one."""
+    built: list[str] = []
+
+    def fake_build(model: llm.ModelPreset, *, seed: int | None = None) -> object:
+        built.append(model.name)
+        return FakeRunner([])
+
+    monkeypatch.setattr(llm, "_build_runner", fake_build)
+    return built
+
+
+def test_a_second_agent_reuses_the_loaded_model(
+    data_dir: Path, key: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`sumac ask --loop` constructs one `AgentRunner` per request, each a
+    separate conversation; without reuse each also reloaded the GGUF."""
+    built = _count_builds(monkeypatch)
+
+    llm.AgentRunner(data_dir, key)
+    llm.AgentRunner(data_dir, key)
+
+    assert built == [llm.DEFAULT_MODEL_PRESET.name]
+
+
+def test_switching_model_loads_the_other_one(
+    data_dir: Path, key: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built = _count_builds(monkeypatch)
+    other = llm.MODEL_PRESETS[1]
+
+    llm.AgentRunner(data_dir, key)
+    llm.AgentRunner(data_dir, key, model=other)
+    llm.AgentRunner(data_dir, key, model=other)
+
+    assert built == [llm.DEFAULT_MODEL_PRESET.name, other.name]
+
+
+def test_only_one_backend_is_held_at_a_time(
+    data_dir: Path, key: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two GGUFs resident at once can exhaust a GPU that fits either alone,
+    so switching back reloads rather than finding the first still cached."""
+    built = _count_builds(monkeypatch)
+    other = llm.MODEL_PRESETS[1]
+
+    llm.AgentRunner(data_dir, key)
+    llm.AgentRunner(data_dir, key, model=other)
+    llm.AgentRunner(data_dir, key)
+
+    assert built == [llm.DEFAULT_MODEL_PRESET.name, other.name, llm.DEFAULT_MODEL_PRESET.name]
+
+
+def test_a_different_seed_is_a_different_backend(
+    data_dir: Path, key: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_build_runner` seeds the whole `mistralrs.Runner`, so a backend built
+    for one seed is not interchangeable with one built for another."""
+    built = _count_builds(monkeypatch)
+
+    llm.AgentRunner(data_dir, key, seed=1)
+    llm.AgentRunner(data_dir, key, seed=1)
+    llm.AgentRunner(data_dir, key, seed=2)
+
+    assert len(built) == 2
+
+
+def test_an_injected_backend_never_builds_or_caches(
+    data_dir: Path, key: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`evals/conftest.py` builds exactly one backend per run and injects it
+    into every scenario's agent; that path must not consult or populate this
+    module's cache."""
+    built = _count_builds(monkeypatch)
+    injected = FakeRunner([])
+
+    agent = llm.AgentRunner(data_dir, key, runner=injected)
+
+    assert agent._runner is injected
+    assert built == []
+    assert llm._SHARED_RUNNER is None
+
+
+def test_a_display_path_endpoint_is_recorded_as_its_location_id(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    """`decide.resolve_location` accepts a display path as well as an id, so
+    a write naming one is valid and commits correctly. Keeping the raw string
+    on the `ProposedWrite` made every lookup downstream fail: the preview
+    showed no before/after (`— → —`), and `review` reported a configured
+    location as new."""
+    _seed_pantry_with_jam(data_dir, key, osuser)
+    config.add_location(data_dir, key, osuser, Location(id="fridge", name="Fridge"))
+    config.add_location(
+        data_dir, key, osuser, Location(id="fridge-top", name="Top Shelf", parent_id="fridge")
+    )
+    agent, _fake = _make_agent([], data_dir, key)
+
+    agent.tool_callbacks["sumac_discover_inventory"](
+        "sumac_discover_inventory",
+        {
+            "product_id": "Ham",
+            "amount": "1",
+            "unit": "packet",
+            "to_location": "Fridge > Top Shelf",
+        },
+    )
+
+    (write,) = agent._pending
+    assert write.to_location == "fridge-top"
+    assert [(e.location_id, e.before, e.after) for e in write.effects] == [
+        ("fridge-top", None, Decimal(1))
+    ]
+
+
+def test_a_display_path_endpoint_is_not_reported_as_a_new_location(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    from sumac import review
+
+    _seed_pantry_with_jam(data_dir, key, osuser)
+    config.add_location(data_dir, key, osuser, Location(id="fridge", name="Fridge"))
+    agent, _fake = _make_agent([], data_dir, key)
+
+    agent.tool_callbacks["sumac_discover_inventory"](
+        "sumac_discover_inventory",
+        {"product_id": "jam", "amount": "1", "unit": "jar", "to_location": "Fridge"},
+    )
+
+    (write,) = agent._pending
+    cfg = config.build_config(data_dir, key)
+    assert "unknown-location" not in [f.code for f in review.review_write(write, cfg, "")]
+
+
+def test_the_same_write_named_two_ways_is_only_proposed_once(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    """Resolving before recording also lets the duplicate guard match a
+    second call naming the same location by its display path."""
+    _seed_pantry_with_jam(data_dir, key, osuser)
+    config.add_location(data_dir, key, osuser, Location(id="fridge", name="Fridge"))
+    agent, _fake = _make_agent([], data_dir, key)
+
+    for endpoint in ("fridge", "Fridge"):
+        result = json.loads(
+            agent.tool_callbacks["sumac_discover_inventory"](
+                "sumac_discover_inventory",
+                {"product_id": "jam", "amount": "1", "unit": "jar", "to_location": endpoint},
+            )
+        )
+
+    assert result["status"] == "already_proposed"
+    assert len(agent._pending) == 1
+
+
+# --- finding a location, not just a product ----------------------------
+
+
+def _seed_fridge_layout(data_dir: Path, key: bytes, osuser: str) -> None:
+    for loc_id, name, parent in (
+        ("fridge", "Fridge", None),
+        ("fridge-main", "Main Shelves", "fridge"),
+        ("fridge-main-shelf-1", "Shelf 1", "fridge-main"),
+        ("pantry", "Pantry", None),
+    ):
+        config.add_location(data_dir, key, osuser, Location(id=loc_id, name=name, parent_id=parent))
+
+
+def test_searching_a_place_returns_locations_not_only_products(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    """A real run searched "fridge" seventeen times and received nothing each
+    time: `ledger.search_inventory` matches products, and no product has that
+    name. With no route to a location id, the model used one it had seen in an
+    unrelated result."""
+    _seed_fridge_layout(data_dir, key, osuser)
+    agent, _fake = _make_agent([], data_dir, key)
+
+    result = json.loads(
+        agent.tool_callbacks["sumac_find_inventory"]("sumac_find_inventory", {"query": "fridge"})
+    )
+
+    assert result["products"] == []
+    assert [loc["location_id"] for loc in result["locations"]] == [
+        "fridge",
+        "fridge-main",
+        "fridge-main-shelf-1",
+    ]
+    assert result["location_match_count"] == 3
+
+
+def test_a_location_search_matches_the_path_not_only_the_name(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    """ "Shelf 1" is named without reference to the fridge; only its path
+    records where it is, so a query for the container must match the path."""
+    _seed_fridge_layout(data_dir, key, osuser)
+    agent, _fake = _make_agent([], data_dir, key)
+
+    result = json.loads(
+        agent.tool_callbacks["sumac_find_inventory"]("sumac_find_inventory", {"query": "fridge"})
+    )
+
+    assert "fridge-main-shelf-1" in [loc["location_id"] for loc in result["locations"]]
+
+
+def test_a_repeated_search_comes_back_labelled_as_one(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    _seed_pantry_with_jam(data_dir, key, osuser)
+    agent, _fake = _make_agent([], data_dir, key)
+    call = agent.tool_callbacks["sumac_find_inventory"]
+
+    first = json.loads(call("sumac_find_inventory", {"query": "jam"}))
+    second = json.loads(call("sumac_find_inventory", {"query": "jam"}))
+
+    assert "repeated_query" not in first
+    assert second["repeated_query"] is True
+    assert second["products"] == first["products"]
+
+
+def test_a_repeat_is_scoped_to_one_propose_call(data_dir: Path, key: bytes, osuser: str) -> None:
+    """`propose` clears it alongside the trace, so the same question asked
+    about a later request is a fresh one."""
+    _seed_pantry_with_jam(data_dir, key, osuser)
+    agent, _fake = _make_agent([ScriptedResponse(content="done")], data_dir, key)
+    agent.tool_callbacks["sumac_find_inventory"]("sumac_find_inventory", {"query": "jam"})
+
+    agent.propose("where is the jam?")
+    result = json.loads(
+        agent.tool_callbacks["sumac_find_inventory"]("sumac_find_inventory", {"query": "jam"})
+    )
+
+    assert "repeated_query" not in result
+
+
+def test_an_unknown_location_rejection_names_real_candidates(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    """`decide`'s own `suggestions` are `near_matches` over ids, which a
+    phrase does not score against, so the rejection previously carried no
+    candidates."""
+    _seed_fridge_layout(data_dir, key, osuser)
+    agent, _fake = _make_agent([], data_dir, key)
+
+    result = json.loads(
+        agent.tool_callbacks["sumac_discover_inventory"](
+            "sumac_discover_inventory",
+            {
+                "product_id": "Ham",
+                "amount": "1",
+                "unit": "packet",
+                "to_location": "top shelf of the fridge",
+            },
+        )
+    )
+
+    assert result["reason"] == "unknown_location"
+    assert result["detail"]["suggestions"] == "[]"
+    assert [c["location_id"] for c in result["detail"]["known_locations"]] == [
+        "fridge",
+        "fridge-main",
+        "fridge-main-shelf-1",
+    ]
+
+
+def test_candidates_fall_back_to_the_whole_layout_when_nothing_shares_a_word(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    """The rejection names some valid locations even when none shares a word
+    with the requested value."""
+    _seed_fridge_layout(data_dir, key, osuser)
+    agent, _fake = _make_agent([], data_dir, key)
+
+    result = json.loads(
+        agent.tool_callbacks["sumac_discover_inventory"](
+            "sumac_discover_inventory",
+            {"product_id": "Ham", "amount": "1", "unit": "packet", "to_location": "garage"},
+        )
+    )
+
+    assert [c["location_id"] for c in result["detail"]["known_locations"]] == [
+        "fridge",
+        "fridge-main",
+        "fridge-main-shelf-1",
+        "pantry",
+    ]

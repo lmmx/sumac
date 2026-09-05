@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+from collections import Counter
+from dataclasses import dataclass
 from dataclasses import replace as dataclass_replace
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -23,8 +26,10 @@ from sumac import (
     ledger,
     models,
     paths,
+    prompt_ui,
     queue,
     render,
+    review,
     store,
 )
 from sumac import vault as sumac_vault
@@ -37,7 +42,7 @@ from sumac.errors import (
 )
 
 if TYPE_CHECKING:
-    from sumac.llm import AgentPlan, ModelPreset
+    from sumac.llm import AgentPlan, ModelPreset, ProposedWrite
 from sumac.models import ChangeKind
 from sumac.passphrase import get_key, resolve_passphrase
 
@@ -65,11 +70,34 @@ def _key(data_dir: Path) -> bytes:
     return get_key(_load_vault(data_dir))
 
 
-def _import_llm():  # noqa: ANN202
+# mistral.rs logs through Rust's `tracing` with an `EnvFilter` built from
+# `RUST_LOG` (confirmed against the built extension: it carries the `RUST_LOG`
+# string and `tracing_subscriber::filter::env` symbols from `mistralrs_core`).
+# Every line it prints on a successful load — the DType, the tokenizer, the
+# device map, the version, and the entire GGUF chat template verbatim — is
+# INFO, so `warn` suppresses all of it and still reports warnings and errors.
+QUIET_RUST_LOG = "warn"
+VERBOSE_RUST_LOG = "info"
+
+
+def _set_rust_log(verbose: bool) -> None:
+    """Sets how much mistral.rs itself prints. Must run before the extension
+    module is first imported, since the filter is built once when the Rust
+    side installs its subscriber; hence its position next to the lazy import
+    rather than where the flag is parsed.
+
+    A `RUST_LOG` already in the environment is not overridden, so a
+    per-target filter finer than either value here keeps working."""
+    if "RUST_LOG" not in os.environ:
+        os.environ["RUST_LOG"] = VERBOSE_RUST_LOG if verbose else QUIET_RUST_LOG
+
+
+def _import_llm(*, verbose: bool = False):  # noqa: ANN202
     """`sumac.llm` imports `mistralrs` at module scope, which is an optional
     dependency (the `ask`/`ask-cuda` groups) — every command that touches
     model presets imports it here, lazily, instead of at the top of this
     module, so the rest of the CLI works without it installed."""
+    _set_rust_log(verbose)
     try:
         from sumac import llm
     except ImportError as e:
@@ -431,9 +459,20 @@ def ask(
         bool,
         typer.Option("--dry-run", help="Compute and show the plan; write nothing."),
     ] = False,
+    trace: Annotated[
+        bool,
+        typer.Option("--trace", help="Show each tool call's full arguments and raw result."),
+    ] = False,
+    stats: Annotated[
+        bool,
+        typer.Option("--stats", help="Show per-round token counts and generation speed."),
+    ] = False,
     debug: Annotated[
         bool,
-        typer.Option("--debug", help="Show raw agent request/response diagnostics."),
+        typer.Option(
+            "--debug",
+            help="Show raw agent request/response diagnostics, and mistral.rs's own load logs.",
+        ),
     ] = False,
     data_dir: DataDirOption = Path("data"),
 ) -> None:
@@ -459,29 +498,141 @@ def ask(
     pending and "retry N" revisits one.
     """
     key = _key(data_dir)
-    llm = _import_llm()
+    llm = _import_llm(verbose=debug)
+    view = _AskView(trace=trace, stats=stats, debug=debug)
 
     if prompt is None or loop:
-        _ask_loop(data_dir, key, llm, first_prompt=prompt, dry_run=dry_run, debug=debug)
+        _ask_loop(data_dir, key, llm, first_prompt=prompt, dry_run=dry_run, view=view)
         return
 
-    _ask_one(data_dir, key, llm, prompt, dry_run=dry_run, debug=debug)
+    _ask_one(data_dir, key, llm, prompt, dry_run=dry_run, view=view)
 
 
-def _decision_options(dry_run: bool, *, defer: bool = False) -> list[tuple[str, str]]:
+def _decision_options(
+    dry_run: bool, *, defer: bool = False, pick: bool = False
+) -> list[prompt_ui.Option]:
+    """The responses available to a plan decision. Every option's `key` is
+    both what a typed answer must equal and the keystroke that chooses it in
+    `prompt_ui.select`'s menu, so the two input paths cannot diverge.
+
+    `pick` adds per-write selection, and is passed only for a plan with more
+    than one write on an interactive terminal: it has no effect on a single
+    write, and `prompt_ui.multiselect` has no line-typed equivalent for a pipe
+    or a test."""
     options = [
-        ("a", "Accept" + (" — nothing will actually be written (--dry-run)" if dry_run else "")),
-        ("r", 'Reject (or "quit"/"exit") — discard this proposal'),
-        ("e", "Edit — manually correct a field, no model call"),
+        prompt_ui.Option(
+            "a", "Accept" + (" — nothing will actually be written (--dry-run)" if dry_run else "")
+        ),
+        prompt_ui.Option("r", 'Reject (or "quit"/"exit") — discard this proposal'),
+        prompt_ui.Option("e", "Edit — manually correct a field, no model call"),
     ]
+    if pick:
+        options.append(prompt_ui.Option("p", "Pick — apply only some of these changes"))
     if defer:
-        options.append(("d", "Defer — queue this for later, ask something else now"))
+        options.append(
+            prompt_ui.Option("d", "Defer — queue this for later, ask something else now")
+        )
     options += [
-        ("g", "Regenerate — same request, a different model, no memory of this attempt"),
-        ("s", "Start over — reword the request, same model, no memory of this attempt"),
-        ("(anything else)", "Feedback — the model revises this same plan with your note"),
+        prompt_ui.Option(
+            "g", "Regenerate — same request, a different model, no memory of this attempt"
+        ),
+        prompt_ui.Option(
+            "s", "Start over — reword the request, same model, no memory of this attempt"
+        ),
+        prompt_ui.Option(
+            "(anything else)",
+            "Feedback — the model revises this same plan with your note",
+            prompt_for_text=True,
+        ),
     ]
     return options
+
+
+@dataclass(frozen=True, slots=True)
+class _AskView:
+    """Which diagnostics accompany a plan, plus the one setting threaded into
+    the agent itself.
+
+    All three default to off. `render.print_trace` and `_print_usage`
+    previously printed unconditionally, putting a table of raw tool-call JSON
+    and a line per round above the plan being approved. Both are still
+    available behind a flag, and the trace still prints a one-line summary
+    per call with no flag; only the default changed."""
+
+    trace: bool = False
+    stats: bool = False
+    debug: bool = False
+
+
+def _show(data_dir: Path, key: bytes, plan: AgentPlan, *, view: _AskView) -> None:
+    """The preview: what the agent looked up, then what it proposes, with
+    `review`'s deterministic findings attached. `config.build_config` is read
+    here rather than passed in because a feedback or regenerate round can
+    occur between two calls, and the second should describe the vault's
+    current state rather than its state when the request started."""
+    render.print_trace(plan.trace, verbose=view.trace)
+    if not plan.writes:
+        return
+    cfg = config.build_config(data_dir, key)
+    findings = review.review_plan(plan, cfg)
+    render.print_plan(
+        plan,
+        findings=findings,
+        locations=cfg.known_locations,
+        header=review.headline(findings),
+    )
+
+
+def _pick_writes(data_dir: Path, key: bytes, plan: AgentPlan) -> AgentPlan | None:
+    """A plan narrowed to the writes left checked, or `None` if the person
+    cancelled or unchecked everything. Does not commit what was picked: the
+    narrowed plan goes back through the same preview and accept prompt, so
+    the subset is displayed before it is written rather than applied directly
+    from the checklist."""
+    locations = ledger.load_locations_or_empty(data_dir, key)
+    labels = [prompt_ui.Choice(render.write_summary(w, locations)) for w in plan.writes]
+    picked = prompt_ui.multiselect(labels, title="Apply which changes?")
+    if not picked:
+        render.console.print("[dim](nothing picked — the plan is unchanged)[/dim]")
+        return None
+    return dataclass_replace(
+        plan,
+        writes=tuple(plan.writes[i] for i in picked),
+        # As in `_apply_edit`: the model's reply describes every change it
+        # proposed, which is no longer what this plan contains.
+        reply_text="",
+        trace=(),
+    )
+
+
+def _build_agent(llm, data_dir: Path, key: bytes, *, model: ModelPreset, view: _AskView):  # noqa: ANN202
+    """Every `AgentRunner` this module constructs, in one place. Four call
+    sites across the two decision loops previously had to be updated together
+    whenever the constructor gained an argument (`debug` in §43, `show_usage`
+    here), and two of them are inside `except` branches where a missing
+    argument is only reported on a retry."""
+    return llm.AgentRunner(
+        data_dir,
+        key,
+        model=model,
+        debug=view.debug,
+        # `--debug` implies `--stats`: it is the strictly-more-verbose flag,
+        # and a session that asked for the raw per-round request/response
+        # dumps wanting *fewer* numbers than the default is not a real case.
+        show_usage=view.stats or view.debug,
+    )
+
+
+def _decide_prompt(plan: AgentPlan, *, dry_run: bool, defer: bool) -> str:
+    """One decision, read from the arrow-key menu on a terminal and from the
+    printed option table plus a typed line everywhere else. `prompt_ui.select`
+    chooses between them and returns the same strings for both."""
+    options = _decision_options(
+        dry_run,
+        defer=defer,
+        pick=len(plan.writes) > 1 and prompt_ui.interactive(),
+    )
+    return prompt_ui.select(options, default="a").strip()
 
 
 def _print_dry_run_preview(plan: AgentPlan) -> None:
@@ -517,84 +668,381 @@ def _prompt_start_over(current_prompt: str) -> str:
     return typer.prompt("Prompt", default=current_prompt)
 
 
-def _prompt_edit(data_dir: Path, key: bytes, plan: AgentPlan) -> AgentPlan:
-    """Manually corrects one proposed write's fields directly — no model
-    call at all, and the fastest fix for something the model got mostly
-    right (a mistyped product name it had spelled correctly moments
-    earlier in a tool result, a location one digit off). Re-validated
-    through the same `decide_change` gate every model-proposed write
-    already goes through, so a typo in the correction itself can't reach
-    `commit` unchecked — "regenerate"/"start over" are the tools for a
-    model reasoning past correcting, this is only for its typing."""
-    writes = list(plan.writes)
-    if len(writes) > 1:
-        for i, w in enumerate(writes):
-            render.console.print(
-                f"  [{i}] {w.kind.value} {w.amount} {w.unit} {w.product_id} "
-                f"(from {w.from_location} to {w.to_location})"
-            )
+# (key, column label, `ProposedWrite` field) for every field `e` can change.
+# The endpoint rows are dropped for a write that has no such endpoint:
+# `decide_change` rejects a purchase carrying a `from_location`, so filling
+# one in would produce a rejection.
+_EDIT_FIELDS = (
+    ("p", "product", "product_id"),
+    ("u", "unit", "unit"),
+    ("n", "amount", "amount"),
+    ("f", "from", "from_location"),
+    ("t", "to", "to_location"),
+)
+
+
+def _editable_fields(write: ProposedWrite) -> list[tuple[str, str, str]]:
+    return [
+        row
+        for row in _EDIT_FIELDS
+        if row[2] not in ("from_location", "to_location") or getattr(write, row[2]) is not None
+    ]
+
+
+def _choose_write_to_edit(plan: AgentPlan, locations: dict[str, models.Location]) -> int | None:
+    """Which write `e` acts on. A single write is selected without asking;
+    more than one gets the same menu every other decision in this command
+    uses, or the numbered list plus a typed index off a terminal."""
+    if len(plan.writes) == 1:
+        return 0
+
+    if not prompt_ui.interactive():
+        for i, w in enumerate(plan.writes):
+            render.console.print(f"  [{i}] {render.write_summary(w, locations)}")
         try:
             index = int(typer.prompt("Edit which one? (number)", default="0"))
-            w = writes[index]
-        except (ValueError, IndexError):
+        except ValueError:
+            index = -1
+        if not 0 <= index < len(plan.writes):
             render.print_error("Not a valid index — nothing edited.")
-            return plan
-    else:
-        index, w = 0, writes[0]
+            return None
+        return index
 
-    product_id = typer.prompt("product_id", default=w.product_id)
-    unit = typer.prompt("unit", default=w.unit)
-    amount_text = typer.prompt("amount", default=str(w.amount))
-    from_location = w.from_location
-    if from_location is not None:
-        from_location = typer.prompt("from_location", default=from_location)
-    to_location = w.to_location
-    if to_location is not None:
-        to_location = typer.prompt("to_location", default=to_location)
+    options = [
+        prompt_ui.Option(str(i), render.write_summary(w, locations))
+        for i, w in enumerate(plan.writes)
+    ]
+    options.append(prompt_ui.Option("c", "Cancel — edit nothing"))
+    answer = prompt_ui.select(options, default="0", title="Edit which change?")
+    return int(answer) if answer.isdigit() else None
 
+
+def _location_rows(locations: dict[str, models.Location]) -> list[prompt_ui.Row]:
+    """Every active location, ordered as `config show --locations-only`
+    orders them: by display path, so a container and everything nested under
+    it stay together. Typing filters on both the path and the id."""
+    rows = [
+        prompt_ui.Row(
+            value=loc.id,
+            label=f"{config.location_path(locations, loc.id)}  ({loc.id})",
+            search=f"{config.location_path(locations, loc.id)} {loc.id}",
+        )
+        for loc in locations.values()
+        if not loc.retired
+    ]
+    return sorted(rows, key=lambda row: row.label)
+
+
+def _unit_rows(
+    observed: dict[str, Counter[str]], cfg: config.Config, product_id: str
+) -> list[prompt_ui.Row]:
+    """Every unit this vault has recorded, the ones already used for
+    `product_id` first, then the rest by how often they appear anywhere.
+
+    Frequency order rather than alphabetical: units are reused far more often
+    than new ones are introduced, so the few a household uses ("jar", "tin",
+    "packet") should be reachable without typing. The product's own units come
+    first because a write in one of them converts; `decide._resolve_product`
+    records a write in any other unit as a separately-tracked quantity with a
+    warning."""
+    totals: Counter[str] = Counter()
+    for units in observed.values():
+        totals.update(units)
+    for product in cfg.known_products.values():
+        totals.setdefault(product.unit, 0)
+        for alt in product.conversions:
+            totals.setdefault(alt, 0)
+
+    for_product = set(observed.get(product_id, ()))
+    product = cfg.known_products.get(product_id)
+    if product is not None:
+        for_product.add(product.unit)
+        for_product.update(product.conversions)
+
+    def note(unit: str) -> str:
+        if unit in for_product:
+            return f"already used for {product_id}"
+        return f"{totals[unit]} use{'' if totals[unit] == 1 else 's'}"
+
+    return [
+        prompt_ui.Row(value=unit, label=f"{unit}  ({note(unit)})", search=unit)
+        for unit in sorted(totals, key=lambda u: (u not in for_product, -totals[u], u))
+    ]
+
+
+def _product_rows(cfg: config.Config) -> list[prompt_ui.Row]:
+    """Every registered, unretired product with the unit it is tracked in.
+    The unit is shown because it determines whether a subsequent write
+    converts or is recorded separately."""
+    return [
+        prompt_ui.Row(
+            value=product.id,
+            label=f"{product.id}  ({product.unit})",
+            search=f"{product.id} {product.name} {product.unit}",
+        )
+        for product in sorted(cfg.active_products.values(), key=lambda p: p.id.lower())
+    ]
+
+
+def _choose_location(
+    locations: dict[str, models.Location], field: str, current: str | None
+) -> str | None:
+    """A location picked from the layout rather than typed. Locations are a
+    closed set: `decide.resolve_location` rejects one that is not configured,
+    and unlike a product there is no auto-registration. Picking from the list
+    is therefore both possible and sufficient to guarantee the value resolves.
+    `None` when cancelled or when there is no terminal, which leaves the field
+    unchanged."""
+    rows = _location_rows(locations)
+    if not rows:
+        render.print_error("No locations configured — nothing to pick from.")
+        return None
+    return prompt_ui.pick(rows, title=f"Which location for {field}?", current=current)
+
+
+def _choose_from_rows(
+    rows: list[prompt_ui.Row], *, title: str, current: str | None, new_hint: str
+) -> str | None:
+    """A picker that also accepts a value not on the list. Unlike a location,
+    a product or a unit may legitimately be new: `decide` registers a product
+    on first use, and records an unconvertible unit as its own tracked
+    quantity. The list saves retyping a known value; it does not restrict the
+    field to known values."""
+    return prompt_ui.pick(rows, title=title, current=current, allow_new=True, new_hint=new_hint)
+
+
+def _edit_fields_by_menu(
+    data_dir: Path,
+    key: bytes,
+    write: ProposedWrite,
+    locations: dict[str, models.Location],
+    resume: dict[str, str | None] | None = None,
+) -> dict[str, str | None] | None:
+    """Pick a field, change that one, repeat until done, rather than walking
+    every field in order and pressing Enter through the ones already correct.
+    Each row shows the field's current value, so the menu also shows what has
+    been changed so far.
+
+    Returns the edited values, or `None` if cancelled. Nothing is validated or
+    applied here; `_apply_edit` does both, once."""
+    fields = _editable_fields(write)
+    # Seeded from every field, not just the editable ones: an endpoint this
+    # write does not have must reach `_apply_edit` as `None` rather than be
+    # absent, since `decide_change` distinguishes the two.
+    values: dict[str, str | None] = (
+        dict(resume)
+        if resume is not None
+        else {
+            "product_id": write.product_id,
+            "unit": write.unit,
+            "amount": str(write.amount),
+            "from_location": write.from_location,
+            "to_location": write.to_location,
+        }
+    )
+
+    while True:
+        options = [
+            prompt_ui.Option(key, f"{label:8s} {values[field]}") for key, label, field in fields
+        ]
+        options.append(prompt_ui.Option("d", "Done — re-check this change"))
+        options.append(prompt_ui.Option("c", "Cancel — discard these edits"))
+        answer = prompt_ui.select(
+            options,
+            default=fields[0][0],
+            title=f"Editing: {render.write_summary(write, locations)}",
+        )
+        if answer == "d":
+            return values
+        # `prompt_ui.select` answers "r" for Escape. Here that means cancel
+        # the edit, not reject the plan: the caller returns the plan unchanged
+        # and asks for a decision on it again.
+        if answer in ("c", "r"):
+            return None
+        match = next((row for row in fields if row[0] == answer), None)
+        if match is None:
+            continue
+        _key, label, field = match
+        picked: str | None
+        if field in ("from_location", "to_location"):
+            picked = _choose_location(locations, label, values[field])
+        elif field == "product_id":
+            picked = _choose_from_rows(
+                _product_rows(config.build_config(data_dir, key)),
+                title="Which product?",
+                current=values["product_id"],
+                new_hint="new product",
+            )
+        elif field == "unit":
+            picked = _choose_from_rows(
+                _unit_rows(
+                    ledger.observed_product_units(data_dir, key),
+                    config.build_config(data_dir, key),
+                    values["product_id"] or "",
+                ),
+                title="Which unit?",
+                current=values["unit"],
+                new_hint="new unit",
+            )
+        else:
+            # A number, so neither a list to choose from nor free text: the
+            # previous free-text field accepted "three" and reported it
+            # invalid several keystrokes later, while the edit was being
+            # applied.
+            picked = prompt_ui.number(values["amount"] or "", title="Amount?")
+        if picked is not None:
+            values[field] = picked
+
+
+def _edit_fields_by_walkthrough(write: ProposedWrite) -> dict[str, str | None]:
+    """Every field in order, each defaulting to its current value. The only
+    form a piped or scripted answer can take, and unchanged from what `e` has
+    always read."""
+    values: dict[str, str | None] = {
+        "product_id": typer.prompt("product_id", default=write.product_id),
+        "unit": typer.prompt("unit", default=write.unit),
+        "amount": typer.prompt("amount", default=str(write.amount)),
+        "from_location": write.from_location,
+        "to_location": write.to_location,
+    }
+    if write.from_location is not None:
+        values["from_location"] = typer.prompt("from_location", default=write.from_location)
+    if write.to_location is not None:
+        values["to_location"] = typer.prompt("to_location", default=write.to_location)
+    return values
+
+
+def _apply_edit(
+    data_dir: Path,
+    key: bytes,
+    plan: AgentPlan,
+    index: int,
+    values: dict[str, str | None],
+) -> AgentPlan | None:
+    """The plan with the edited write in place, or `None` if `decide_change`
+    rejected it. Re-validated through the same gate every model-proposed
+    write passes, so a mistake in the correction cannot reach `commit`
+    unchecked. `None` rather than the unchanged plan lets the caller offer
+    the menu again with the edits retained, rather than discarding four
+    correct fields because a fifth was wrong."""
+    from sumac import llm  # local: only reachable from `ask`, which already imported it
+
+    write = plan.writes[index]
     try:
-        amount = Decimal(amount_text)
+        amount = Decimal(values["amount"] or "")
     except InvalidOperation:
-        render.print_error(f"Not a valid amount: {amount_text!r} — nothing edited.")
-        return plan
+        render.print_error(f"Not a valid amount: {values['amount']!r}")
+        return None
 
+    edited = dataclass_replace(
+        write,
+        product_id=values["product_id"] or "",
+        amount=amount,
+        unit=values["unit"] or "",
+        from_location=values["from_location"],
+        to_location=values["to_location"],
+    )
+    inventory = ledger.build_inventory(data_dir, key)
+    cfg = config.build_config(data_dir, key)
     try:
-        _writes, messages = decide.decide_change(
-            kind=w.kind,
-            product_id=product_id,
-            amount=amount,
-            unit=unit,
-            from_location=from_location,
-            to_location=to_location,
+        decided, messages = decide.decide_change(
+            kind=edited.kind,
+            product_id=edited.product_id,
+            amount=edited.amount,
+            unit=edited.unit,
+            from_location=edited.from_location,
+            to_location=edited.to_location,
             actor=paths.current_user(),
             occurred_at=datetime.now(UTC),
-            inventory=ledger.build_inventory(data_dir, key),
-            cfg=config.build_config(data_dir, key),
+            inventory=inventory,
+            cfg=cfg,
         )
     except Rejected as e:
         render.print_error(f"Edit rejected: {e}")
-        return plan
+        return None
 
+    # The endpoints `decide` just resolved, for the same reason
+    # `_propose_write` records those rather than what it was passed: a display
+    # path resolves, and every lookup downstream is by id.
+    edited = dataclass_replace(
+        edited,
+        from_location=decide.resolve_location(edited.from_location, "from", cfg),
+        to_location=decide.resolve_location(edited.to_location, "to", cfg),
+    )
+    writes = list(plan.writes)
     writes[index] = dataclass_replace(
-        w,
-        product_id=product_id,
-        amount=amount,
-        unit=unit,
-        from_location=from_location,
-        to_location=to_location,
+        edited,
         warnings=tuple(messages),
+        # Recomputed rather than carried over or dropped: the projection
+        # described the write the model proposed, and this is a different
+        # write, but the records `decide` just returned for it give the same
+        # projection.
+        effects=llm.effects(
+            inventory,
+            cfg,
+            decided,
+            edited.product_id,
+            edited.unit,
+            edited.from_location,
+            edited.to_location,
+        ),
+        edited_fields=frozenset(
+            field
+            for field in ("product_id", "unit", "amount", "from_location", "to_location")
+            if getattr(edited, field) != getattr(write, field)
+        )
+        | write.edited_fields,
     )
     render.print_success("Edit applied — nothing written yet, decide again below.")
-    return dataclass_replace(plan, writes=tuple(writes))
+    # The reply and the trace describe what the model proposed, which this
+    # plan no longer is: the reply describes the write that was just replaced,
+    # and reprinting the trace on the next pass suggests the agent ran again.
+    # Both remain in the transcript above, where they describe the state at
+    # the time they were printed.
+    return dataclass_replace(plan, writes=tuple(writes), reply_text="", trace=())
 
 
-def _ask_one(data_dir: Path, key: bytes, llm, prompt: str, *, dry_run: bool, debug: bool) -> None:
+def _prompt_edit(data_dir: Path, key: bytes, plan: AgentPlan) -> AgentPlan:
+    """Corrects one proposed write's fields directly, with no model call.
+    Suited to a write that is mostly correct: a mistyped product name the
+    model spelled correctly in an earlier tool result, or a location one
+    character off. "Regenerate" and "start over" handle a model whose
+    reasoning was wrong; this handles a wrong value."""
+    locations = ledger.load_locations_or_empty(data_dir, key)
+    index = _choose_write_to_edit(plan, locations)
+    if index is None:
+        return plan
+    write = plan.writes[index]
+
+    if not prompt_ui.interactive():
+        # One pass, as `e` has always read off a terminal: a piped answer
+        # cannot react to a rejection, so re-prompting would consume the next
+        # scripted line as a field value or block on empty input.
+        values = _edit_fields_by_walkthrough(write)
+        return _apply_edit(data_dir, key, plan, index, values) or plan
+
+    resume: dict[str, str | None] | None = None
+    while True:
+        values = _edit_fields_by_menu(data_dir, key, write, locations, resume)
+        if values is None:
+            return plan
+        updated = _apply_edit(data_dir, key, plan, index, values)
+        if updated is not None:
+            return updated
+        # Rejected. Return to the menu with the typed values retained, so
+        # correcting it takes one field rather than all five again.
+        resume = values
+
+
+def _ask_one(
+    data_dir: Path, key: bytes, llm, prompt: str, *, dry_run: bool, view: _AskView
+) -> None:
     """The original one-shot flow: exits the process on error or once the
     single request is resolved, since there is nothing else this
     invocation would do afterward."""
     model = llm.DEFAULT_MODEL_PRESET
     try:
-        agent = llm.AgentRunner(data_dir, key, model=model, debug=debug)
+        agent = _build_agent(llm, data_dir, key, model=model, view=view)
         plan = agent.propose(prompt)
     except FileNotFoundError as e:
         render.print_error(str(e))
@@ -604,7 +1052,7 @@ def _ask_one(data_dir: Path, key: bytes, llm, prompt: str, *, dry_run: bool, deb
         raise typer.Exit(code=1) from e
 
     while True:
-        render.print_trace(plan.trace)
+        _show(data_dir, key, plan, view=view)
         if not plan.writes:
             if plan.reply_text:
                 render.console.print(plan.reply_text)
@@ -612,9 +1060,7 @@ def _ask_one(data_dir: Path, key: bytes, llm, prompt: str, *, dry_run: bool, deb
                 render.console.print("[dim](--dry-run: this request produced no writes)[/dim]")
             return
 
-        render.print_plan(plan)
-        render.print_decision_options(_decision_options(dry_run))
-        answer = typer.prompt("Choice", default="a").strip()
+        answer = _decide_prompt(plan, dry_run=dry_run, defer=False)
         choice = answer.lower()
         if choice in ("a", "accept"):
             if dry_run:
@@ -633,10 +1079,13 @@ def _ask_one(data_dir: Path, key: bytes, llm, prompt: str, *, dry_run: bool, deb
         if choice in ("e", "edit"):
             plan = _prompt_edit(data_dir, key, plan)
             continue
+        if choice in ("p", "pick"):
+            plan = _pick_writes(data_dir, key, plan) or plan
+            continue
         if choice in ("g", "generate", "regenerate"):
             model = _prompt_regenerate(llm, agent.model)
             try:
-                agent = llm.AgentRunner(data_dir, key, model=model, debug=debug)
+                agent = _build_agent(llm, data_dir, key, model=model, view=view)
                 plan = agent.propose(prompt)
             except Exception as e:
                 render.print_error(f"Agent error: {e}")
@@ -645,7 +1094,7 @@ def _ask_one(data_dir: Path, key: bytes, llm, prompt: str, *, dry_run: bool, deb
         if choice in ("s", "start", "start over"):
             prompt = _prompt_start_over(prompt)
             try:
-                agent = llm.AgentRunner(data_dir, key, model=model, debug=debug)
+                agent = _build_agent(llm, data_dir, key, model=model, view=view)
                 plan = agent.propose(prompt)
             except Exception as e:
                 render.print_error(f"Agent error: {e}")
@@ -660,7 +1109,7 @@ def _ask_one(data_dir: Path, key: bytes, llm, prompt: str, *, dry_run: bool, deb
 
 
 def _ask_loop(
-    data_dir: Path, key: bytes, llm, *, first_prompt: str | None, dry_run: bool, debug: bool
+    data_dir: Path, key: bytes, llm, *, first_prompt: str | None, dry_run: bool, view: _AskView
 ) -> None:
     """Repeatedly prompts for a new request rather than exiting after one.
     Unlike `_ask_one`, a failure here is caught and queued (queue.py)
@@ -674,7 +1123,7 @@ def _ask_loop(
         'one, or "quit" to exit.[/dim]'
     )
     if first_prompt is not None:
-        _ask_loop_request(data_dir, key, llm, first_prompt, dry_run=dry_run, debug=debug)
+        _ask_loop_request(data_dir, key, llm, first_prompt, dry_run=dry_run, view=view)
 
     while True:
         pending = queue.load(data_dir)
@@ -713,11 +1162,11 @@ def _ask_loop(
                 render.print_error(f"No queued request at index {index_text!r}.")
                 continue
             _ask_loop_request(
-                data_dir, key, llm, item.prompt, dry_run=dry_run, debug=debug, retrying=item
+                data_dir, key, llm, item.prompt, dry_run=dry_run, view=view, retrying=item
             )
             continue
 
-        _ask_loop_request(data_dir, key, llm, answer, dry_run=dry_run, debug=debug)
+        _ask_loop_request(data_dir, key, llm, answer, dry_run=dry_run, view=view)
 
 
 def _ask_loop_request(
@@ -727,7 +1176,7 @@ def _ask_loop_request(
     prompt: str,
     *,
     dry_run: bool,
-    debug: bool,
+    view: _AskView,
     retrying: queue.QueuedRequest | None = None,
 ) -> None:
     """One request within `_ask_loop`. `retrying` is the queue entry this
@@ -742,22 +1191,20 @@ def _ask_loop_request(
         queue.enqueue(data_dir, prompt, reason=f"error: {e}", attempts=next_attempts)
 
     try:
-        agent = llm.AgentRunner(data_dir, key, model=model, debug=debug)
+        agent = _build_agent(llm, data_dir, key, model=model, view=view)
         plan = agent.propose(prompt)
     except Exception as e:
         _fail(e)
         return
 
     while True:
-        render.print_trace(plan.trace)
+        _show(data_dir, key, plan, view=view)
         if not plan.writes:
             if plan.reply_text:
                 render.console.print(plan.reply_text)
             return
 
-        render.print_plan(plan)
-        render.print_decision_options(_decision_options(dry_run, defer=True))
-        answer = typer.prompt("Choice", default="a").strip()
+        answer = _decide_prompt(plan, dry_run=dry_run, defer=True)
         choice = answer.lower()
         if choice in ("a", "accept"):
             if dry_run:
@@ -775,6 +1222,9 @@ def _ask_loop_request(
         if choice in ("e", "edit"):
             plan = _prompt_edit(data_dir, key, plan)
             continue
+        if choice in ("p", "pick"):
+            plan = _pick_writes(data_dir, key, plan) or plan
+            continue
         # `prompt` and `model` are reassigned in these two branches, not
         # shadowed — `_fail` closes over the same names, so a later failure
         # or defer on this new attempt enqueues what it actually ran, not
@@ -782,7 +1232,7 @@ def _ask_loop_request(
         if choice in ("g", "generate", "regenerate"):
             model = _prompt_regenerate(llm, agent.model)
             try:
-                agent = llm.AgentRunner(data_dir, key, model=model, debug=debug)
+                agent = _build_agent(llm, data_dir, key, model=model, view=view)
                 plan = agent.propose(prompt)
             except Exception as e:
                 _fail(e)
@@ -791,7 +1241,7 @@ def _ask_loop_request(
         if choice in ("s", "start", "start over"):
             prompt = _prompt_start_over(prompt)
             try:
-                agent = llm.AgentRunner(data_dir, key, model=model, debug=debug)
+                agent = _build_agent(llm, data_dir, key, model=model, view=view)
                 plan = agent.propose(prompt)
             except Exception as e:
                 _fail(e)
@@ -838,7 +1288,9 @@ def models_pull(
     `sumac ask` relies on, without needing to run `sumac ask` once per
     model and pick it from the "g" regenerate prompt. Already-cached
     presets are skipped."""
-    llm = _import_llm()
+    # This command exists to perform a long model load, and mistral.rs's own
+    # progress output is the only indication of progress, so it is kept.
+    llm = _import_llm(verbose=True)
     targets = list(llm.MODEL_PRESETS)
     if names:
         try:
