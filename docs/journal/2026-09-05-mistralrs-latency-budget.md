@@ -43,13 +43,20 @@ Reproduce the split:
 
 ```python
 import json, glob
+
 pts = []
-for f in sorted(glob.glob('runs/epochs/verify-qwen3.5-4b-default-20/epoch-*.log.jsonl')):
+for f in sorted(glob.glob("runs/epochs/verify-qwen3.5-4b-default-20/epoch-*.log.jsonl")):
     for line in open(f):
-        s = json.loads(line); prev = 0
-        for i, u in enumerate(s['usage_history']):
-            new = u['prompt_tokens'] if (u['round'] == 0 or i == 1) else max(0, u['prompt_tokens'] - prev)
-            pts.append((u['completion_tokens'], new, u['total_time_sec'])); prev = u['prompt_tokens']
+        s = json.loads(line)
+        prev = 0
+        for i, u in enumerate(s["usage_history"]):
+            new = (
+                u["prompt_tokens"]
+                if (u["round"] == 0 or i == 1)
+                else max(0, u["prompt_tokens"] - prev)
+            )
+            pts.append((u["completion_tokens"], new, u["total_time_sec"]))
+            prev = u["prompt_tokens"]
 ```
 
 ### Prefill is already cheap because the prefix cache is being hit
