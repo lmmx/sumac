@@ -341,6 +341,16 @@ def scene_value_pickers() -> None:
     )
 
 
+def scene_amount() -> None:
+    """The amount field: numeric only, stepped with the arrow keys."""
+    hint = "↑/↓ adjust · digits to type · enter accept · esc cancel"
+    render.console.print(prompt_ui._number_view("1", "Amount?", hint, True))
+    render.console.print()
+    render.console.print(prompt_ui._number_view("2.5", "Amount?", hint, True))
+    render.console.print()
+    render.console.print(prompt_ui._number_view(".", "Amount?", hint, False))
+
+
 def _menu(options: list[prompt_ui.Option], cursor: int) -> None:
     """The arrow-key menu drawn at one cursor position."""
     render.console.print()
@@ -360,6 +370,7 @@ SCENES = {
     "edit": scene_edit,
     "location-picker": scene_location_picker,
     "value-pickers": scene_value_pickers,
+    "amount": scene_amount,
 }
 
 

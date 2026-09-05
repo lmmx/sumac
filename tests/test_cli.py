@@ -13,7 +13,7 @@ from sealedlog import Vault
 from sealedlog.errors import WrongPassphraseError
 from typer.testing import CliRunner
 
-from sumac import ledger, llm, models, paths, prompt_ui, queue, store
+from sumac import cli, ledger, llm, models, paths, prompt_ui, queue, store
 from sumac import vault as sumac_vault
 from sumac.cli import _decision_options, _editable_fields, _set_rust_log, app
 from sumac.config import Config
@@ -1207,12 +1207,15 @@ def test_ask_debug_implies_stats(data_dir: Path, monkeypatch: pytest.MonkeyPatch
 
 
 def _patch_menu(
-    monkeypatch: pytest.MonkeyPatch, selections: list[str], entries: list[str] | None = None
+    monkeypatch: pytest.MonkeyPatch,
+    selections: list[str],
+    entries: list[str] | None = None,
+    numbers: list[str] | None = None,
 ) -> None:
     """Drives the interactive path off a terminal: `prompt_ui.select` answers
     from `selections` in order (the decision prompt and the edit menus all go
-    through it), and `typer.prompt` from `entries` for the one field being
-    retyped."""
+    through it), `prompt_ui.number` from `numbers` for the amount field, and
+    `typer.prompt` from `entries` for anything still free-text."""
     import typer as typer_module
 
     monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
@@ -1220,6 +1223,8 @@ def _patch_menu(
     monkeypatch.setattr(prompt_ui, "select", lambda *a, **k: next(picks))
     typed = iter(entries or [])
     monkeypatch.setattr(typer_module, "prompt", lambda *a, **k: next(typed))
+    amounts = iter(numbers or [])
+    monkeypatch.setattr(prompt_ui, "number", lambda *a, **k: next(amounts))
 
 
 def test_ask_edit_menu_retypes_only_the_chosen_field(
@@ -1232,7 +1237,7 @@ def test_ask_edit_menu_retypes_only_the_chosen_field(
     _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
     _run(data_dir, "add", "purchase", "jam", "3", "jar", "--to", "pantry")
     _patch_agent_runner(monkeypatch, [_consumption_plan(amount="1")])
-    _patch_menu(monkeypatch, selections=["e", "n", "d", "a"], entries=["2"])
+    _patch_menu(monkeypatch, selections=["e", "n", "d", "a"], numbers=["2"])
 
     result = _run(data_dir, "ask", "consume 1 jar of jam")
 
@@ -1538,7 +1543,7 @@ def test_an_edit_drops_the_reply_that_described_the_old_plan(
     """The model narrated the write it proposed; after that write is
     replaced the sentence is no longer true of anything on screen."""
     _edit_scenario(data_dir, monkeypatch)
-    _patch_menu(monkeypatch, selections=["e", "n", "d", "r"], entries=["2"])
+    _patch_menu(monkeypatch, selections=["e", "n", "d", "r"], numbers=["2"])
 
     result = _run(data_dir, "ask", "consume 1 jar of jam")
 
@@ -1553,7 +1558,7 @@ def test_an_edit_does_not_reprint_the_trace(
 ) -> None:
     """Reprinting it on the next pass reads as though the agent ran again."""
     _edit_scenario(data_dir, monkeypatch)
-    _patch_menu(monkeypatch, selections=["e", "n", "d", "r"], entries=["2"])
+    _patch_menu(monkeypatch, selections=["e", "n", "d", "r"], numbers=["2"])
 
     result = _run(data_dir, "ask", "consume 1 jar of jam")
 
@@ -1567,7 +1572,7 @@ def test_an_edit_recomputes_the_before_and_after(
     """The projection belonged to the write the model proposed; the edited
     one is a different write and just as computable."""
     _edit_scenario(data_dir, monkeypatch)
-    _patch_menu(monkeypatch, selections=["e", "n", "d", "r"], entries=["2"])
+    _patch_menu(monkeypatch, selections=["e", "n", "d", "r"], numbers=["2"])
 
     result = _run(data_dir, "ask", "consume 1 jar of jam")
 
@@ -1590,3 +1595,54 @@ def test_a_product_typed_by_hand_is_not_reported_as_ungrounded(
     _before, after = result.output.split("Edit applied")
     assert "unverified" not in after
     assert "new product" in after
+
+
+def test_a_rejected_edit_returns_to_the_menu_with_the_edits_intact(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fifth field being wrong should not throw away four good ones. The
+    menu comes back holding what was typed, so the correction is one field
+    away rather than five fields again."""
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "add", "purchase", "jam", "3", "jar", "--to", "pantry")
+    _run(data_dir, "config", "add-product", "Gone", "ct", "--id", "gone")
+    _run(data_dir, "config", "retire-product", "gone")
+    _patch_agent_runner(monkeypatch, [_consumption_plan(amount="1")])
+    resumed: list[dict[str, str | None]] = []
+    real_menu = cli._edit_fields_by_menu
+
+    def spy_menu(data_dir, key, write, locations, resume=None):
+        if resume is not None:
+            resumed.append(dict(resume))
+        return real_menu(data_dir, key, write, locations, resume)
+
+    monkeypatch.setattr(cli, "_edit_fields_by_menu", spy_menu)
+    # First pass picks a retired product (rejected), second corrects it.
+    _patch_menu(monkeypatch, selections=["e", "p", "d", "p", "d", "a"])
+    picks = iter(["gone", "jam"])
+    monkeypatch.setattr(prompt_ui, "pick", lambda *a, **k: next(picks))
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam")
+
+    assert result.exit_code == 0, result.output
+    assert "Edit rejected" in result.output
+    assert resumed and resumed[0]["product_id"] == "gone"  # the menu came back holding it
+    assert "Recorded consumption of 1 jar jam" in result.output
+
+
+def test_a_rejected_edit_off_a_terminal_still_leaves_the_plan_alone(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A piped answer cannot react to a rejection, so the walkthrough stays
+    one pass — re-prompting would eat the next scripted line."""
+    _run(data_dir, "init")
+    _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
+    _run(data_dir, "add", "purchase", "jam", "3", "jar", "--to", "pantry")
+    fake_cls = _patch_agent_runner(monkeypatch, [_consumption_plan(amount="1")])
+
+    result = _run(data_dir, "ask", "consume 1 jar of jam", input="e\n\n\nnot-a-number\n\nr\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Not a valid amount" in result.output
+    assert fake_cls.commits == []

@@ -121,7 +121,8 @@ then the one field to change. Product, unit and location fields open a picker ov
 already holds, filtered as you type — locations are the layout (a location has to be one that
 exists), products the registry, and units every unit ever recorded, the ones already used for that
 product first. Products and units also take a value that isn't in the list: type it and the picker
-offers it as new, which is what `sumac add` would do with it anyway. Anything you type that
+offers it as new, which is what `sumac add` would do with it anyway. The amount field takes digits
+only, with the arrow keys stepping it up and down. Anything you type that
 isn't an option is feedback the agent revises the plan with.
 
 ```sh

@@ -822,6 +822,7 @@ def _edit_fields_by_menu(
     key: bytes,
     write: ProposedWrite,
     locations: dict[str, models.Location],
+    resume: dict[str, str | None] | None = None,
 ) -> dict[str, str | None] | None:
     """Pick a field, retype that one, repeat until done — rather than walking
     every field in order and pressing Enter through the ones that were
@@ -835,13 +836,17 @@ def _edit_fields_by_menu(
     # Seeded from every field, not just the editable ones: an endpoint this
     # write does not have still has to reach `_apply_edit` as `None` rather
     # than be missing, since `decide_change` distinguishes the two.
-    values: dict[str, str | None] = {
-        "product_id": write.product_id,
-        "unit": write.unit,
-        "amount": str(write.amount),
-        "from_location": write.from_location,
-        "to_location": write.to_location,
-    }
+    values: dict[str, str | None] = (
+        dict(resume)
+        if resume is not None
+        else {
+            "product_id": write.product_id,
+            "unit": write.unit,
+            "amount": str(write.amount),
+            "from_location": write.from_location,
+            "to_location": write.to_location,
+        }
+    )
 
     while True:
         options = [
@@ -887,9 +892,11 @@ def _edit_fields_by_menu(
                 new_hint="new unit",
             )
         else:
-            # The amount is a number, not a value to choose from a list.
-            values[field] = typer.prompt(label, default=values[field] or "")
-            continue
+            # A number, not a value to choose from a list — and not free text
+            # either: a field that accepted "three" and reported it three
+            # keystrokes later, as the edit was being applied, was failing at
+            # the only job it had.
+            picked = prompt_ui.number(values["amount"] or "", title="Amount?")
         if picked is not None:
             values[field] = picked
 
@@ -918,18 +925,21 @@ def _apply_edit(
     plan: AgentPlan,
     index: int,
     values: dict[str, str | None],
-) -> AgentPlan:
-    """Re-validates the edited write through the same `decide_change` gate
-    every model-proposed write already passes, so a typo in the correction
-    itself cannot reach `commit` unchecked."""
+) -> AgentPlan | None:
+    """The plan with the edited write in place, or `None` if `decide_change`
+    rejected it — re-validated through the same gate every model-proposed
+    write already passes, so a mistake in the correction cannot reach
+    `commit` unchecked. `None` rather than the unchanged plan so the caller
+    can offer the menu again with the edits still in it, instead of throwing
+    away four good fields because a fifth was wrong."""
     from sumac import llm  # local: only reachable from `ask`, which already imported it
 
     write = plan.writes[index]
     try:
         amount = Decimal(values["amount"] or "")
     except InvalidOperation:
-        render.print_error(f"Not a valid amount: {values['amount']!r} — nothing edited.")
-        return plan
+        render.print_error(f"Not a valid amount: {values['amount']!r}")
+        return None
 
     edited = dataclass_replace(
         write,
@@ -956,7 +966,7 @@ def _apply_edit(
         )
     except Rejected as e:
         render.print_error(f"Edit rejected: {e}")
-        return plan
+        return None
 
     # The endpoints `decide` just resolved, for the same reason
     # `_propose_write` records those and not what it was handed: a display
@@ -1012,14 +1022,25 @@ def _prompt_edit(data_dir: Path, key: bytes, plan: AgentPlan) -> AgentPlan:
     if index is None:
         return plan
     write = plan.writes[index]
-    values = (
-        _edit_fields_by_menu(data_dir, key, write, locations)
-        if prompt_ui.interactive()
-        else _edit_fields_by_walkthrough(write)
-    )
-    if values is None:
-        return plan
-    return _apply_edit(data_dir, key, plan, index, values)
+
+    if not prompt_ui.interactive():
+        # One pass, exactly as `e` has always read off a terminal: a piped
+        # answer cannot react to a rejection, so re-prompting would consume
+        # the next scripted line as a field value or block on empty input.
+        values = _edit_fields_by_walkthrough(write)
+        return _apply_edit(data_dir, key, plan, index, values) or plan
+
+    resume: dict[str, str | None] | None = None
+    while True:
+        values = _edit_fields_by_menu(data_dir, key, write, locations, resume)
+        if values is None:
+            return plan
+        updated = _apply_edit(data_dir, key, plan, index, values)
+        if updated is not None:
+            return updated
+        # Rejected. Back to the menu holding what was typed, so a correction
+        # is one field away rather than five fields again.
+        resume = values
 
 
 def _ask_one(

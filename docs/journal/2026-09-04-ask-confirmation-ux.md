@@ -320,6 +320,45 @@ tests for what it introduces.
 
 ---
 
+# 2026-09-05: An Amount Field That Takes Numbers
+
+## Current State
+
+- `e`'s amount field was `typer.prompt`, which accepted "three", showed it on the menu as the
+  amount, and reported it invalid only at Done — where `_apply_edit` returned the plan unchanged,
+  discarding every other field edited in the same pass.
+- `prompt_ui.number(current, *, title, step, minimum)` returns the accepted value or `None`. A key
+  that is not a digit, a decimal point, or a control it knows does nothing at all, and Enter is
+  inert until what has been typed parses, so nothing invalid leaves the widget
+  (`test_letters_do_nothing_in_the_amount_field` and
+  `test_enter_is_inert_until_what_is_typed_parses`, tests/test_prompt_ui_pty.py).
+- Up and Down step by `step` (default 1) — a quantity is usually out by one — clamped at `minimum`
+  (default 0), since `decide` rejects a non-positive amount and stepping into negatives only
+  produces a rejection two screens later. Stepping preserves a fraction: 0.5 up one is 1.5.
+- `prompt_ui._plain` formats with `format(value, "f")`, not `str()`, which reaches for scientific
+  notation on values a repeated decrement can produce.
+- `cli._apply_edit` returns `AgentPlan | None`, `None` meaning `decide_change` rejected the edit;
+  `_prompt_edit`'s interactive path loops, re-entering `_edit_fields_by_menu` with the values
+  already typed (its new `resume` argument), so a rejection costs one field rather than five.
+- `_prompt_edit`'s non-TTY path stays a single pass: a piped answer cannot react to a rejection, so
+  re-prompting would consume the next scripted line as a field value or block on empty input
+  (`test_a_rejected_edit_off_a_terminal_still_leaves_the_plan_alone`, tests/test_cli.py, feeds the
+  same input the original invalid-amount test always did).
+- `scripts/preview-ask-ui.py` gains an `amount` scene, drawn valid, fractional, and mid-typing.
+- `pytest` reports 426 passing tests repo-wide; `ruff format --check .`, `ruff check .`, and
+  `ty check` each report no findings.
+
+## Missing
+
+- `step` is fixed at 1 wherever `cli` calls `number` — no smaller step for a fractional amount, and
+  no larger one for a count in the dozens.
+- The amount field has no unit context on screen: it says `Amount?` alone, while the menu row
+  behind it shows the unit.
+- The non-TTY walkthrough still takes any string for the amount and reports it invalid afterwards —
+  unchanged, since a piped caller has no widget to type into.
+
+---
+
 # 2026-09-05: An Edited Plan Still Wearing the Model's Words
 
 ## Current State

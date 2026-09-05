@@ -290,3 +290,70 @@ def test_without_allow_new_a_typed_value_is_not_offered(
     _type(terminal, b"s", b"h", b"e", b"d", b"\r", b"\x1b")
 
     assert prompt_ui.pick(ROWS, title="Where?") is None
+
+
+def test_letters_do_nothing_in_the_amount_field(
+    terminal: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "three" used to be accepted, then rejected three keystrokes later as
+    the edit was applied, discarding the whole edit with it."""
+    monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
+    _type(terminal, b"t", b"h", b"r", b"e", b"e", b"\r")
+
+    assert prompt_ui.number("1", title="Amount?") == "1"
+
+
+def test_digits_and_a_point_type_a_new_amount(
+    terminal: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
+    _type(terminal, b"\x7f", b"0", b".", b"5", b"\r")
+
+    assert prompt_ui.number("1", title="Amount?") == "0.5"
+
+
+def test_up_and_down_step_the_amount(terminal: int, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
+    _type(terminal, b"\x1b[A", b"\x1b[A", b"\x1b[B", b"\r")
+
+    assert prompt_ui.number("1", title="Amount?") == "2"
+
+
+def test_stepping_a_fractional_amount_keeps_the_fraction(
+    terminal: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
+    _type(terminal, b"\x1b[A", b"\r")
+
+    assert prompt_ui.number("0.5", title="Amount?") == "1.5"
+
+
+def test_stepping_down_stops_at_zero(terminal: int, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`decide` rejects a non-positive amount; stepping into negatives only
+    produces a rejection two screens later."""
+    monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
+    _type(terminal, b"\x1b[B", b"\x1b[B", b"\x1b[B", b"\r")
+
+    assert prompt_ui.number("1", title="Amount?") == "0"
+
+
+def test_enter_is_inert_until_what_is_typed_parses(
+    terminal: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing invalid leaves the widget at all — a bare "." is not a number,
+    so Enter does nothing until a digit follows it."""
+    monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
+    _type(terminal, b"\x7f", b".", b"\r", b"7", b"\r")
+
+    assert prompt_ui.number("1", title="Amount?") == ".7"
+
+
+def test_escape_cancels_the_amount(terminal: int, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
+    _type(terminal, b"9", b"\x1b")
+
+    assert prompt_ui.number("1", title="Amount?") is None
+
+
+def test_number_returns_none_without_a_terminal() -> None:
+    assert prompt_ui.number("1", title="Amount?") is None

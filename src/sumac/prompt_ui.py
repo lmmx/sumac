@@ -25,6 +25,7 @@ import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 
 import typer
 from rich.console import Group, RenderableType
@@ -397,6 +398,94 @@ def pick(
     chosen = visible[cursor]
     console.print(f"[cyan]❯[/cyan] {chosen.label}")
     return chosen.value
+
+
+_DIGITS = "0123456789."
+
+
+def _as_decimal(text: str) -> Decimal | None:
+    try:
+        return Decimal(text)
+    except InvalidOperation:
+        return None
+
+
+def _plain(value: Decimal) -> str:
+    """A decimal as a person writes it — `format(..., "f")` rather than
+    `str()`, which reaches for scientific notation on values a repeated
+    decrement can produce."""
+    return format(value, "f")
+
+
+def _number_view(text: str, title: str, hint: str, valid: bool) -> Group:
+    return Group(
+        Text(title, style="bold"),
+        Text(
+            f"  {text or '—'}" + ("" if valid else "   not a number"),
+            style="bold" if valid else "yellow",
+        ),
+        Text(hint, style="dim"),
+    )
+
+
+def number(
+    current: str,
+    *,
+    title: str,
+    step: Decimal = Decimal(1),
+    minimum: Decimal = Decimal(0),
+) -> str | None:
+    """An amount, as a number and nothing else. Returns the accepted value,
+    or `None` if cancelled or there is no terminal.
+
+    A key that is not a digit, a decimal point, or a control this widget
+    knows simply does nothing — an amount is numeric, so a field that
+    accepts "three" and reports it three keystrokes later, after the edit is
+    already being applied, was failing at the only job it had. Enter is
+    likewise inert until what has been typed parses, so nothing invalid can
+    leave here at all.
+
+    Up and Down step by `step`, which is the common edit: a quantity is
+    usually out by one, not by an arbitrary amount. `minimum` clamps the
+    stepping (never below zero — `decide` rejects a non-positive amount)
+    without restricting what can be typed, since a partly-typed number
+    passes through states a clamp would fight."""
+    if not interactive():
+        return None
+
+    text = current
+    hint = "↑/↓ adjust · digits to type · enter accept · esc cancel"
+    with (
+        raw_mode(),
+        Live(
+            _number_view(text, title, hint, _as_decimal(text) is not None),
+            console=console,
+            auto_refresh=False,
+        ) as live,
+    ):
+        while True:
+            try:
+                key = read_key()
+            except (KeyboardInterrupt, EOFError):
+                key = CTRL_C
+            if key in UP or key in DOWN:
+                delta = step if key in UP else -step
+                text = _plain(max(minimum, (_as_decimal(text) or Decimal(0)) + delta))
+            elif key in (ESC, CTRL_C):
+                return None
+            elif key in ENTER:
+                if _as_decimal(text) is not None:
+                    break
+            elif key in BACKSPACE:
+                text = text[:-1]
+            elif len(key) == 1 and key in _DIGITS:
+                text += key
+            live.update(
+                _number_view(text, title, hint, _as_decimal(text) is not None), refresh=True
+            )
+
+    console.print(f"[cyan]❯[/cyan] {text}")
+    return text
 
 
 @dataclass(frozen=True, slots=True)
