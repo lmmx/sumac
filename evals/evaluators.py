@@ -19,6 +19,7 @@ combination that scenario needs.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from decimal import Decimal
 
@@ -194,8 +195,22 @@ def evaluate_only_tools(result: EvalResult, plan, allowed: set[str]) -> None:  #
     result.check("tool_scope", ok, None if ok else msg)
 
 
+_LOC_CODE_RE = re.compile(r"^(?P<name>.*?)\s*r(?P<row>\d+)c(?P<col>\d+)$", re.IGNORECASE)
+
+
 def evaluate_reply_mentions(result: EvalResult, plan, phrase: str) -> None:  # noqa: ANN001
-    ok = phrase.lower() in (plan.reply_text or "").lower()
+    """Substring match, case-insensitive. A phrase ending in a grid code
+    like "r3c1" also accepts the code spelled out as "row 3, column 1" (with
+    or without the comma) — a fixture location name, not necessarily how a
+    model reporting it in prose would say it."""
+    reply = (plan.reply_text or "").lower()
+    code_match = _LOC_CODE_RE.match(phrase.strip())
+    if code_match:
+        name, row, col = code_match["name"].strip(), code_match["row"], code_match["col"]
+        code_variants = (f"r{row}c{col}", f"row {row}, column {col}", f"row {row} column {col}")
+        ok = (not name or name.lower() in reply) and any(v in reply for v in code_variants)
+    else:
+        ok = phrase.lower() in reply
     msg = f"reply doesn't mention {phrase!r}: {plan.reply_text!r}"
     result.check("reply", ok, None if ok else msg)
 
