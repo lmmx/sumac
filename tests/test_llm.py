@@ -386,8 +386,6 @@ def test_propose_resolves_a_consume_call_into_a_pending_write(
             {"product_id": "jam", "amount": "1", "unit": "jar", "from_location": "pantry"},
         ),
         _final_round("consumed 1 jar of jam"),
-        # self-review round: model is satisfied, no further tool calls.
-        _final_round("looks correct"),
     ]
     agent, fake = _make_agent(responses, data_dir, key)
 
@@ -402,7 +400,11 @@ def test_propose_resolves_a_consume_call_into_a_pending_write(
     assert w.from_location == "pantry"
     # Nothing committed yet — still a dry run.
     assert ledger.build_inventory(data_dir, key).at("pantry")["jam"].amount == Decimal(3)
-    assert len(fake.requests) == 5
+    # classify + find + consume + final reply — no self-review round: the
+    # single write's product_id/unit/from_location all came straight out of
+    # the preceding sumac_find_inventory result, so it's search-grounded and
+    # `_maybe_self_review` skips it (see `_write_is_grounded`).
+    assert len(fake.requests) == 4
 
     # The trace records the classification and both domain calls, in order,
     # with their raw results — not just the final "consumed 1 jar of jam"

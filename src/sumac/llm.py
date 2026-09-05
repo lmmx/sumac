@@ -992,6 +992,12 @@ class AgentRunner:
         # so an identical repeat is returned labelled rather than appearing
         # to be a fresh result.
         self._searched: dict[str, dict] = {}
+        # `build_inventory` decrypts the whole sealed log; nothing can write
+        # between `propose()`/`revise()` and `commit()` by construction, so
+        # one read serves every tool callback in the call. `commit()` does
+        # not use this — it deliberately re-reads per write, since a prior
+        # write in the same commit changes what the next one sees.
+        self._inventory_cache: ledger.Inventory | None = None
         self._trace_history: list[ToolCallRecord] = []
         self._classify_messages: list[dict[str, str]] | None = None
         self._usage_history: list[dict[str, float | int]] = []
@@ -1105,6 +1111,11 @@ class AgentRunner:
         self._trace.append(record)
         self._trace_history.append(record)
 
+    def _build_inventory(self) -> ledger.Inventory:
+        if self._inventory_cache is None:
+            self._inventory_cache = ledger.build_inventory(self._data_dir, self._key)
+        return self._inventory_cache
+
     # -- tool callbacks -------------------------------------------------------
 
     def _sumac_find_inventory(self, _name: str, args: dict) -> str:
@@ -1135,7 +1146,7 @@ class AgentRunner:
                     ),
                 }
             )
-        inventory = ledger.build_inventory(self._data_dir, self._key)
+        inventory = self._build_inventory()
         locations = ledger.load_locations_or_empty(self._data_dir, self._key)
         products: dict[str, dict] = {}
         for m in ledger.search_inventory(inventory, query):
@@ -1202,7 +1213,7 @@ class AgentRunner:
             return _rejected("invalid_amount", {"value": args["amount"]})
 
         cfg = config.build_config(self._data_dir, self._key)
-        inventory = ledger.build_inventory(self._data_dir, self._key)
+        inventory = self._build_inventory()
         try:
             decided, messages = decide.decide_change(
                 kind=kind,
@@ -1505,14 +1516,43 @@ class AgentRunner:
         self._nudge_fired = True
         return self._run_loop()
 
+    def _write_is_grounded(self, w: ProposedWrite) -> bool:
+        """Whether `w`'s product_id/unit/from_location were all read out of
+        a prior `sumac_find_inventory` result rather than invented — the
+        distinction findings #1 and #7 of
+        docs/journal/2026-09-05-mistralrs-latency-budget.md turn on:
+        self-review changed the plan in 1 of 280 reviewed scenarios, and a
+        write built entirely from search results is not where that miss is
+        going to live."""
+        for result in self._searched.values():
+            for product in result["products"]:
+                if product["product_id"] != w.product_id:
+                    continue
+                locs = product["locations"]
+                if not any(loc["unit"] == w.unit for loc in locs):
+                    continue
+                if w.from_location is None or any(
+                    loc["location_id"] == w.from_location for loc in locs
+                ):
+                    return True
+        return False
+
     def _maybe_self_review(self, plan: AgentPlan) -> AgentPlan:
         """The model checks its own plan against the original request. A
         round that makes no new tool calls means the model is satisfied
         with `plan` as it stands — stop and keep it. A round that does make
         new tool calls replaces `plan` and, if rounds remain, is itself
-        reviewed again."""
+        reviewed again.
+
+        Skipped when every write is a single, search-grounded write (see
+        `_write_is_grounded`) — the case #1 in
+        docs/journal/2026-09-05-mistralrs-latency-budget.md measured as
+        0.4 % effective. Multiple writes, or any write not traceable to a
+        search result, still get reviewed."""
         assert self._messages is not None
         if not plan.writes:
+            return plan
+        if len(plan.writes) == 1 and self._write_is_grounded(plan.writes[0]):
             return plan
         for _ in range(SELF_REVIEW_ROUNDS):
             self._messages.append({"role": "user", "content": _SELF_REVIEW_MESSAGE})
@@ -1527,6 +1567,7 @@ class AgentRunner:
     def propose(self, prompt: str) -> AgentPlan:
         self._trace = []
         self._searched = {}
+        self._inventory_cache = None
         kind = self._classify(prompt)
         self._kind = kind
         if kind is QueryKind.REJECT:
@@ -1549,6 +1590,7 @@ class AgentRunner:
         self._messages.append({"role": "user", "content": feedback})
         self._trace = []
         self._searched = {}
+        self._inventory_cache = None
         plan = self._maybe_self_review(self._maybe_force_action(self._run_loop()))
         return replace(plan, trace=tuple(self._trace))
 
