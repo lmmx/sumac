@@ -549,11 +549,11 @@ DEFAULT_PROMPT_VARIANT = PROMPT_VARIANTS[0]
 @dataclass(frozen=True, slots=True)
 class LocationEffect:
     """What one location holds of one product before and after a single
-    proposed write, both numbers taken from `ledger.project`'s fold of the
-    records `decide.decide_change` returned for that write — not from
-    subtracting an amount from a holding. `None` means the location holds
-    none of the product on that side: `before=None` is a genuinely new
-    arrival, `after=None` is the last of it leaving."""
+    proposed write. Both numbers come from `ledger.project`'s fold of the
+    records `decide.decide_change` returned for that write, not from
+    subtracting an amount from a holding. `None` means the location holds none
+    of the product on that side: `before=None` is a first arrival,
+    `after=None` is the last of it being removed."""
 
     location_id: str
     product_id: str
@@ -578,17 +578,15 @@ class ProposedWrite:
     # that could reflect a different moment than the one actually decided.
     current_amount: Decimal | None = None
     # Per-location before/after for this write, in endpoint order (a
-    # movement's source then its destination). Empty when the write was
-    # built without a projection — `render.print_plan` falls back to
-    # `current_amount`'s descriptive "already there" line in that case, so
-    # a hand-built `ProposedWrite` renders exactly as it did before this
-    # field existed.
+    # movement's source then its destination). Empty when the write was built
+    # without a projection; `render.print_plan` then falls back to
+    # `current_amount`'s "already there" line, so a hand-built
+    # `ProposedWrite` renders as it did before this field existed.
     effects: tuple[LocationEffect, ...] = ()
     # Which fields a person set by hand, via `sumac ask`'s edit menu. Empty
     # for anything the model proposed. `review.review_write` reads it: its
-    # `ungrounded` check asks whether the *model* produced a name from
-    # nowhere, and a name typed deliberately by the person reviewing the plan
-    # is not that.
+    # `ungrounded` check reports a name the model produced without a source,
+    # and a name typed by the person reviewing the plan has one.
     edited_fields: frozenset[str] = frozenset()
 
 
@@ -744,17 +742,16 @@ _REJECTION_HINT = (
 )
 
 
-# One search result can name a lot of shelves; the count comes back in full
-# even when the list is cut, so a too-broad query reads as one to narrow
-# rather than as the whole layout.
+# One search result can name many shelves. The count is returned in full even
+# when the list is truncated, so a broad query is identifiable as one to
+# narrow rather than appearing to be the whole layout.
 _MAX_LOCATION_MATCHES = 20
 
 
 def _location_candidates(cfg: config.Config, value: str, limit: int = 20) -> list[dict[str, str]]:
-    """Locations worth offering after `value` failed to resolve: those whose
-    id or display path shares a word with it, or — when nothing does — the
-    first `limit` of them, so the reply is never "not that one" with no
-    indication of what would be."""
+    """Locations to offer after `value` failed to resolve: those whose id or
+    display path shares a word with it, or the first `limit` of them when none
+    does, so the rejection always names some valid locations."""
     words = {w for w in re.split(r"\W+", value.lower()) if len(w) > 2}
     everything = [
         {"location_id": loc_id, "location_path": config.location_path(cfg.known_locations, loc_id)}
@@ -872,37 +869,36 @@ def _build_runner(model: ModelPreset, *, seed: int | None = None) -> SendsComple
 
 
 # The most recently built backend, and what it was built for. `sumac ask
-# --loop` constructs a fresh `AgentRunner` per request on purpose — each
-# request is its own conversation, with no memory of the last — but the model
-# behind it need not be reloaded to get that: `AgentRunner` keeps every piece
-# of per-request state (`_messages`, `_pending`, `_trace`) on itself, and a
-# request carries its whole history in `send_chat_completion_request`, so a
-# backend is stateless as far as this module is concerned. `evals/conftest.py`
-# has shared one `base_runner` across every scenario in a run since the eval
-# suite existed; this is the same reuse for the interactive loop.
+# --loop` constructs a fresh `AgentRunner` per request deliberately, so that
+# each request is a separate conversation with no memory of the last. The
+# model behind it does not need reloading for that: `AgentRunner` holds every
+# piece of per-request state (`_messages`, `_pending`, `_trace`) itself, and
+# a request carries its whole history in `send_chat_completion_request`, so
+# the backend holds no state this module depends on. `evals/conftest.py` has
+# shared one `base_runner` across every scenario in a run since the eval suite
+# existed; this applies the same reuse to the interactive loop.
 _SHARED_RUNNER: tuple[tuple[str, int | None], SendsCompletions] | None = None
 
 
 def shared_runner(model: ModelPreset, *, seed: int | None = None) -> SendsCompletions:
-    """A backend for `model`, reusing the last one when it matches — so a
-    `--loop` session loads the model once instead of once per request.
+    """A backend for `model`, reusing the last one when it matches, so a
+    `--loop` session loads the model once rather than once per request.
 
-    Holds exactly one, and drops it before building the next: two GGUFs
-    resident at once is how switching models mid-session runs a GPU out of
-    memory that fits either alone. Dropping this module's reference is all
-    this can do — a caller still holding the previous `AgentRunner` keeps its
-    backend alive until that goes too.
+    Holds exactly one and drops it before building the next: two GGUFs
+    resident at once can exhaust a GPU that fits either alone when switching
+    models mid-session. Dropping this module's reference is all it can do —
+    a caller still holding the previous `AgentRunner` keeps that backend
+    alive until the caller releases it.
 
-    Reuse is visible in one way, and it is the same way `evals/` already
-    lives with: mistral.rs's RNG stream and prefix cache carry across
-    requests, so a request's sampling depends on what ran before it in the
-    session (docs/journal/2026-09-04-trace-and-verdict-redesign.md). That
-    costs an interactive session nothing — nobody is comparing two runs of
-    it — and "regenerate" still resamples, since the stream has moved on.
+    Reuse has one observable effect, the same one `evals/` already accounts
+    for: mistral.rs's RNG stream and prefix cache carry across requests, so a
+    request's sampling depends on what ran before it in the session
+    (docs/journal/2026-09-04-trace-and-verdict-redesign.md). That has no cost
+    in an interactive session, where no two runs are being compared, and
+    "regenerate" still resamples because the stream has advanced.
 
-    Not what `AgentRunner` does by default: it still builds its own backend
-    unless handed one, so `evals/` and the benchmark scripts keep deciding
-    for themselves when a model is loaded."""
+    `AgentRunner` builds its own backend when handed one, so `evals/` and the
+    benchmark scripts continue to control when a model is loaded."""
     global _SHARED_RUNNER
     cache_key = (model.name, seed)
     if _SHARED_RUNNER is not None and _SHARED_RUNNER[0] == cache_key:
@@ -913,9 +909,9 @@ def shared_runner(model: ModelPreset, *, seed: int | None = None) -> SendsComple
 
 
 def release_shared_runner() -> None:
-    """Drops the cached backend. For a caller that knows it is done with the
-    model — nothing in `sumac ask` currently is, since a session ends with
-    the process."""
+    """Drops the cached backend, for a caller that is finished with the
+    model. Nothing in `sumac ask` calls it, since a session ends with the
+    process."""
     global _SHARED_RUNNER
     _SHARED_RUNNER = None
 
@@ -930,36 +926,35 @@ def effects(
     to_location: str | None,
 ) -> tuple[LocationEffect, ...]:
     """The before/after this write produces at each endpoint it names, read
-    off `ledger.project`'s fold of `decided` — the records `decide_change`
-    just returned for this one write, which for a consumption exceeding the
-    shelf includes §3.5's reconciling `Counted` alongside the `Consumed`.
-    Projecting the records rather than subtracting the amount is what makes
-    the "after" the same number a commit would produce, for that case as
-    much as the ordinary one.
+    from `ledger.project`'s fold of `decided` — the records `decide_change`
+    just returned for this write, which for a consumption exceeding the
+    recorded holding include §3.5's reconciling `Counted` alongside the
+    `Consumed`. Projecting the records rather than subtracting the amount
+    gives the same "after" a commit would produce, in that case as well as the
+    ordinary one.
 
-    Endpoint order, source first, so a movement reads the way it happened.
-    An unknown location is skipped rather than reported: `decide_change`
-    already rejected before returning if an endpoint was invalid, so
-    anything reaching here is a location the projection could resolve.
+    Endpoint order, source first, matching the order of a movement. An unknown
+    location is skipped rather than reported: `decide_change` rejects an
+    invalid endpoint before returning, so anything reaching here is a location
+    the projection could resolve.
 
-    Public because a hand-edited write needs the same projection recomputed
-    for it: `cli._apply_edit` re-decides the edited write and calls this with
-    what came back, rather than leaving the preview with the projection of
-    the write the model proposed or with none at all."""
+    Public because a hand-edited write needs the same projection recomputed:
+    `cli._apply_edit` re-decides the edited write and calls this with the
+    result, rather than leaving the preview showing the projection of the
+    write the model proposed, or none at all."""
     # Log records only. `decide_change` returns config writes alongside them
     # when it auto-registers a product or location (decide.py's
-    # `_resolve_product`), and those carry no inventory delta — a config
-    # record reaching the fold is not a projection of anything, it's a
-    # schema mismatch.
+    # `_resolve_product`), and those carry no inventory delta; a config record
+    # reaching the fold is a schema mismatch, not a projection.
     objs = [w.obj for w in decided if w.stream.startswith("log:")]
     projected = ledger.project(inventory, cfg.known_locations, objs)
     if projected.anomalies:
-        # The fold could not apply these records — an endpoint it could not
-        # resolve, a unit that would not convert. Whatever the preview showed
-        # then would be arithmetic that did not happen: `render.print_plan`
-        # falls back to "already there" for a write with no effects, which
-        # says less and claims nothing. Reaching here at all means something
-        # upstream is wrong, since `decide_change` returned these records.
+        # The fold could not apply these records: an endpoint it could not
+        # resolve, or a unit that would not convert. Reporting a before/after
+        # here would report arithmetic that did not occur, so no effects are
+        # returned and `render.print_plan` falls back to "already there".
+        # Reaching this branch indicates a fault upstream, since
+        # `decide_change` returned these records.
         return ()
     effects: list[LocationEffect] = []
     for location_id in (from_location, to_location):
@@ -984,10 +979,10 @@ class AgentRunner:
     matching `cli.py`'s existing `AgentRunner(data_dir, key)` construction.
     Pass `runner` to substitute a fake `SendsCompletions` in tests, or a
     backend of the caller's own, instead of the shared one this otherwise
-    builds (`shared_runner`) — which is reused across instances rather than
-    loading the model again for each. Tool calls are dispatched by this
-    class itself, client-side — see the module docstring — rather than
-    registered on the `Runner`."""
+    builds (`shared_runner`), which is reused across instances rather than
+    loading the model again for each. Tool calls are dispatched by this class
+    itself, client-side — see the module docstring — rather than registered on
+    the `Runner`."""
 
     def __init__(
         self,
@@ -1009,12 +1004,11 @@ class AgentRunner:
         self._model = model
         self._prompt_variant = prompt_variant
         self._debug = debug
-        # Per-round token/timing lines. Defaults on, which is what every
-        # existing caller (`evals/`, the benchmark scripts) already gets;
-        # `sumac ask` passes `--stats` through so the lines aren't printed
-        # above a plan someone is trying to read. `usage_history` carries
-        # the same numbers programmatically either way, so turning the
-        # print off never loses data.
+        # Per-round token/timing lines. Defaults on, matching what every
+        # existing caller (`evals/`, the benchmark scripts) already receives;
+        # `sumac ask` passes `--stats` through so the lines are not printed
+        # above a plan being read. `usage_history` carries the same numbers
+        # programmatically either way, so disabling the print loses no data.
         self._show_usage = show_usage
         self._temperature = temperature
         self._top_p = top_p
@@ -1035,8 +1029,8 @@ class AgentRunner:
         self._pending: list[ProposedWrite] = []
         self._trace: list[ToolCallRecord] = []
         # Searches already answered in the current `propose`/`revise` call,
-        # so an identical repeat comes back labelled rather than looking
-        # like a fresh result.
+        # so an identical repeat is returned labelled rather than appearing
+        # to be a fresh result.
         self._searched: dict[str, dict] = {}
         self._trace_history: list[ToolCallRecord] = []
         self._classify_messages: list[dict[str, str]] | None = None
@@ -1052,11 +1046,11 @@ class AgentRunner:
             "sumac_discover_inventory": self._sumac_discover_inventory,
         }
         # `shared_runner`, not `_build_runner`: `sumac ask --loop` builds a
-        # fresh `AgentRunner` per request — each request is its own
-        # conversation — and reloading the GGUF for each of them put seconds
-        # of latency in front of a person already waiting. A caller needing
-        # a backend of its own passes one; `evals/conftest.py` builds
-        # exactly one per run that way and has since the suite existed.
+        # fresh `AgentRunner` per request, since each request is a separate
+        # conversation, and reloading the GGUF for each added seconds of
+        # latency to every request. A caller needing its own backend passes
+        # one; `evals/conftest.py` builds exactly one per run that way, and
+        # has since the suite existed.
         self._runner: SendsCompletions = (
             runner if runner is not None else shared_runner(model, seed=seed)
         )
@@ -1166,11 +1160,10 @@ class AgentRunner:
         substring) without naming the tiers themselves."""
         query = str(args.get("query", ""))
         if query in self._searched:
-            # A real run searched "fridge" seventeen times in a row, each
-            # time getting the same empty result, until the round cap
-            # stopped it. Repeating the answer is not enough on its own —
-            # it is what the model already had — so the answer comes back
-            # labelled as the repeat it is.
+            # A real run searched "fridge" seventeen times in a row, each time
+            # receiving the same empty result, until the round cap stopped it.
+            # Returning the same answer again is not sufficient, since the
+            # model already has it, so the answer is labelled as a repeat.
             return json.dumps(
                 {
                     **self._searched[query],
@@ -1203,9 +1196,9 @@ class AgentRunner:
                 }
             )
         # Location matches alongside product matches: `query` is whatever the
-        # person's sentence named, and a phrase like "the fridge" is a place,
-        # not a product. Without this the only way to learn a location id was
-        # to guess one, be rejected, and guess again.
+        # person's sentence named, and a phrase like "the fridge" names a
+        # place rather than a product. Without this, the only route to a
+        # location id was to guess one, be rejected, and guess again.
         matched = config.search_locations(locations, query)
         result = {
             "products": list(products.values()),
@@ -1265,16 +1258,14 @@ class AgentRunner:
             )
         except Rejected as e:
             # `object` values, not `str`: every `decide` detail stringifies,
-            # but the candidate list below is structured on purpose — a
-            # model reading `"[{'location_id': ...}]"` as one string has to
-            # parse it back out of a Python repr.
+            # but the candidate list below stays structured, so the model
+            # receives JSON rather than a Python repr inside a string.
             detail: dict[str, object] = {k: str(v) for k, v in e.detail.items()}
             if e.reason == "unknown_location":
                 # `decide`'s own `suggestions` are `near_matches` over ids,
-                # which a phrase ("top shelf of the fridge") never comes
-                # close enough to match. The candidates below are what a
-                # person would offer instead: the locations whose path shares
-                # a word with what was asked for.
+                # which a phrase ("top shelf of the fridge") does not score
+                # against. The candidates below are the locations whose path
+                # shares a word with the requested value.
                 detail["known_locations"] = _location_candidates(
                     cfg, str(e.detail.get("value", ""))
                 )
@@ -1282,13 +1273,12 @@ class AgentRunner:
 
         # The ids `decide_change` just resolved these to, not the strings the
         # model supplied. `decide.resolve_location` accepts a display path
-        # ("Fridge > Top Shelf") as readily as an id, so a write can be
-        # entirely valid — and commit correctly — while its raw endpoint
-        # matches nothing in `known_locations`. Recording the raw string made
-        # the preview claim a configured location was new and show no
-        # before/after for it, since every lookup downstream is by id.
-        # Re-resolving cannot raise here: `decide_change` returned, so both
-        # already resolved once.
+        # ("Fridge > Top Shelf") as well as an id, so a write can be valid and
+        # commit correctly while its raw endpoint matches nothing in
+        # `known_locations`. Recording the raw string made the preview report
+        # a configured location as new and show no before/after for it, since
+        # every lookup downstream is by id. Re-resolving cannot raise here:
+        # `decide_change` returned, so both resolved once already.
         from_location = decide.resolve_location(from_location, "from", cfg)
         to_location = decide.resolve_location(to_location, "to", cfg)
 

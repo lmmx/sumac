@@ -1,9 +1,9 @@
 """Smoke test for `scripts/preview-ask-ui.py`.
 
-The harness is what a rendering change is compared through, so it breaking
-silently — a renamed `render` function, a changed `ProposedWrite` field —
-would take the comparison down with it without any test noticing. This runs
-every scene against a throwaway console and asserts each drew something.
+The harness is how a rendering change is compared, so if it breaks — a
+renamed `render` function, a changed `ProposedWrite` field — the comparison
+breaks with it, silently. This runs every scene against a throwaway console
+and asserts each drew something.
 """
 
 from __future__ import annotations
@@ -21,9 +21,10 @@ SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "preview-ask-ui.py
 
 @pytest.fixture(autouse=True)
 def _restore_consoles() -> Iterator[None]:
-    """Both the harness and these tests reassign `render.console` — a module
+    """Both the harness and these tests reassign `render.console`, a module
     global every other test's `CliRunner` output goes through. Restoring it
-    keeps this file's ordering irrelevant to the rest of the suite."""
+    keeps this file's position in the run order from affecting the rest of the
+    suite."""
     from sumac import prompt_ui, render
 
     saved = (render.console, prompt_ui.console)
@@ -52,9 +53,9 @@ def test_every_scene_renders(preview: ModuleType) -> None:
 
 
 def test_the_fabricated_scene_is_flagged_as_ungrounded(preview: ModuleType) -> None:
-    """The scene exists to show `review`'s one check that `decide` cannot
-    make; a rendering change that dropped the badge would make it a scene
-    about nothing."""
+    """The scene demonstrates `review`'s one check that `decide` cannot make;
+    a rendering change that dropped the badge would leave the scene showing
+    nothing."""
     from sumac import prompt_ui, render
 
     console = Console(record=True, width=96)

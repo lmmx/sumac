@@ -7,14 +7,14 @@ Two rules shape everything here:
 drives every `ask` test through `CliRunner(input=...)` and `evals/` runs
 headless; both feed a line per decision, on the same keys the option table has
 always printed. `select` checks `interactive()` first and, when it is false,
-prints that same table and reads that same line — the keys, their meanings, and
+prints that same table and reads that same line. The keys, their meanings, and
 the free-text-is-feedback fallback are identical on both paths, so a script, a
-pipe, and a test see exactly what they saw before this module existed.
+pipe, and a test read the same as before this module existed.
 
 *No new dependency.* Raw-mode key reads are `termios`/`tty` from the standard
-library, guarded at import so a platform without them (Windows) simply never
-reports itself interactive; the rendering is `rich`, already a hard dependency
-of the package.
+library, guarded at import so a platform without them (Windows) never reports
+itself interactive; the rendering is `rich`, already a hard dependency of the
+package.
 """
 
 from __future__ import annotations
@@ -46,8 +46,8 @@ except ImportError:  # pragma: no cover - Windows
 
 # Both cursor-key encodings: a terminal in normal mode sends `ESC [ A`, and one
 # in application-cursor mode (`DECCKM`, which tmux and some terminals turn on)
-# sends `ESC O A` for the same key. Accepting only the first is another way for
-# an arrow key to silently do nothing.
+# sends `ESC O A` for the same key. Accepting only the first leaves the arrow
+# key doing nothing under those terminals.
 UP = ("\x1b[A", "\x1bOA")
 DOWN = ("\x1b[B", "\x1bOB")
 ENTER = ("\r", "\n")
@@ -64,9 +64,9 @@ _ESCAPE_TIMEOUT = 0.05
 
 def _utf8_continuation_bytes(lead: int) -> int:
     """How many bytes follow a UTF-8 lead byte. No menu key is non-ASCII, so
-    this only keeps such a keypress from arriving as replacement characters
-    and, worse, leaving its continuation bytes in the buffer to be read as
-    keys of their own."""
+    this only prevents such a keypress arriving as replacement characters and
+    leaving its continuation bytes in the buffer to be read as further
+    keypresses."""
     if lead >= 0xF0:
         return 3
     if lead >= 0xE0:
@@ -78,13 +78,12 @@ def _utf8_continuation_bytes(lead: int) -> int:
 
 @dataclass(frozen=True, slots=True)
 class Option:
-    """One row of a `select` menu. `key` is what a typed answer must equal on
-    the non-TTY path *and* the accelerator character on the interactive one —
-    the two paths never drift apart because there is only the one value.
-    `prompt_for_text` marks the row whose meaning is "type something instead
-    of choosing" (`sumac ask`'s free-text feedback), which is the one option
-    a single keystroke cannot express: choosing it opens a line editor and
-    `select` returns what was typed."""
+    """One row of a `select` menu. `key` is both what a typed answer must
+    equal on the non-TTY path and the accelerator character on the interactive
+    one, so the two paths cannot diverge. `prompt_for_text` marks a row that
+    takes typed input rather than being chosen outright (`sumac ask`'s
+    free-text feedback): choosing it opens a line editor and `select` returns
+    what was typed."""
 
     key: str
     description: str
@@ -103,10 +102,10 @@ def interactive() -> bool:
     try:
         if not (sys.stdin.isatty() and sys.stdout.isatty()):
             return False
-        # Probes what `raw_mode` will need before promising a menu: an
-        # `isatty()` that says yes over a stdin whose attributes cannot
-        # actually be read would otherwise reach `tty.setcbreak` and raise
-        # there, mid-decision, instead of falling back to the typed prompt.
+        # Checks what `raw_mode` will need before a menu is offered: an
+        # `isatty()` that returns True over a stdin whose attributes cannot be
+        # read would otherwise raise inside `tty.setcbreak` mid-decision,
+        # instead of falling back to the typed prompt.
         termios.tcgetattr(sys.stdin.fileno())
     except (AttributeError, ValueError, OSError, termios.error):
         return False
@@ -118,26 +117,26 @@ def raw_mode() -> Iterator[None]:
     """Puts the terminal in single-keypress mode for the length of one menu,
     not one keypress.
 
-    Held across the whole loop on purpose: restoring canonical mode between
+    Held across the whole loop deliberately: restoring canonical mode between
     reads means a keystroke arriving while the menu is redrawing is echoed to
     the screen and line-buffered by the tty, so fast keypresses corrupt the
-    `Live` region and go missing until Enter.
+    `Live` region and are not delivered until Enter.
 
-    `tty.setcbreak`, not `tty.setraw`: `setraw` also clears `OPOST`, which is
-    what turns `\n` into `\r\n` on the way out — every line `Live` redraws
-    inside a `setraw` block staircases across the screen. `setcbreak` clears
-    only `ECHO`/`ICANON`, which is all a single-keypress read needs. It also
-    leaves `ISIG` on, so Ctrl-C stays a `KeyboardInterrupt` rather than
-    arriving as a `\x03` byte — `select`/`multiselect` catch it and treat it
+    `tty.setcbreak`, not `tty.setraw`: `setraw` also clears `OPOST`, which
+    converts `\n` to `\r\n` on output, so every line `Live` redraws inside a
+    `setraw` block is indented one column further than the last. `setcbreak`
+    clears only `ECHO`/`ICANON`, which is all a single-keypress read requires.
+    It also leaves `ISIG` set, so Ctrl-C raises `KeyboardInterrupt` rather than
+    arriving as a `\x03` byte; `select`/`multiselect` catch it and treat it
     the same way."""
     fd = sys.stdin.fileno()
     saved = termios.tcgetattr(fd)
     try:
-        # TCSAFLUSH discards whatever is already sitting in the input queue as
-        # the mode changes — deliberate here, and the safer of the two: model
-        # inference runs for seconds before a plan appears, and anything typed
-        # into that wait was not a decision about a plan nobody had seen yet.
-        # A stray Enter from before the preview must not accept it.
+        # TCSAFLUSH discards whatever is already queued as the mode changes.
+        # Deliberate: model inference runs for seconds before a plan appears,
+        # and anything typed during that wait was not a decision about a plan
+        # that had not yet been displayed. A stray Enter from before the
+        # preview must not accept it.
         tty.setcbreak(fd, termios.TCSAFLUSH)
         yield
     finally:
@@ -148,25 +147,25 @@ def read_key() -> str:
     """One keypress, with an escape sequence returned whole. Call inside
     `raw_mode()`.
 
-    Reads the file descriptor with `os.read`, not `sys.stdin.read`. That is
-    the whole point of this function: `sys.stdin` is a buffered
+    Reads the file descriptor with `os.read`, not `sys.stdin.read`, which is
+    the reason this function exists: `sys.stdin` is a buffered
     `TextIOWrapper`, and `sys.stdin.read(1)` on a terminal pulls every byte
     already available into Python's own buffer before returning the first
     one. An arrow key's three bytes arrive in a single burst, so after
-    returning `\x1b` the remaining `[B` sits in the wrapper's buffer where
-    `select.select` — which polls the file descriptor — cannot see it. The
+    returning `\x1b` the remaining `[B` remains in the wrapper's buffer, where
+    `select.select` — which polls the file descriptor — cannot detect it. The
     sequence then reads as a bare Escape, which `select()` answers as
-    "reject", so pressing Down silently discarded the plan and returned to
-    the shell. Found by a real run, not by a test: every test in
-    `tests/test_prompt_ui.py` monkeypatched this function out. `tests/
-    test_prompt_ui_pty.py` now drives it over a real pty instead.
+    "reject", so pressing Down discarded the plan and returned to the shell.
+    Found by a real run rather than by a test: every test in
+    `tests/test_prompt_ui.py` monkeypatched this function out.
+    `tests/test_prompt_ui_pty.py` now drives it over a real pty.
 
     One byte at a time, extended only for an escape sequence or a multi-byte
-    UTF-8 character. Reading a larger chunk would be fewer syscalls and is
-    wrong: two keypresses already waiting in the tty buffer — typed quickly,
-    or arriving while the menu redrew — would come back merged into one
-    string that matches no key, and both would be dropped. The poll covers an
-    escape sequence split across reads, as one can be over a slow link."""
+    UTF-8 character. A larger chunk would be fewer syscalls but incorrect:
+    two keypresses already waiting in the tty buffer — typed quickly, or
+    arriving while the menu redrew — would be returned merged into one string
+    matching no key, and both would be dropped. The poll covers an escape
+    sequence split across reads, which can happen over a slow link."""
     fd = sys.stdin.fileno()
     data = os.read(fd, 1)
     if data == ESC.encode():
@@ -208,10 +207,10 @@ def select(
     """The chosen option's `key`, or — for a `prompt_for_text` option — the
     line the person typed after choosing it. `default` is the key the cursor
     starts on, and the value a bare Enter produces on the non-TTY path, so
-    "accept" stays one keystroke either way.
+    "accept" takes one keystroke on both paths.
 
-    A returned string is exactly what `typer.prompt(...).strip()` returned
-    before: callers keep matching on `"a"`/`"r"`/`"e"` and treating anything
+    The returned string matches what `typer.prompt(...).strip()` returned
+    before: callers still match on `"a"`/`"r"`/`"e"` and treat anything
     unmatched as feedback."""
     if not interactive():
         print_decision_options([(o.key, o.description) for o in options])
@@ -233,8 +232,8 @@ def select(
             elif key in DOWN or key == "j":
                 cursor = (cursor + 1) % len(options)
             elif key in (ESC, CTRL_C):
-                # Same answer a typed "r" gives: reject this proposal and
-                # write nothing. Never an exception, so the caller's own
+                # The same answer a typed "r" gives: reject this proposal
+                # and write nothing. Not an exception, so the caller's
                 # accept/reject branch handles it like any other decision.
                 return "r"
             elif key in ENTER:
@@ -248,9 +247,9 @@ def select(
             live.update(_menu(options, cursor, title, hint), refresh=True)
 
     chosen = options[cursor]
-    # Redrawn once outside the Live block so the transcript keeps a record of
-    # what was chosen — a Live region that simply disappears leaves a scrollback
-    # in which the decision that led to a commit is nowhere to be seen.
+    # Redrawn once outside the Live block so the transcript records what was
+    # chosen: a Live region that disappears leaves no record in the scrollback
+    # of the decision that led to a commit.
     console.print(f"[cyan]❯[/cyan] {chosen.description}")
     if chosen.prompt_for_text:
         return typer.prompt(chosen.text_prompt).strip()
@@ -258,9 +257,9 @@ def select(
 
 
 # How many rows of a long list are on screen at once. The rest scroll under
-# the cursor, with a count of what is off each end — a list of every location
-# in a household runs to dozens, and a menu taller than the terminal loses its
-# own title off the top.
+# the cursor, with a count of what is off each end: a list of every location
+# in a household runs to dozens, and a menu taller than the terminal would
+# scroll its own title off the screen.
 _PICK_HEIGHT = 12
 BACKSPACE = ("\x7f", "\b")
 
@@ -268,8 +267,8 @@ BACKSPACE = ("\x7f", "\b")
 @dataclass(frozen=True, slots=True)
 class Row:
     """One row of a `pick` list. `value` is what `pick` returns, `label` what
-    is shown, and `search` what typing filters against — the path *and* the
-    id of a location, say, so either finds it."""
+    is shown, and `search` what typing filters against — for a location, its
+    path and its id, so either matches."""
 
     value: str
     label: str
@@ -311,16 +310,14 @@ def _pick_view(
 
 
 def _visible_rows(rows: list[Row], filter_text: str, allow_new: bool, new_hint: str) -> list[Row]:
-    """The rows a filter leaves, plus — when `allow_new` and the filter names
-    something not already in the list — one standing for the typed text
-    itself.
+    """The rows a filter leaves, plus — when `allow_new` is set and the filter
+    names something not already in the list — one row carrying the typed text.
 
-    Last, not first: the existing values are what the list is for, and the
-    cursor resets to the top on every keystroke, so typing a value that does
-    exist still selects it with one Enter. When nothing matches, the new row
-    is the only row and therefore already under the cursor, which is what
-    makes typing a genuinely new unit or product a single uninterrupted
-    action."""
+    That row goes last, not first. The cursor resets to the top on every
+    keystroke, so typing a value that already exists selects it with one
+    Enter. When nothing matches, the added row is the only row and is already
+    under the cursor, so typing a new unit or product and pressing Enter
+    takes two steps rather than three."""
     needle = filter_text.lower()
     matches = [row for row in rows if row.matches(needle)] if filter_text else list(rows)
     if allow_new and filter_text and not any(row.value == filter_text for row in rows):
@@ -336,17 +333,17 @@ def pick(
     allow_new: bool = False,
     new_hint: str = "new",
 ) -> str | None:
-    """One value from a long list, filtered as you type — the counterpart to
-    `select`, which is for a handful of fixed options each with its own
-    accelerator key. Here the list is data, not a menu: no accelerators
-    (every printable key is filter text instead), a scrolling window, and the
-    cursor starting on `current` if it is in the list.
+    """One value from a long list, filtered as you type. The counterpart to
+    `select`, which handles a handful of fixed options each with its own
+    accelerator key. Here there are no accelerators — every printable key is
+    filter text — plus a scrolling window, and the cursor starts on `current`
+    when that value is in the list.
 
     `allow_new` adds a row for whatever has been typed when it is not already
-    in the list, so a value the vault has never seen is still reachable —
-    which is the difference between a product or a unit (either may
-    legitimately be new; `decide` registers one on first use) and a location
-    (a closed set `decide` rejects anything outside).
+    in the list, so a value the vault has never recorded is still reachable.
+    A product or a unit may legitimately be new — `decide` registers one on
+    first use — while a location may not: `decide` rejects any location that
+    is not configured.
 
     Returns `None` when cancelled, and — like `multiselect` — when there is
     no terminal to read keypresses from: a caller wanting a value off a
@@ -411,9 +408,9 @@ def _as_decimal(text: str) -> Decimal | None:
 
 
 def _plain(value: Decimal) -> str:
-    """A decimal as a person writes it — `format(..., "f")` rather than
-    `str()`, which reaches for scientific notation on values a repeated
-    decrement can produce."""
+    """Decimal formatting without an exponent: `format(..., "f")` rather than
+    `str()`, which uses scientific notation for some values a repeated
+    decrement produces."""
     return format(value, "f")
 
 
@@ -435,21 +432,20 @@ def number(
     step: Decimal = Decimal(1),
     minimum: Decimal = Decimal(0),
 ) -> str | None:
-    """An amount, as a number and nothing else. Returns the accepted value,
-    or `None` if cancelled or there is no terminal.
+    """A numeric field. Returns the accepted value, or `None` if cancelled or
+    there is no terminal.
 
     A key that is not a digit, a decimal point, or a control this widget
-    knows simply does nothing — an amount is numeric, so a field that
-    accepts "three" and reports it three keystrokes later, after the edit is
-    already being applied, was failing at the only job it had. Enter is
-    likewise inert until what has been typed parses, so nothing invalid can
-    leave here at all.
+    handles does nothing. Enter does nothing until what has been typed
+    parses as a decimal, so an invalid value cannot be returned. The previous
+    field was a free-text prompt, which accepted "three" and reported it
+    invalid several keystrokes later, while the edit was being applied.
 
-    Up and Down step by `step`, which is the common edit: a quantity is
-    usually out by one, not by an arbitrary amount. `minimum` clamps the
-    stepping (never below zero — `decide` rejects a non-positive amount)
-    without restricting what can be typed, since a partly-typed number
-    passes through states a clamp would fight."""
+    Up and Down step by `step`, which covers the common edit: a quantity is
+    usually wrong by one. `minimum` clamps the stepping (not below zero;
+    `decide` rejects a non-positive amount) but does not restrict typing,
+    since a partly-typed number passes through values a clamp would
+    change."""
     if not interactive():
         return None
 
@@ -516,10 +512,10 @@ def _checklist(choices: list[Choice], checked: list[bool], cursor: int, title: s
 def multiselect(choices: list[Choice], *, title: str) -> list[int] | None:
     """The indices left checked, or `None` if the person cancelled. Returns
     `None` immediately when not interactive rather than falling back to a
-    typed equivalent: `sumac ask` only ever offers this option on a TTY (see
-    `cli.py`'s `_decision_options`), so there is no non-TTY caller to serve,
-    and inventing a line-typed index syntax for one would be a second
-    interface to keep in step with this one for no existing user."""
+    typed equivalent: `sumac ask` offers this option only on a TTY (see
+    `cli.py`'s `_decision_options`), so there is no non-TTY caller for it, and
+    a line-typed index syntax would be a second interface to maintain with no
+    user."""
     if not interactive():
         return None
 

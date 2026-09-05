@@ -7,17 +7,15 @@
 
 No vault, no model, no `mistralrs` import: the scenes are literal
 `AgentPlan`s, so a rendering change is compared against fixed input.
-`docs/journal/2026-09-04-trace-and-verdict-redesign.md` records why the
-model side cannot be compared that way — a `mistralrs.Runner`'s RNG stream
-position depends on everything that ran before it in the same session, so
-two sessions differing only in wording are not a controlled comparison.
-Rendering has none of that exposure, and this is where that difference is
-spent.
+`docs/journal/2026-09-04-trace-and-verdict-redesign.md` records why the model
+side cannot be compared that way: a `mistralrs.Runner`'s RNG stream position
+depends on everything that ran before it in the same session, so two sessions
+differing only in wording are not a controlled comparison. Rendering has no
+such dependency.
 
-The plans below are the ones the journal already argued about: the
-ragu/tomatoes compound request from the ask design entry's §2, and the
-fabricated "Basmati Rice Bag" from
-docs/journal/2026-09-04-basmati-rice-unit-mismatch.md.
+The plans below are ones the journal already discusses: the ragu/tomatoes
+compound request from the ask design entry's §2, and the fabricated "Basmati
+Rice Bag" from docs/journal/2026-09-04-basmati-rice-unit-mismatch.md.
 """
 
 from __future__ import annotations
@@ -95,7 +93,7 @@ def _consumption() -> AgentPlan:
 
 def _compound() -> AgentPlan:
     """The ask design entry's §2 worked example: one physical action, four
-    writes, thirteen `sumac add` invocations before `ask` existed."""
+    writes, and thirteen `sumac add` invocations before `ask` existed."""
     return AgentPlan(
         reply_text="",
         writes=(
@@ -147,8 +145,8 @@ def _compound() -> AgentPlan:
 
 def _fabricated() -> AgentPlan:
     """`docs/journal/2026-09-04-basmati-rice-unit-mismatch.md`'s outcome: a
-    product id the vault never held and the agent's own search never
-    returned."""
+    product id the vault never held and the agent's own search did not
+    return."""
     return AgentPlan(
         reply_text="",
         writes=(
@@ -226,8 +224,8 @@ def scene_trace() -> None:
 
 
 def scene_typed() -> None:
-    """The non-TTY path: the printed option table plus a typed line, which
-    is what a pipe, a test, and `evals/` see."""
+    """The non-TTY path: the printed option table plus a typed line, which is
+    what a pipe, a test, and `evals/` receive."""
     render.print_decision_options(
         [(o.key, o.description) for o in _decision_options(dry_run=False)]
     )
@@ -235,8 +233,8 @@ def scene_typed() -> None:
 
 
 def scene_checklist() -> None:
-    """`p`'s per-write picker, drawn at one cursor position — the live
-    version redraws this on every keypress."""
+    """`p`'s per-write picker, drawn at one cursor position. The live version
+    redraws on every keypress."""
     plan = _compound()
     choices = [
         prompt_ui.Choice(render.write_summary(w, LOCATIONS), checked=i != 2)
@@ -248,8 +246,8 @@ def scene_checklist() -> None:
 
 
 def scene_edit() -> None:
-    """`e`'s two menus: which change, then which field — drawn at one cursor
-    position each. The live versions redraw on every keypress."""
+    """`e`'s two menus, which change and then which field, each drawn at one
+    cursor position. The live versions redraw on every keypress."""
     plan = _compound()
     write = plan.writes[2]
     picker = [
@@ -284,8 +282,8 @@ def scene_edit() -> None:
 
 
 def scene_location_picker() -> None:
-    """`e`'s location field: the layout, filtered as you type, instead of a
-    free-text box you can put an unconfigured location into."""
+    """`e`'s location field: the layout, filtered as you type, rather than a
+    free-text field that accepts an unconfigured location."""
     from sumac.cli import _location_rows
 
     rows = _location_rows(LOCATIONS)
@@ -299,7 +297,7 @@ def scene_location_picker() -> None:
 
 def scene_value_pickers() -> None:
     """The unit and product fields: an existing value to reuse, or the typed
-    text as a new one — unlike a location, either may legitimately be new."""
+    text as a new one. Unlike a location, either may legitimately be new."""
     from collections import Counter
 
     from sumac.cli import _product_rows, _unit_rows

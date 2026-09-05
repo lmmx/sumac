@@ -257,12 +257,12 @@ def search_locations(locations: dict[str, models.Location], query: str) -> list[
     """Every active location whose id, name, or display path contains
     `query`, case-insensitively, ordered by display path.
 
-    The counterpart to `ledger.search_inventory`, which matches products and
-    only products: an agent asked to put something on "the top shelf of the
-    fridge" has to turn that phrase into a location id somehow, and searching
-    the inventory for "fridge" truthfully finds nothing, since no product is
-    called that. Matching the path, not just the name, is what makes a query
-    for a container find what nests inside it."""
+    The counterpart to `ledger.search_inventory`, which matches products
+    only: an agent asked to put something on "the top shelf of the fridge"
+    must resolve that phrase to a location id, and searching the inventory for
+    "fridge" correctly returns nothing, since no product has that name.
+    Matching the path as well as the name lets a query for a container return
+    the locations nested inside it."""
     lowered = query.strip().lower()
     if not lowered:
         return []

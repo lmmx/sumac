@@ -74,22 +74,20 @@ def _key(data_dir: Path) -> bytes:
 # `RUST_LOG` (confirmed against the built extension: it carries the `RUST_LOG`
 # string and `tracing_subscriber::filter::env` symbols from `mistralrs_core`).
 # Every line it prints on a successful load — the DType, the tokenizer, the
-# device map, the version, and the entire GGUF chat template verbatim, a
-# screen of Jinja on its own — is INFO, so `warn` drops all of it and still
-# shows anything that actually went wrong.
+# device map, the version, and the entire GGUF chat template verbatim — is
+# INFO, so `warn` suppresses all of it and still reports warnings and errors.
 QUIET_RUST_LOG = "warn"
 VERBOSE_RUST_LOG = "info"
 
 
 def _set_rust_log(verbose: bool) -> None:
-    """Chooses how much mistral.rs itself prints. Must run before the
-    extension module is first imported — the filter is built once, when the
-    Rust side installs its subscriber — which is why this sits next to the
-    lazy import rather than anywhere the flag is parsed.
+    """Sets how much mistral.rs itself prints. Must run before the extension
+    module is first imported, since the filter is built once when the Rust
+    side installs its subscriber; hence its position next to the lazy import
+    rather than where the flag is parsed.
 
-    A `RUST_LOG` already in the environment is never overridden: someone who
-    set it wants exactly what they asked for, including a per-target filter
-    finer than either value here."""
+    A `RUST_LOG` already in the environment is not overridden, so a
+    per-target filter finer than either value here keeps working."""
     if "RUST_LOG" not in os.environ:
         os.environ["RUST_LOG"] = VERBOSE_RUST_LOG if verbose else QUIET_RUST_LOG
 
@@ -515,12 +513,12 @@ def _decision_options(
 ) -> list[prompt_ui.Option]:
     """The responses available to a plan decision. Every option's `key` is
     both what a typed answer must equal and the keystroke that chooses it in
-    `prompt_ui.select`'s menu, so the two input paths cannot drift.
+    `prompt_ui.select`'s menu, so the two input paths cannot diverge.
 
     `pick` adds per-write selection, and is passed only for a plan with more
-    than one write on an interactive terminal — there is nothing for it to
-    do on a single write, and `prompt_ui.multiselect` has no line-typed
-    equivalent to offer a pipe or a test."""
+    than one write on an interactive terminal: it has no effect on a single
+    write, and `prompt_ui.multiselect` has no line-typed equivalent for a pipe
+    or a test."""
     options = [
         prompt_ui.Option(
             "a", "Accept" + (" — nothing will actually be written (--dry-run)" if dry_run else "")
@@ -552,15 +550,14 @@ def _decision_options(
 
 @dataclass(frozen=True, slots=True)
 class _AskView:
-    """Which diagnostics accompany a plan, and the one thing threaded into
+    """Which diagnostics accompany a plan, plus the one setting threaded into
     the agent itself.
 
-    All three default off, which is the change: `render.print_trace` and
-    `_print_usage` both used to print unconditionally, putting a table of
-    raw tool-call JSON and a line per round above the plan a person is
-    being asked to approve. The information is still one flag away, and the
-    trace still shows a one-line summary per call with no flag at all —
-    what changes is which of them is the default."""
+    All three default to off. `render.print_trace` and `_print_usage`
+    previously printed unconditionally, putting a table of raw tool-call JSON
+    and a line per round above the plan being approved. Both are still
+    available behind a flag, and the trace still prints a one-line summary
+    per call with no flag; only the default changed."""
 
     trace: bool = False
     stats: bool = False
@@ -568,12 +565,11 @@ class _AskView:
 
 
 def _show(data_dir: Path, key: bytes, plan: AgentPlan, *, view: _AskView) -> None:
-    """The preview itself: what the agent looked up, then what it proposes,
-    with `review`'s deterministic findings attached. `config.build_config`
-    is read here rather than passed in because a feedback or regenerate
-    round can land between two calls of this and the second one should
-    describe the vault as it is now, not as it was when the request
-    started."""
+    """The preview: what the agent looked up, then what it proposes, with
+    `review`'s deterministic findings attached. `config.build_config` is read
+    here rather than passed in because a feedback or regenerate round can
+    occur between two calls, and the second should describe the vault's
+    current state rather than its state when the request started."""
     render.print_trace(plan.trace, verbose=view.trace)
     if not plan.writes:
         return
@@ -589,10 +585,10 @@ def _show(data_dir: Path, key: bytes, plan: AgentPlan, *, view: _AskView) -> Non
 
 def _pick_writes(data_dir: Path, key: bytes, plan: AgentPlan) -> AgentPlan | None:
     """A plan narrowed to the writes left checked, or `None` if the person
-    cancelled or unchecked everything. Deliberately does not commit what was
-    picked: the narrowed plan goes back through the same preview and the
-    same accept prompt, so the subset is seen before it is written rather
-    than applied straight out of a checklist."""
+    cancelled or unchecked everything. Does not commit what was picked: the
+    narrowed plan goes back through the same preview and accept prompt, so
+    the subset is displayed before it is written rather than applied directly
+    from the checklist."""
     locations = ledger.load_locations_or_empty(data_dir, key)
     labels = [prompt_ui.Choice(render.write_summary(w, locations)) for w in plan.writes]
     picked = prompt_ui.multiselect(labels, title="Apply which changes?")
@@ -603,18 +599,18 @@ def _pick_writes(data_dir: Path, key: bytes, plan: AgentPlan) -> AgentPlan | Non
         plan,
         writes=tuple(plan.writes[i] for i in picked),
         # As in `_apply_edit`: the model's reply describes every change it
-        # proposed, which is no longer what this plan holds.
+        # proposed, which is no longer what this plan contains.
         reply_text="",
         trace=(),
     )
 
 
 def _build_agent(llm, data_dir: Path, key: bytes, *, model: ModelPreset, view: _AskView):  # noqa: ANN202
-    """Every `AgentRunner` this module constructs, in one place — four call
-    sites across the two decision loops each had to be updated in step
+    """Every `AgentRunner` this module constructs, in one place. Four call
+    sites across the two decision loops previously had to be updated together
     whenever the constructor gained an argument (`debug` in §43, `show_usage`
-    here), and two of them are inside `except` branches where a missed
-    argument surfaces only on a retry."""
+    here), and two of them are inside `except` branches where a missing
+    argument is only reported on a retry."""
     return llm.AgentRunner(
         data_dir,
         key,
@@ -628,9 +624,9 @@ def _build_agent(llm, data_dir: Path, key: bytes, *, model: ModelPreset, view: _
 
 
 def _decide_prompt(plan: AgentPlan, *, dry_run: bool, defer: bool) -> str:
-    """One decision, from the arrow-key menu on a terminal and from the
-    printed option table plus a typed line everywhere else — `prompt_ui.select`
-    picks between them, and returns the same strings either way."""
+    """One decision, read from the arrow-key menu on a terminal and from the
+    printed option table plus a typed line everywhere else. `prompt_ui.select`
+    chooses between them and returns the same strings for both."""
     options = _decision_options(
         dry_run,
         defer=defer,
@@ -673,9 +669,9 @@ def _prompt_start_over(current_prompt: str) -> str:
 
 
 # (key, column label, `ProposedWrite` field) for every field `e` can change.
-# The endpoint rows are dropped for a write that has no such endpoint —
-# `decide_change` rejects a purchase carrying a `from_location`, so offering
-# to fill one in would only ever produce a rejection.
+# The endpoint rows are dropped for a write that has no such endpoint:
+# `decide_change` rejects a purchase carrying a `from_location`, so filling
+# one in would produce a rejection.
 _EDIT_FIELDS = (
     ("p", "product", "product_id"),
     ("u", "unit", "unit"),
@@ -694,9 +690,9 @@ def _editable_fields(write: ProposedWrite) -> list[tuple[str, str, str]]:
 
 
 def _choose_write_to_edit(plan: AgentPlan, locations: dict[str, models.Location]) -> int | None:
-    """Which write `e` acts on. One write needs no choosing; more than one
-    gets the same menu every other decision in this command uses, and the
-    numbered list plus a typed index off a terminal."""
+    """Which write `e` acts on. A single write is selected without asking;
+    more than one gets the same menu every other decision in this command
+    uses, or the numbered list plus a typed index off a terminal."""
     if len(plan.writes) == 1:
         return 0
 
@@ -722,10 +718,9 @@ def _choose_write_to_edit(plan: AgentPlan, locations: dict[str, models.Location]
 
 
 def _location_rows(locations: dict[str, models.Location]) -> list[prompt_ui.Row]:
-    """Every active location, as `config show --locations-only` orders them —
-    by display path, so a container and everything nested under it stay
-    together. Typing filters on the path *and* the id, since either is a
-    reasonable thing to half-remember."""
+    """Every active location, ordered as `config show --locations-only`
+    orders them: by display path, so a container and everything nested under
+    it stay together. Typing filters on both the path and the id."""
     rows = [
         prompt_ui.Row(
             value=loc.id,
@@ -741,15 +736,15 @@ def _location_rows(locations: dict[str, models.Location]) -> list[prompt_ui.Row]
 def _unit_rows(
     observed: dict[str, Counter[str]], cfg: config.Config, product_id: str
 ) -> list[prompt_ui.Row]:
-    """Every unit this vault has ever used, the ones already used for
+    """Every unit this vault has recorded, the ones already used for
     `product_id` first, then the rest by how often they appear anywhere.
 
-    Frequency order, not alphabetical: a unit is reused far more often than
-    it is invented, and the handful a household actually says ("jar", "tin",
-    "packet") should be reachable without typing. The product's own units
-    lead because a write in one of them converts, and a write in any other
-    is what `decide._resolve_product` records as a separately-tracked
-    quantity with a warning."""
+    Frequency order rather than alphabetical: units are reused far more often
+    than new ones are introduced, so the few a household uses ("jar", "tin",
+    "packet") should be reachable without typing. The product's own units come
+    first because a write in one of them converts; `decide._resolve_product`
+    records a write in any other unit as a separately-tracked quantity with a
+    warning."""
     totals: Counter[str] = Counter()
     for units in observed.values():
         totals.update(units)
@@ -776,10 +771,9 @@ def _unit_rows(
 
 
 def _product_rows(cfg: config.Config) -> list[prompt_ui.Row]:
-    """Every registered, unretired product with the unit it is tracked in —
-    the unit is half of what makes a product the right one to pick, and
-    seeing it here is what turns "Strawberry Jam" from a name into a choice
-    with consequences."""
+    """Every registered, unretired product with the unit it is tracked in.
+    The unit is shown because it determines whether a subsequent write
+    converts or is recorded separately."""
     return [
         prompt_ui.Row(
             value=product.id,
@@ -793,12 +787,12 @@ def _product_rows(cfg: config.Config) -> list[prompt_ui.Row]:
 def _choose_location(
     locations: dict[str, models.Location], field: str, current: str | None
 ) -> str | None:
-    """A location picked from the layout, not typed. Locations are a closed
-    set — `decide.resolve_location` rejects one that is not configured, and
-    unlike a product there is no auto-registration to fall back on — so
-    offering the list is both possible and the only way to be sure the answer
-    resolves. `None` when cancelled or when there is no terminal to pick on,
-    which leaves the field as it was."""
+    """A location picked from the layout rather than typed. Locations are a
+    closed set: `decide.resolve_location` rejects one that is not configured,
+    and unlike a product there is no auto-registration. Picking from the list
+    is therefore both possible and sufficient to guarantee the value resolves.
+    `None` when cancelled or when there is no terminal, which leaves the field
+    unchanged."""
     rows = _location_rows(locations)
     if not rows:
         render.print_error("No locations configured — nothing to pick from.")
@@ -809,11 +803,11 @@ def _choose_location(
 def _choose_from_rows(
     rows: list[prompt_ui.Row], *, title: str, current: str | None, new_hint: str
 ) -> str | None:
-    """A picker that also takes something not on the list. Unlike a location,
-    a product or a unit may legitimately be one the vault has never seen —
-    `decide` registers a product on first use, and records an unconvertible
-    unit as its own tracked quantity — so the list is a shortcut past
-    retyping a known value, never a restriction to known values."""
+    """A picker that also accepts a value not on the list. Unlike a location,
+    a product or a unit may legitimately be new: `decide` registers a product
+    on first use, and records an unconvertible unit as its own tracked
+    quantity. The list saves retyping a known value; it does not restrict the
+    field to known values."""
     return prompt_ui.pick(rows, title=title, current=current, allow_new=True, new_hint=new_hint)
 
 
@@ -824,18 +818,17 @@ def _edit_fields_by_menu(
     locations: dict[str, models.Location],
     resume: dict[str, str | None] | None = None,
 ) -> dict[str, str | None] | None:
-    """Pick a field, retype that one, repeat until done — rather than walking
-    every field in order and pressing Enter through the ones that were
-    already right, which is what correcting a single mistyped location used
-    to cost. Values are shown on their own rows, so the menu doubles as the
-    record of what has been changed so far.
+    """Pick a field, change that one, repeat until done, rather than walking
+    every field in order and pressing Enter through the ones already correct.
+    Each row shows the field's current value, so the menu also shows what has
+    been changed so far.
 
-    Returns the edited values, or `None` if cancelled. Nothing is validated
-    or applied here; `_apply_edit` does both, once, on the way out."""
+    Returns the edited values, or `None` if cancelled. Nothing is validated or
+    applied here; `_apply_edit` does both, once."""
     fields = _editable_fields(write)
     # Seeded from every field, not just the editable ones: an endpoint this
-    # write does not have still has to reach `_apply_edit` as `None` rather
-    # than be missing, since `decide_change` distinguishes the two.
+    # write does not have must reach `_apply_edit` as `None` rather than be
+    # absent, since `decide_change` distinguishes the two.
     values: dict[str, str | None] = (
         dict(resume)
         if resume is not None
@@ -861,9 +854,9 @@ def _edit_fields_by_menu(
         )
         if answer == "d":
             return values
-        # "r" is what `prompt_ui.select` answers for Escape — cancelling an
-        # edit, here, not rejecting the plan: the caller returns the plan
-        # unchanged and asks for a decision on it again.
+        # `prompt_ui.select` answers "r" for Escape. Here that means cancel
+        # the edit, not reject the plan: the caller returns the plan unchanged
+        # and asks for a decision on it again.
         if answer in ("c", "r"):
             return None
         match = next((row for row in fields if row[0] == answer), None)
@@ -892,19 +885,19 @@ def _edit_fields_by_menu(
                 new_hint="new unit",
             )
         else:
-            # A number, not a value to choose from a list — and not free text
-            # either: a field that accepted "three" and reported it three
-            # keystrokes later, as the edit was being applied, was failing at
-            # the only job it had.
+            # A number, so neither a list to choose from nor free text: the
+            # previous free-text field accepted "three" and reported it
+            # invalid several keystrokes later, while the edit was being
+            # applied.
             picked = prompt_ui.number(values["amount"] or "", title="Amount?")
         if picked is not None:
             values[field] = picked
 
 
 def _edit_fields_by_walkthrough(write: ProposedWrite) -> dict[str, str | None]:
-    """Every field in order, each defaulting to what it already holds — the
-    only shape a piped or scripted answer can take, and unchanged from what
-    `e` has always read."""
+    """Every field in order, each defaulting to its current value. The only
+    form a piped or scripted answer can take, and unchanged from what `e` has
+    always read."""
     values: dict[str, str | None] = {
         "product_id": typer.prompt("product_id", default=write.product_id),
         "unit": typer.prompt("unit", default=write.unit),
@@ -927,11 +920,11 @@ def _apply_edit(
     values: dict[str, str | None],
 ) -> AgentPlan | None:
     """The plan with the edited write in place, or `None` if `decide_change`
-    rejected it — re-validated through the same gate every model-proposed
-    write already passes, so a mistake in the correction cannot reach
-    `commit` unchecked. `None` rather than the unchanged plan so the caller
-    can offer the menu again with the edits still in it, instead of throwing
-    away four good fields because a fifth was wrong."""
+    rejected it. Re-validated through the same gate every model-proposed
+    write passes, so a mistake in the correction cannot reach `commit`
+    unchecked. `None` rather than the unchanged plan lets the caller offer
+    the menu again with the edits retained, rather than discarding four
+    correct fields because a fifth was wrong."""
     from sumac import llm  # local: only reachable from `ask`, which already imported it
 
     write = plan.writes[index]
@@ -969,7 +962,7 @@ def _apply_edit(
         return None
 
     # The endpoints `decide` just resolved, for the same reason
-    # `_propose_write` records those and not what it was handed: a display
+    # `_propose_write` records those rather than what it was passed: a display
     # path resolves, and every lookup downstream is by id.
     edited = dataclass_replace(
         edited,
@@ -980,10 +973,10 @@ def _apply_edit(
     writes[index] = dataclass_replace(
         edited,
         warnings=tuple(messages),
-        # Recomputed, not carried over and not dropped: the projection
-        # belonged to the write the model proposed, and this is a different
-        # one — but it is just as computable, from the records `decide` just
-        # returned for it.
+        # Recomputed rather than carried over or dropped: the projection
+        # described the write the model proposed, and this is a different
+        # write, but the records `decide` just returned for it give the same
+        # projection.
         effects=llm.effects(
             inventory,
             cfg,
@@ -1001,22 +994,20 @@ def _apply_edit(
         | write.edited_fields,
     )
     render.print_success("Edit applied — nothing written yet, decide again below.")
-    # The reply and the trace describe what the model proposed, and this plan
-    # is no longer that: the reply narrates the write that was just replaced
-    # ("A packet of Ham has been added...", after the ham became something
-    # else somewhere else), and reprinting the trace on the next pass reads
-    # as though the agent had run again. Both are already in the transcript
-    # above, where they are true of the moment they were printed.
+    # The reply and the trace describe what the model proposed, which this
+    # plan no longer is: the reply describes the write that was just replaced,
+    # and reprinting the trace on the next pass suggests the agent ran again.
+    # Both remain in the transcript above, where they describe the state at
+    # the time they were printed.
     return dataclass_replace(plan, writes=tuple(writes), reply_text="", trace=())
 
 
 def _prompt_edit(data_dir: Path, key: bytes, plan: AgentPlan) -> AgentPlan:
-    """Manually corrects one proposed write's fields directly — no model
-    call at all, and the fastest fix for something the model got mostly
-    right (a mistyped product name it had spelled correctly moments
-    earlier in a tool result, a location one digit off). "Regenerate" and
-    "start over" are the tools for a model reasoning past correcting; this
-    is only for its typing."""
+    """Corrects one proposed write's fields directly, with no model call.
+    Suited to a write that is mostly correct: a mistyped product name the
+    model spelled correctly in an earlier tool result, or a location one
+    character off. "Regenerate" and "start over" handle a model whose
+    reasoning was wrong; this handles a wrong value."""
     locations = ledger.load_locations_or_empty(data_dir, key)
     index = _choose_write_to_edit(plan, locations)
     if index is None:
@@ -1024,9 +1015,9 @@ def _prompt_edit(data_dir: Path, key: bytes, plan: AgentPlan) -> AgentPlan:
     write = plan.writes[index]
 
     if not prompt_ui.interactive():
-        # One pass, exactly as `e` has always read off a terminal: a piped
-        # answer cannot react to a rejection, so re-prompting would consume
-        # the next scripted line as a field value or block on empty input.
+        # One pass, as `e` has always read off a terminal: a piped answer
+        # cannot react to a rejection, so re-prompting would consume the next
+        # scripted line as a field value or block on empty input.
         values = _edit_fields_by_walkthrough(write)
         return _apply_edit(data_dir, key, plan, index, values) or plan
 
@@ -1038,8 +1029,8 @@ def _prompt_edit(data_dir: Path, key: bytes, plan: AgentPlan) -> AgentPlan:
         updated = _apply_edit(data_dir, key, plan, index, values)
         if updated is not None:
             return updated
-        # Rejected. Back to the menu holding what was typed, so a correction
-        # is one field away rather than five fields again.
+        # Rejected. Return to the menu with the typed values retained, so
+        # correcting it takes one field rather than all five again.
         resume = values
 
 
@@ -1297,8 +1288,8 @@ def models_pull(
     `sumac ask` relies on, without needing to run `sumac ask` once per
     model and pick it from the "g" regenerate prompt. Already-cached
     presets are skipped."""
-    # The one command whose whole job is a long model load: mistral.rs's own
-    # progress is the only sign it is working, so this keeps it.
+    # This command exists to perform a long model load, and mistral.rs's own
+    # progress output is the only indication of progress, so it is kept.
     llm = _import_llm(verbose=True)
     targets = list(llm.MODEL_PRESETS)
     if names:

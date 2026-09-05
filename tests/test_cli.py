@@ -901,10 +901,9 @@ def test_ask_edit_with_an_invalid_amount_leaves_the_plan_unchanged(
 def test_ask_plan_preview_shows_what_is_already_there(
     data_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`current_amount`, captured at propose time, renders as descriptive
-    context — not a computed "after" total, since `decide_change`'s own
-    shortfall reconciliation at commit time can differ from a naive
-    subtraction."""
+    """`current_amount`, captured at propose time, renders as context rather
+    than a computed "after" total, since `decide_change`'s shortfall
+    reconciliation at commit time can differ from a subtraction."""
     _run(data_dir, "init")
     _patch_agent_runner(monkeypatch, [_consumption_plan(amount="1", current_amount="3")])
 
@@ -930,9 +929,8 @@ def test_decision_options_include_every_choice() -> None:
 
 
 def test_only_the_feedback_option_prompts_for_text() -> None:
-    """Every other option is one keystroke; the free-text row is the one
-    that cannot be, so it is the one `prompt_ui.select` opens an editor
-    for."""
+    """Every other option is one keystroke; the free-text row cannot be, so
+    it is the one `prompt_ui.select` opens an editor for."""
     text_options = [
         o for o in _decision_options(dry_run=False, defer=True, pick=True) if o.prompt_for_text
     ]
@@ -1102,7 +1100,7 @@ def _effect_plan() -> llm.AgentPlan:
 
 
 def _ungrounded_plan() -> llm.AgentPlan:
-    """The shape `docs/journal/2026-09-04-basmati-rice-unit-mismatch.md`
+    """The case `docs/journal/2026-09-04-basmati-rice-unit-mismatch.md`
     reconstructed: a product id in no search result and in no config
     record."""
     return llm.AgentPlan(
@@ -1155,8 +1153,8 @@ def test_ask_preview_badges_a_product_nothing_looked_up(
 def test_ask_trace_is_one_line_per_call_by_default(
     data_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The raw JSON table used to print above every plan; the summary says
-    what the call found without putting a screen of it there."""
+    """The raw JSON table previously printed above every plan; the summary
+    reports what the call found in one line instead."""
     _run(data_dir, "init")
     _patch_agent_runner(monkeypatch, [_ungrounded_plan()])
 
@@ -1180,8 +1178,8 @@ def test_ask_trace_flag_restores_the_raw_result(
 
 
 def test_ask_stats_flag_reaches_the_agent(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """`_print_usage`'s per-round lines are off unless asked for — the flag
-    is threaded into `AgentRunner`, not filtered at print time."""
+    """`_print_usage`'s per-round lines are off unless requested; the flag is
+    threaded into `AgentRunner` rather than filtered at print time."""
     _run(data_dir, "init")
     fake_cls = _patch_agent_runner(monkeypatch, [_effect_plan(), _effect_plan()])
 
@@ -1213,9 +1211,9 @@ def _patch_menu(
     numbers: list[str] | None = None,
 ) -> None:
     """Drives the interactive path off a terminal: `prompt_ui.select` answers
-    from `selections` in order (the decision prompt and the edit menus all go
+    from `selections` in order (the decision prompt and the edit menus both go
     through it), `prompt_ui.number` from `numbers` for the amount field, and
-    `typer.prompt` from `entries` for anything still free-text."""
+    `typer.prompt` from `entries` for the remaining free-text fields."""
     import typer as typer_module
 
     monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
@@ -1230,9 +1228,9 @@ def _patch_menu(
 def test_ask_edit_menu_retypes_only_the_chosen_field(
     data_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`e` then the amount row then done — product, unit and location are
-    never asked for, which is the whole difference from walking every field
-    in order and pressing Enter through the ones already right."""
+    """`e`, then the amount row, then done: product, unit and location are
+    not asked for, unlike the walkthrough, which asks for every field in
+    order."""
     _run(data_dir, "init")
     _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
     _run(data_dir, "add", "purchase", "jam", "3", "jar", "--to", "pantry")
@@ -1265,9 +1263,8 @@ def test_ask_edit_menu_cancel_leaves_the_plan_unchanged(
 def test_ask_edit_menu_escape_cancels_the_edit_not_the_plan(
     data_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Escape inside the field menu answers "r", which means cancel *this
-    edit* — the plan comes back for another decision rather than being
-    discarded."""
+    """Escape inside the field menu answers "r", meaning cancel this edit:
+    the plan returns for another decision rather than being discarded."""
     _run(data_dir, "init")
     _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
     _run(data_dir, "add", "purchase", "jam", "3", "jar", "--to", "pantry")
@@ -1281,9 +1278,8 @@ def test_ask_edit_menu_escape_cancels_the_edit_not_the_plan(
 
 
 def test_edit_menu_offers_only_the_endpoints_a_write_has() -> None:
-    """A purchase carrying a `from_location` is rejected by
-    `decide_change`, so offering to fill one in could only ever produce a
-    rejection."""
+    """A purchase carrying a `from_location` is rejected by `decide_change`,
+    so offering to fill one in would produce a rejection."""
     consumption = _consumption_plan().writes[0]
     discovery = llm.ProposedWrite(
         kind=ChangeKind.DISCOVERY,
@@ -1313,7 +1309,7 @@ def test_edit_menu_offers_only_the_endpoints_a_write_has() -> None:
 
 def test_rust_log_defaults_to_warn(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every line mistral.rs prints on a successful load is INFO, including
-    the GGUF chat template in full — a screen of Jinja above the answer."""
+    the GGUF chat template in full."""
     monkeypatch.delenv("RUST_LOG", raising=False)
 
     _set_rust_log(verbose=False)
@@ -1330,8 +1326,8 @@ def test_rust_log_is_info_when_verbose(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_an_existing_rust_log_is_never_overridden(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Someone who set it wants exactly what they asked for — including a
-    per-target filter finer than either value this module chooses between."""
+    """A `RUST_LOG` set by the caller is kept, including a per-target filter
+    finer than either value this module chooses between."""
     monkeypatch.setenv("RUST_LOG", "mistralrs_core::gguf::chat_template=off,info")
 
     _set_rust_log(verbose=False)
@@ -1341,8 +1337,8 @@ def test_an_existing_rust_log_is_never_overridden(monkeypatch: pytest.MonkeyPatc
 
 
 def test_edit_location_rows_are_ordered_by_path_and_skip_retired() -> None:
-    """The order `sumac config show --locations-only` shows, so a container
-    and what nests under it stay together."""
+    """The order `sumac config show --locations-only` uses, so a container
+    and the locations nested under it stay together."""
     from sumac.cli import _location_rows
 
     locations = {
@@ -1362,9 +1358,9 @@ def test_edit_location_rows_are_ordered_by_path_and_skip_retired() -> None:
 def test_ask_edit_picks_a_location_instead_of_typing_one(
     data_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Locations are a closed set — `decide` rejects an unconfigured one and
-    there is no auto-registration to fall back on — so the edit menu offers
-    the layout rather than a free-text field."""
+    """Locations are a closed set — `decide` rejects an unconfigured one, and
+    there is no auto-registration — so the edit menu offers the layout rather
+    than a free-text field."""
     _run(data_dir, "init")
     _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
     _run(data_dir, "config", "add-location", "Fridge", "--id", "fridge")
@@ -1403,8 +1399,8 @@ def test_ask_edit_cancelling_the_location_picker_keeps_the_current_one(
 
 
 def test_unit_rows_lead_with_the_units_already_used_for_the_product() -> None:
-    """A write in one of the product's own units converts; one in any other
-    is recorded as a separately-tracked quantity with a warning."""
+    """A write in one of the product's own units converts; a write in any
+    other unit is recorded as a separately-tracked quantity with a warning."""
     from sumac.cli import _unit_rows
 
     products = {"jam": models.Product(id="jam", name="Jam", unit="jar")}
@@ -1540,8 +1536,8 @@ def _edit_scenario(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 def test_an_edit_drops_the_reply_that_described_the_old_plan(
     data_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The model narrated the write it proposed; after that write is
-    replaced the sentence is no longer true of anything on screen."""
+    """The model's reply described the write it proposed; after that write is
+    replaced, the sentence describes nothing on screen."""
     _edit_scenario(data_dir, monkeypatch)
     _patch_menu(monkeypatch, selections=["e", "n", "d", "r"], numbers=["2"])
 
@@ -1556,7 +1552,7 @@ def test_an_edit_drops_the_reply_that_described_the_old_plan(
 def test_an_edit_does_not_reprint_the_trace(
     data_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Reprinting it on the next pass reads as though the agent ran again."""
+    """Reprinting it on the next pass suggests the agent ran again."""
     _edit_scenario(data_dir, monkeypatch)
     _patch_menu(monkeypatch, selections=["e", "n", "d", "r"], numbers=["2"])
 
@@ -1569,8 +1565,8 @@ def test_an_edit_does_not_reprint_the_trace(
 def test_an_edit_recomputes_the_before_and_after(
     data_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The projection belonged to the write the model proposed; the edited
-    one is a different write and just as computable."""
+    """The projection described the write the model proposed; the edited one
+    is a different write, and its projection is equally computable."""
     _edit_scenario(data_dir, monkeypatch)
     _patch_menu(monkeypatch, selections=["e", "n", "d", "r"], numbers=["2"])
 
@@ -1583,9 +1579,9 @@ def test_an_edit_recomputes_the_before_and_after(
 def test_a_product_typed_by_hand_is_not_reported_as_ungrounded(
     data_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`ungrounded` asks whether the model produced a name from nowhere. A
-    name typed into the edit menu by the person reviewing the plan is not
-    that — though it is still a new product, and still says so."""
+    """`ungrounded` reports a name the model produced without a source. A
+    name typed into the edit menu has one, though it is still a new product
+    and is still reported as one."""
     _edit_scenario(data_dir, monkeypatch)
     _patch_menu(monkeypatch, selections=["e", "p", "d", "r"])
     monkeypatch.setattr(prompt_ui, "pick", lambda *a, **k: "Billy Bear Ham")
@@ -1600,9 +1596,9 @@ def test_a_product_typed_by_hand_is_not_reported_as_ungrounded(
 def test_a_rejected_edit_returns_to_the_menu_with_the_edits_intact(
     data_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A fifth field being wrong should not throw away four good ones. The
-    menu comes back holding what was typed, so the correction is one field
-    away rather than five fields again."""
+    """A fifth field being wrong should not discard four correct ones. The
+    menu returns with the typed values retained, so correcting it takes one
+    field rather than all five again."""
     _run(data_dir, "init")
     _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
     _run(data_dir, "add", "purchase", "jam", "3", "jar", "--to", "pantry")
@@ -1635,7 +1631,7 @@ def test_a_rejected_edit_off_a_terminal_still_leaves_the_plan_alone(
     data_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A piped answer cannot react to a rejection, so the walkthrough stays
-    one pass — re-prompting would eat the next scripted line."""
+    one pass: re-prompting would consume the next scripted line."""
     _run(data_dir, "init")
     _run(data_dir, "config", "add-location", "Pantry", "--id", "pantry")
     _run(data_dir, "add", "purchase", "jam", "3", "jar", "--to", "pantry")

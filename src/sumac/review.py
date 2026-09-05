@@ -2,20 +2,20 @@
 about to accept it.
 
 Every check here reads only the plan, the current `Config`, and the plan's
-own tool-call trace — no model call, no second opinion from the thing being
-checked. That matters twice over. It costs no latency in front of a decision
-someone is already waiting on, and it is reproducible: `docs/journal/
-2026-09-04-trace-and-verdict-redesign.md` records why anything routed back
-through the model is not (a `mistralrs.Runner`'s RNG stream position depends
-on everything that ran before it in the same session).
+own tool-call trace: no model call, and no second opinion from the model
+being checked. That has two consequences. It adds no latency to a decision
+someone is already waiting on, and it is reproducible, which anything routed
+back through the model is not — `docs/journal/2026-09-04-trace-and-verdict-redesign.md`
+records why (a `mistralrs.Runner`'s RNG stream position depends on everything
+that ran before it in the same session).
 
-The check this module exists for is `ungrounded`. `docs/journal/
-2026-09-04-basmati-rice-unit-mismatch.md` traces a real eval failure to a
-plan whose `product_id` — "Basmati Rice Bag" — was in no search result and in
-no config record, produced by the model to satisfy two constraints at once
-after `_maybe_force_action` and `_maybe_self_review` each pushed it once. The
-information needed to spot that was already in `AgentPlan.trace` at the
-moment the plan was shown; nothing looked at it.
+The check this module exists for is `ungrounded`.
+`docs/journal/2026-09-04-basmati-rice-unit-mismatch.md` traces an eval failure
+to a plan whose `product_id` — "Basmati Rice Bag" — was in no search result and
+in no config record, produced by the model to satisfy two constraints at once
+after `_maybe_force_action` and `_maybe_self_review` each forced a further
+round. The information needed to detect that was already in `AgentPlan.trace`
+when the plan was displayed; nothing read it.
 """
 
 from __future__ import annotations
@@ -29,28 +29,27 @@ if TYPE_CHECKING:
     from sumac.llm import AgentPlan, ProposedWrite, ToolCallRecord
 
 # Tool results the vault supplied, as opposed to ones echoing what the model
-# just asked for. `_propose_write`'s own result JSON repeats the `product_id`
-# it was called with, so a grounding check that read every trace entry would
-# find any fabricated id "grounded" in the record of its own fabrication.
+# just asked for. `_propose_write`'s result JSON repeats the `product_id` it
+# was called with, so a grounding check reading every trace entry would treat
+# any invented id as grounded in the record of the call that invented it.
 READ_TOOLS = frozenset({"sumac_find_inventory"})
 
 
 @dataclass(frozen=True, slots=True)
 class Finding:
-    """One thing about a single proposed write worth a second look. `label`
-    is the badge shown on the write's own row; `detail` is the sentence
-    under it."""
+    """One observation about a single proposed write. `label` is the badge
+    shown on the write's own row; `detail` is the line under it."""
 
     code: str
     label: str
     detail: str
-    # Whether `detail` is printed under the write, or the badge stands
-    # alone. `decide` already attaches its own warning text to a write it
+    # Whether `detail` is printed under the write, or the badge appears
+    # alone. `decide` attaches its own warning text to a write it
     # auto-registered or recorded in an unconvertible unit
-    # (`_resolve_product`), and `render.print_plan` prints those — a finding
-    # that restated one would put the same sentence on screen twice. Only a
-    # finding `decide` has no way to reach explains itself: `decide` never
-    # sees the tool-call trace, so `ungrounded` is the one it cannot know.
+    # (`_resolve_product`), and `render.print_plan` prints those, so a finding
+    # restating one would duplicate the same sentence. Only findings `decide`
+    # cannot make are printed: `decide` never sees the tool-call trace, so
+    # `ungrounded` is one it cannot produce.
     explain: bool = False
 
 
@@ -66,10 +65,9 @@ def review_write(write: ProposedWrite, cfg: config.Config, searched: str) -> tup
     product = cfg.known_products.get(write.product_id)
 
     if product is None:
-        # A product id the person typed into the edit menu is not the model
-        # producing a name from nowhere, which is the only thing `ungrounded`
-        # is about — everything else about a new product still applies, and
-        # `new-product` below still fires.
+        # `ungrounded` reports a product id the model produced without a
+        # source. A product id the person typed into the edit menu has a
+        # source, so it is excluded; `new-product` below still applies.
         if write.product_id.lower() not in searched and "product_id" not in write.edited_fields:
             findings.append(
                 Finding(
@@ -137,18 +135,17 @@ _HEADLINE_PHRASE = {
 
 
 def headline(findings: tuple[tuple[Finding, ...], ...]) -> str:
-    """A one-line summary of what the plan does that is worth knowing before
-    reading it — "2 changes · 1 creates a new product". Counts writes, not
-    findings: three findings on one write is still one write to look at.
-    `near-match` never appears here on its own, since it only ever
-    accompanies `new-product`."""
+    """A one-line summary above the plan: "2 changes · 1 creates a new
+    product". Counts writes, not findings, since three findings on one write
+    is still one write to check. `near-match` does not appear here, as it
+    only accompanies `new-product`."""
     total = len(findings)
     flagged = [per_write for per_write in findings if per_write]
     if total == 1 and not flagged:
-        # One change with nothing to flag: the row underneath already says
-        # everything a "1 change" line would, and a header that only ever
-        # restates the obvious trains the eye to skip the one case where it
-        # says something.
+        # One change with nothing flagged: the row underneath already states
+        # everything a "1 change" line would. A header that repeats the row
+        # is skipped over, including in the cases where it carries a
+        # finding.
         return ""
     parts = [f"{total} change" + ("" if total == 1 else "s")]
     for code, (singular, plural) in _HEADLINE_PHRASE.items():

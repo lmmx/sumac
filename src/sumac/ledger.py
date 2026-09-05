@@ -350,11 +350,10 @@ def _fold_into(
     meaningful result; sorting an already-sorted list is a no-op, so this
     changes nothing for `build_inventory`'s existing callers.
 
-    `state` is a parameter rather than a local so `project` can fold a
-    handful of already-decided records onto a copy of a *populated*
-    inventory — the same event arithmetic, the same anomaly reporting,
-    starting from something other than empty. `_fold` passes an empty dict
-    and is otherwise unchanged."""
+    `state` is a parameter rather than a local so `project` can fold a small
+    number of already-decided records onto a copy of a populated inventory:
+    the same event arithmetic and anomaly reporting, starting from a non-empty
+    state. `_fold` passes an empty dict and is otherwise unchanged."""
     records = sorted(records, key=lambda r: (r.ts, r.actor, r.id))
     anomalies: list[Anomaly] = []
 
@@ -465,9 +464,9 @@ def _fold(
 def _event_records(objs: list[dict]) -> list[_EventRecord]:
     """Already-serialized record dicts (`decide.Write.obj`) parsed back into
     the `_EventRecord` shape the fold consumes, through the same
-    `RecordSchema`/`upcast` path `_load_v2` uses on records read from disk —
-    a projection built any other way would be a second, drifting
-    interpretation of the same wire format."""
+    `RecordSchema`/`upcast` path `_load_v2` uses on records read from disk. A
+    projection built any other way would be a second interpretation of the
+    same wire format, free to diverge from it."""
     records: list[_EventRecord] = []
     for obj in objs:
         record = RecordSchema.model_validate(obj).to_domain()
@@ -485,19 +484,19 @@ def project(inventory: Inventory, locations: dict[str, Location], objs: list[dic
     """The inventory that folding `objs` onto `inventory` produces, without
     writing anything.
 
-    Built for `sumac ask`'s preview: `decide.decide_change` already returns
-    the exact records a command would append, and this folds those records —
-    not the command's arguments — so the projection includes whatever
-    `decide` decided, the §3.5 shortfall `Counted` correction included. That
-    correction is precisely why `render.print_plan` has never shown an
-    "after" number computed by subtracting an amount from a current holding:
-    the two disagree exactly when a consumption exceeds what's on the shelf.
+    Built for `sumac ask`'s preview: `decide.decide_change` returns the exact
+    records a command would append, and this folds those records rather than
+    the command's arguments, so the projection includes everything `decide`
+    decided, including the §3.5 shortfall `Counted` correction. That correction
+    is why `render.print_plan` has never shown an "after" computed by
+    subtracting an amount from a current holding: the two differ whenever a
+    consumption exceeds the recorded holding.
 
-    A projection describes the moment it was computed. `AgentRunner.commit`
-    re-decides against freshly reloaded state (docs/journal/
-    2026-09-01-ask-agent-design.md §14), so nothing here is ever replayed as
-    a write, and a plan accepted after real time has passed can commit
-    different records than these."""
+    A projection describes the state at the time it was computed.
+    `AgentRunner.commit` re-decides against freshly reloaded state
+    (docs/journal/2026-09-01-ask-agent-design.md §14), so nothing here is
+    replayed as a write, and a plan accepted after time has passed can commit
+    different records."""
     state = {loc_id: dict(entries) for loc_id, entries in inventory.by_location.items()}
     anomalies = _fold_into(state, _event_records(objs), locations)
     return Inventory(by_location=state, anomalies=tuple(anomalies))

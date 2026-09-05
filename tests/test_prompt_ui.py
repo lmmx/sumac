@@ -1,11 +1,10 @@
 """`prompt_ui`'s two input paths, driven without a terminal.
 
 The interactive path is exercised by monkeypatching `interactive()` to True
-and `read_key` to a scripted list of keypresses — the same shape
+and `read_key` to a scripted list of keypresses, the same shape
 `tests/test_llm.py` uses for a scripted model. Rich renders its `Live` region
 into a non-terminal console without error, so the assertions here are about
-what `select`/`multiselect` return, which is the whole of their contract to
-`cli.py`.
+what `select`/`multiselect` return, which is what `cli.py` depends on.
 """
 
 from __future__ import annotations
@@ -19,10 +18,10 @@ from sumac import prompt_ui
 
 
 def _keys(monkeypatch: pytest.MonkeyPatch, *presses: str) -> None:
-    """Drives the menu's logic with the terminal itself stubbed out: pytest's
-    stdin has no attributes to put in key mode, and what these tests are about
-    is what a keypress *means*, not how it is read. `tests/
-    test_prompt_ui_pty.py` covers the reading, over a real pty."""
+    """Drives the menu's logic with the terminal stubbed out: pytest's stdin
+    has no attributes to put in key mode, and these tests cover what a
+    keypress means rather than how it is read. `tests/test_prompt_ui_pty.py`
+    covers the reading, over a real pty."""
     monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
     monkeypatch.setattr(prompt_ui, "raw_mode", nullcontext)
     stream: Iterator[str] = iter(presses)
@@ -39,7 +38,7 @@ OPTIONS = [
 
 def test_not_interactive_without_a_terminal() -> None:
     """pytest's own stdin is not a tty, so this is the state every test in
-    the suite and every piped invocation actually runs in."""
+    the suite and every piped invocation runs in."""
     assert prompt_ui.interactive() is False
 
 
@@ -75,7 +74,7 @@ def test_arrow_up_wraps_to_the_last_row(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_a_row_key_chooses_it_directly(monkeypatch: pytest.MonkeyPatch) -> None:
     """The accelerator is the same character the non-TTY path accepts as a
-    typed answer — one value, both paths."""
+    typed answer: one value serves both paths."""
     _keys(monkeypatch, "e")
     assert prompt_ui.select(OPTIONS, default="a") == "e"
 
@@ -86,8 +85,8 @@ def test_an_unbound_key_is_ignored_rather_than_chosen(monkeypatch: pytest.Monkey
 
 
 def test_escape_rejects(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Escape and Ctrl-C answer "r", not an exception: a plan someone
-    escaped out of is a rejected plan, which every caller already handles."""
+    """Escape and Ctrl-C answer "r" rather than raising: a plan escaped out
+    of is a rejected plan, which every caller already handles."""
     _keys(monkeypatch, prompt_ui.ESC)
     assert prompt_ui.select(OPTIONS, default="a") == "r"
 

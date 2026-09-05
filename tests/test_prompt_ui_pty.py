@@ -1,14 +1,14 @@
 """`prompt_ui`'s key reading, driven over a real pty.
 
 `tests/test_prompt_ui.py` monkeypatches `read_key` to a scripted list, which
-tests the menu's logic and nothing about how a keypress is actually read —
-and a real Down arrow was misread as Escape (so it rejected the plan and
-exited) for exactly as long as that was the only coverage. These tests write
-the bytes a terminal really sends into a pty and let `read_key` do its job.
+tests the menu's logic and nothing about how a keypress is read. A real Down
+arrow was misread as Escape — rejecting the plan and exiting — for as long as
+that was the only coverage. These tests write the bytes a terminal sends into
+a pty and let `read_key` read them.
 
-`os.fdopen(slave, "r")` matters: the bug was Python's buffered
-`TextIOWrapper` reading ahead past the byte it returned, so a test that
-substituted an unbuffered stand-in for `sys.stdin` would pass against the
+`os.fdopen(slave, "r")` is required: the bug was Python's buffered
+`TextIOWrapper` reading ahead past the byte it returned, so a test
+substituting an unbuffered stand-in for `sys.stdin` would pass against the
 broken code.
 """
 
@@ -41,19 +41,18 @@ def terminal(monkeypatch: pytest.MonkeyPatch) -> Iterator[int]:
 
 
 def _read(terminal: int, sequence: bytes) -> str:
-    """Writes *after* entering key mode, never before: `raw_mode` changes the
+    """Writes after entering key mode, not before: `raw_mode` changes the
     terminal with `TCSAFLUSH`, which discards anything already queued (see its
-    docstring — typeahead from before a plan was drawn is not a decision about
-    it). A test that wrote first would be racing that flush."""
+    docstring). A test that wrote first would race that flush."""
     with prompt_ui.raw_mode():
         os.write(terminal, sequence)
         return prompt_ui.read_key()
 
 
 def _type(terminal: int, *sequences: bytes, delay: float = 0.05) -> None:
-    """Feeds keypresses from a thread, spaced out, so they arrive after the
-    menu has entered key mode and drawn itself — which is also how a person
-    types them, one at a time rather than as one buffered burst."""
+    """Feeds keypresses from a thread, spaced apart, so they arrive after the
+    menu has entered key mode and drawn itself, and one at a time rather than
+    as a single buffered burst."""
 
     def run() -> None:
         for sequence in sequences:
@@ -65,7 +64,7 @@ def _type(terminal: int, *sequences: bytes, delay: float = 0.05) -> None:
 
 def test_down_arrow_reads_as_down_not_escape(terminal: int) -> None:
     """The regression: three bytes in one burst, of which `sys.stdin.read(1)`
-    returned the first and buffered the rest where `select` could not see
+    returned the first and buffered the rest, where `select` could not detect
     them."""
     assert _read(terminal, b"\x1b[B") in prompt_ui.DOWN
 
@@ -90,9 +89,9 @@ def test_enter_reads_as_enter(terminal: int) -> None:
 
 
 def test_a_lone_escape_stays_an_escape(terminal: int) -> None:
-    """Nothing follows it, so the poll times out and it is a real Escape —
-    the case the broken code got right by accident and the sequence case
-    wrong for the same reason."""
+    """Nothing follows it, so the poll times out and it is a real Escape. The
+    broken code handled this case correctly and the sequence case incorrectly,
+    for the same reason."""
     assert _read(terminal, b"\x1b") == prompt_ui.ESC
 
 
@@ -110,7 +109,7 @@ def test_select_moves_and_chooses_from_real_keypresses(
     terminal: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The whole menu, end to end, on the bytes a terminal sends: two downs
-    then Enter lands on the third option."""
+    then Enter selects the third option."""
     monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
     options = [
         prompt_ui.Option("a", "Accept"),
@@ -133,8 +132,8 @@ def test_multiselect_toggles_from_real_keypresses(
 
 
 def test_two_keypresses_arriving_together_are_read_separately(terminal: int) -> None:
-    """Typed fast enough to land in the buffer together. A chunked read would
-    return "ar" as one string, match no option, and drop both."""
+    """Typed fast enough to arrive in the buffer together. A chunked read
+    would return "ar" as one string, match no option, and drop both."""
     with prompt_ui.raw_mode():
         os.write(terminal, b"ar")
         assert prompt_ui.read_key() == "a"
@@ -149,7 +148,7 @@ def test_an_escape_sequence_followed_by_a_key_does_not_swallow_it(terminal: int)
 
 
 def test_a_non_ascii_keypress_is_read_as_one_character(terminal: int) -> None:
-    """Its continuation bytes must not come back as separate keypresses."""
+    """Its continuation bytes must not be returned as separate keypresses."""
     with prompt_ui.raw_mode():
         os.write(terminal, "é".encode())
         assert prompt_ui.read_key() == "é"
@@ -173,8 +172,8 @@ def test_pick_returns_the_row_under_the_cursor(
 
 
 def test_pick_starts_on_the_current_value(terminal: int, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Opening the picker on the location the write already names means
-    Enter alone changes nothing."""
+    """Opening the picker on the location the write already names means Enter
+    alone leaves it unchanged."""
     monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
     _type(terminal, b"\r")
 
@@ -182,8 +181,8 @@ def test_pick_starts_on_the_current_value(terminal: int, monkeypatch: pytest.Mon
 
 
 def test_typing_filters_the_list(terminal: int, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A household's layout runs to dozens of locations; scrolling to one is
-    not the interaction, typing a few letters of it is."""
+    """A household's layout runs to dozens of locations, so the intended
+    interaction is typing a few letters rather than scrolling."""
     monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
     _type(terminal, b"h", b"o", b"b", b"\r")
 
@@ -209,8 +208,8 @@ def test_backspace_widens_the_filter_again(terminal: int, monkeypatch: pytest.Mo
 def test_enter_on_an_empty_filter_result_does_nothing(
     terminal: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Nothing matches, so Enter cannot choose — backspacing brings the list
-    back rather than the picker having exited on a phantom row."""
+    """Nothing matches, so Enter cannot choose. Backspacing restores the
+    list, rather than the picker having exited on a row that is not there."""
     monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
     _type(terminal, b"z", b"\r", b"\x7f", b"\r")
 
@@ -237,8 +236,9 @@ def test_pick_of_an_empty_list_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_typing_something_new_offers_it_as_a_row(
     terminal: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A unit or a product may legitimately be one the vault has never seen,
-    so nothing matching is not a dead end — the typed text is the row."""
+    """A unit or a product may legitimately be one the vault has not
+    recorded, so an empty result is still selectable: the typed text is the
+    row."""
     monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
     _type(terminal, b"t", b"u", b"b", b"\r")
 
@@ -248,8 +248,8 @@ def test_typing_something_new_offers_it_as_a_row(
 def test_an_exact_existing_match_is_not_offered_twice(
     terminal: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Typing a value that already exists selects that row, not a new one
-    beside it — the cursor resets to the top of the matches on each
+    """Typing a value that already exists selects that row rather than a new
+    one beside it: the cursor resets to the top of the matches on each
     keystroke, and the added row goes last."""
     monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
     rows = [prompt_ui.Row("jar", "jar  (12 uses)", "jar")]
@@ -261,8 +261,8 @@ def test_an_exact_existing_match_is_not_offered_twice(
 def test_a_partial_match_still_reaches_the_new_row(
     terminal: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ "jarful" filters to the "jar" row *and* offers itself; arrowing down
-    once past the match takes the typed text."""
+    """ "jarful" filters to the "jar" row and also offers itself; arrowing
+    down once past the match selects the typed text."""
     monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
     rows = [prompt_ui.Row("jar", "jar  (12 uses)", "jar")]
     _type(terminal, b"j", b"a", b"r", b"f", b"u", b"l", b"\x1b[B", b"\r")
@@ -273,8 +273,8 @@ def test_a_partial_match_still_reaches_the_new_row(
 def test_an_empty_list_still_takes_a_new_value(
     terminal: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A vault with nothing recorded yet has no units to offer, which is not
-    a reason to refuse one."""
+    """A vault with nothing recorded yet has no units to offer, and must
+    still accept one."""
     monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
     _type(terminal, b"b", b"o", b"x", b"\r")
 
@@ -284,8 +284,8 @@ def test_an_empty_list_still_takes_a_new_value(
 def test_without_allow_new_a_typed_value_is_not_offered(
     terminal: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A location is a closed set — `decide` rejects one that is not
-    configured — so the picker must not invent a row for one."""
+    """Locations are a closed set — `decide` rejects one that is not
+    configured — so the picker must not add a row for a typed value."""
     monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
     _type(terminal, b"s", b"h", b"e", b"d", b"\r", b"\x1b")
 
@@ -295,8 +295,8 @@ def test_without_allow_new_a_typed_value_is_not_offered(
 def test_letters_do_nothing_in_the_amount_field(
     terminal: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ "three" used to be accepted, then rejected three keystrokes later as
-    the edit was applied, discarding the whole edit with it."""
+    """ "three" was previously accepted, then rejected several keystrokes
+    later as the edit was applied, discarding the whole edit."""
     monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
     _type(terminal, b"t", b"h", b"r", b"e", b"e", b"\r")
 
@@ -329,8 +329,8 @@ def test_stepping_a_fractional_amount_keeps_the_fraction(
 
 
 def test_stepping_down_stops_at_zero(terminal: int, monkeypatch: pytest.MonkeyPatch) -> None:
-    """`decide` rejects a non-positive amount; stepping into negatives only
-    produces a rejection two screens later."""
+    """`decide` rejects a non-positive amount, so stepping into negatives
+    would produce a rejection two screens later."""
     monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
     _type(terminal, b"\x1b[B", b"\x1b[B", b"\x1b[B", b"\r")
 
@@ -340,8 +340,8 @@ def test_stepping_down_stops_at_zero(terminal: int, monkeypatch: pytest.MonkeyPa
 def test_enter_is_inert_until_what_is_typed_parses(
     terminal: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Nothing invalid leaves the widget at all — a bare "." is not a number,
-    so Enter does nothing until a digit follows it."""
+    """No invalid value leaves the widget: a bare "." is not a number, so
+    Enter does nothing until a digit follows it."""
     monkeypatch.setattr(prompt_ui, "interactive", lambda: True)
     _type(terminal, b"\x7f", b".", b"\r", b"7", b"\r")
 

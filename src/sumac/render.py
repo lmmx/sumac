@@ -340,14 +340,14 @@ def print_agent_tool_calls(tool_calls: object) -> None:
 
 
 def _trace_summary(record: ToolCallRecord) -> str:
-    """One line's worth of what a tool call did — how many products a search
-    found, or the status a proposed write came back with. Falls back to the
-    head of the raw result for anything unrecognized, so a tool added later
-    still says something rather than nothing.
+    """One line describing what a tool call did: how many products a search
+    found, or the status a proposed write returned. Falls back to the start of
+    the raw result for anything unrecognized, so a tool added later still
+    produces a line.
 
-    Defensive about the result's shape on purpose: a tool result is a string
-    this module did not build, and a preview that raised while summarizing a
-    trace would take down the decision it was drawn for."""
+    Defensive about the result's shape deliberately: a tool result is a string
+    this module did not build, and an exception while summarizing a trace
+    would abort the decision it was drawn for."""
     try:
         parsed = json.loads(record.result)
     except (json.JSONDecodeError, TypeError):
@@ -371,18 +371,17 @@ def _trace_summary(record: ToolCallRecord) -> str:
 
 
 def print_trace(trace: tuple[ToolCallRecord, ...], *, verbose: bool = False) -> None:
-    """What an `AgentRunner.propose`/`.revise` call actually looked up, shown
-    above the plan it produced — a plain final reply ("the jam is in the
-    fridge") otherwise hides the query and the match data behind it, with no
-    way to tell a vague answer from a genuinely empty result.
+    """What an `AgentRunner.propose`/`.revise` call looked up, shown above the
+    plan it produced. A plain final reply ("the jam is in the fridge")
+    otherwise conceals the query and the match data behind it, leaving no way
+    to distinguish a vague answer from an empty result.
 
-    One line per call by default. The full table — every argument and the
-    raw JSON result verbatim — is what `verbose` restores, and what this
-    printed unconditionally before: a three-round request put a screen of
-    JSON between the person and the panel they were being asked to approve,
-    which is a poor default for the common case and the only useful view
-    when a tool result is what's actually in question. A no-op for an empty
-    trace, matching `print_anomaly_banner`'s "nothing to say" behavior."""
+    One line per call by default. `verbose` restores the full table — every
+    argument and the raw JSON result verbatim — which is what this printed
+    unconditionally before: a three-round request placed a screenful of JSON
+    between the person and the plan they were approving. The table remains the
+    only useful view when a tool result is itself in question. A no-op for an
+    empty trace, matching `print_anomaly_banner`."""
     if not trace:
         return
     if not verbose:
@@ -410,20 +409,20 @@ _KIND_MARK = {
 
 
 def _amount(value: Decimal | None, unit: str) -> str:
-    """A holding, or an em dash for none of it. `None` is "the location holds
-    none of this product", which reads as nothing rather than as zero — the
-    fold drops a zero entry entirely (`ledger._commit`), so there is no
-    stored `0` for this to be showing."""
+    """A holding, or an em dash for none. `None` means the location holds none
+    of this product, which is displayed as nothing rather than as zero: the
+    fold drops a zero entry entirely (`ledger._commit`), so no stored `0`
+    exists to display."""
     return f"{value} {unit}" if value is not None else "—"
 
 
 def _effect_text(write: ProposedWrite) -> str:
     """`before → after` per location touched, from the projection
-    `ledger.project` computed off the records `decide_change` itself
-    returned. Falls back to `current_amount`'s descriptive "already there"
-    when a write carries no projection — a `ProposedWrite` built by hand
-    (a test double, a scripted plan) renders as it did before `effects`
-    existed, rather than showing a blank column."""
+    `ledger.project` computed from the records `decide_change` returned. Falls
+    back to `current_amount`'s "already there" when a write carries no
+    projection, so a `ProposedWrite` built by hand (a test double, a scripted
+    plan) renders as it did before `effects` existed rather than showing a
+    blank column."""
     if write.effects:
         return "  ·  ".join(
             f"{_amount(e.before, e.unit)} → {_amount(e.after, e.unit)}" for e in write.effects
@@ -447,18 +446,18 @@ def _where_text(write: ProposedWrite, locations: dict[str, models.Location]) -> 
 
 
 def _indented(markup: str) -> None:
-    """A detail line under a write, indented four columns — as `Padding` so a
-    line long enough to wrap keeps its indent on every wrapped line instead
-    of falling back to column zero mid-sentence."""
+    """A detail line under a write, indented four columns. `Padding` rather
+    than a literal prefix so a line long enough to wrap keeps its indent on
+    every wrapped line instead of returning to column zero."""
     console.print(Padding(Text.from_markup(markup), (0, 0, 0, 4), expand=False))
 
 
 def write_summary(write: ProposedWrite, locations: dict[str, models.Location] | None = None) -> str:
     """One line naming a write, for a menu row or a picker. The same label
     everywhere a write has to be identified rather than reviewed, so the
-    checklist, the edit picker, and the dry-run preview do not each invent
-    their own phrasing — and none of them says "(from None to fridge-door)",
-    which is what a raw field dump reads like to the person choosing."""
+    checklist, the edit picker, and the dry-run preview do not each use
+    different phrasing. Replaces the earlier raw field dump, which rendered
+    as "(from None to fridge-door)"."""
     where = _where_text(write, locations or {})
     subject = f"{write.kind.value} {write.amount} {write.unit} {write.product_id}"
     return f"{subject} · {where}" if where else subject
@@ -472,19 +471,17 @@ def print_plan(
     header: str = "",
 ) -> None:
     """`sumac ask`'s preview: the accumulated, not-yet-committed writes an
-    `AgentRunner.propose`/`.revise` call resolved. This is the one point in
-    the CLI where a person is about to make a real decision, so each write
-    gets two lines — what it does, then where and what changes on the shelf
-    — rather than a table row that a narrow terminal would truncate away
-    exactly the number being decided on.
+    `AgentRunner.propose`/`.revise` call resolved. Each write gets two lines —
+    what it does, then where and what changes at that location — rather than
+    a table row, which a narrow terminal truncates, removing the quantity
+    being decided on.
 
     The "after" is not a subtraction. `ledger.project` folds the records
     `decide_change` returned for that write, so a consumption exceeding the
-    recorded holding shows the zero its §3.5 reconciling `Counted` actually
-    produces, not the negative a current-minus-amount arithmetic would. It
-    still describes the moment the plan was proposed: `AgentRunner.commit`
-    re-decides against freshly reloaded state, and real time passes while
-    someone reads this.
+    recorded holding shows the zero its §3.5 reconciling `Counted` produces
+    rather than the negative a current-minus-amount subtraction gives. It
+    describes the moment the plan was proposed: `AgentRunner.commit` re-decides
+    against freshly reloaded state, and time passes while the plan is read.
 
     `findings` (`review.review_plan`) is positional per write: badges on the
     write's own line, one detail line each underneath. A write with nothing

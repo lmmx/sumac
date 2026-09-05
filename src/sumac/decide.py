@@ -103,12 +103,12 @@ def resolve_location(value: str | None, field: str, cfg: config.Config) -> str |
     `near_matches`: a display string pasted into `--to` (§3.5) is exact, a
     typo is only ever fuzzy.
 
-    Public because a caller that has to *record* which location a command
-    landed on needs the same answer `decide_change` reached internally, not
-    the string it was handed. `llm._propose_write` used to keep the raw
-    string on its `ProposedWrite`, so a display path — which resolves fine
-    and writes correctly — rendered in the preview as an unknown location
-    with no before/after at all."""
+    Public because a caller recording which location a command resolved to
+    needs the same answer `decide_change` reached internally, rather than the
+    string it was passed. `llm._propose_write` previously kept the raw string
+    on its `ProposedWrite`, so a display path — which resolves and writes
+    correctly — appeared in the preview as an unknown location with no
+    before/after."""
     if value is None:
         return None
     if value in cfg.active_locations:

@@ -1129,8 +1129,8 @@ def test_proposed_write_carries_the_projected_before_and_after(
     data_dir: Path, key: bytes, osuser: str
 ) -> None:
     """`_propose_write` folds the records `decide_change` returned onto the
-    inventory it just read, so the preview can show the holding the write
-    lands on rather than only the one it starts from."""
+    inventory it just read, so the preview shows the resulting holding as well
+    as the starting one."""
     _seed_pantry_with_jam(data_dir, key, osuser)
     agent, _fake = _make_agent([], data_dir, key)
 
@@ -1180,7 +1180,7 @@ def test_projected_after_reflects_the_shortfall_correction_not_a_subtraction(
     data_dir: Path, key: bytes, osuser: str
 ) -> None:
     """Consuming 5 of a recorded 3 emits §3.5's `Counted` first, so the
-    projected holding is zero — `3 - 5 = -2` is what this is not."""
+    projected holding is zero rather than the -2 a subtraction gives."""
     _seed_pantry_with_jam(data_dir, key, osuser)
     agent, _fake = _make_agent([], data_dir, key)
 
@@ -1198,9 +1198,9 @@ def test_projected_after_reflects_the_shortfall_correction_not_a_subtraction(
 def test_an_auto_registering_write_projects_without_its_config_record(
     data_dir: Path, key: bytes, osuser: str
 ) -> None:
-    """`decide_change` returns a config write alongside the log record when
-    it auto-registers an unknown product; only the log record is a delta
-    the fold can interpret."""
+    """`decide_change` returns a config write alongside the log record when it
+    auto-registers an unknown product; only the log record carries a delta the
+    fold can interpret."""
     _seed_pantry_with_jam(data_dir, key, osuser)
     agent, _fake = _make_agent([], data_dir, key)
 
@@ -1220,7 +1220,7 @@ def test_an_auto_registering_write_projects_without_its_config_record(
 
 @pytest.fixture(autouse=True)
 def _release_shared_runner() -> Iterator[None]:
-    """No cached backend leaks between tests — one holding a fake would be
+    """No cached backend persists between tests: one holding a fake would be
     handed to whatever constructed an `AgentRunner` next."""
     llm.release_shared_runner()
     yield
@@ -1242,8 +1242,8 @@ def _count_builds(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 def test_a_second_agent_reuses_the_loaded_model(
     data_dir: Path, key: bytes, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`sumac ask --loop` constructs one `AgentRunner` per request — each is
-    its own conversation — and without reuse each also reloaded the GGUF."""
+    """`sumac ask --loop` constructs one `AgentRunner` per request, each a
+    separate conversation; without reuse each also reloaded the GGUF."""
     built = _count_builds(monkeypatch)
 
     llm.AgentRunner(data_dir, key)
@@ -1268,9 +1268,8 @@ def test_switching_model_loads_the_other_one(
 def test_only_one_backend_is_held_at_a_time(
     data_dir: Path, key: bytes, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Two GGUFs resident at once is how switching models mid-session runs a
-    GPU out of memory that fits either alone — so switching back reloads
-    rather than finding the first still cached."""
+    """Two GGUFs resident at once can exhaust a GPU that fits either alone,
+    so switching back reloads rather than finding the first still cached."""
     built = _count_builds(monkeypatch)
     other = llm.MODEL_PRESETS[1]
 
@@ -1284,8 +1283,8 @@ def test_only_one_backend_is_held_at_a_time(
 def test_a_different_seed_is_a_different_backend(
     data_dir: Path, key: bytes, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`_build_runner` seeds the whole `mistralrs.Runner`, so a backend
-    built for one seed is not one built for another."""
+    """`_build_runner` seeds the whole `mistralrs.Runner`, so a backend built
+    for one seed is not interchangeable with one built for another."""
     built = _count_builds(monkeypatch)
 
     llm.AgentRunner(data_dir, key, seed=1)
@@ -1314,11 +1313,11 @@ def test_an_injected_backend_never_builds_or_caches(
 def test_a_display_path_endpoint_is_recorded_as_its_location_id(
     data_dir: Path, key: bytes, osuser: str
 ) -> None:
-    """`decide.resolve_location` accepts a display path as readily as an id,
-    so a write naming one is valid and commits correctly. Keeping the raw
-    string on the `ProposedWrite` made every lookup downstream miss: the
-    preview showed no before/after (`— → —`) and `review` reported a
-    configured location as new."""
+    """`decide.resolve_location` accepts a display path as well as an id, so
+    a write naming one is valid and commits correctly. Keeping the raw string
+    on the `ProposedWrite` made every lookup downstream fail: the preview
+    showed no before/after (`— → —`), and `review` reported a configured
+    location as new."""
     _seed_pantry_with_jam(data_dir, key, osuser)
     config.add_location(data_dir, key, osuser, Location(id="fridge", name="Fridge"))
     config.add_location(
@@ -1365,8 +1364,8 @@ def test_a_display_path_endpoint_is_not_reported_as_a_new_location(
 def test_the_same_write_named_two_ways_is_only_proposed_once(
     data_dir: Path, key: bytes, osuser: str
 ) -> None:
-    """Resolving before recording also makes the duplicate guard see through
-    a second call that names the same location by its display path."""
+    """Resolving before recording also lets the duplicate guard match a
+    second call naming the same location by its display path."""
     _seed_pantry_with_jam(data_dir, key, osuser)
     config.add_location(data_dir, key, osuser, Location(id="fridge", name="Fridge"))
     agent, _fake = _make_agent([], data_dir, key)
@@ -1399,10 +1398,10 @@ def _seed_fridge_layout(data_dir: Path, key: bytes, osuser: str) -> None:
 def test_searching_a_place_returns_locations_not_only_products(
     data_dir: Path, key: bytes, osuser: str
 ) -> None:
-    """A real run searched "fridge" seventeen times and got nothing each
-    time: `ledger.search_inventory` matches products, and no product is
-    called that. With no way to reach a location id, the model eventually
-    used one it had seen in an unrelated result."""
+    """A real run searched "fridge" seventeen times and received nothing each
+    time: `ledger.search_inventory` matches products, and no product has that
+    name. With no route to a location id, the model used one it had seen in an
+    unrelated result."""
     _seed_fridge_layout(data_dir, key, osuser)
     agent, _fake = _make_agent([], data_dir, key)
 
@@ -1423,7 +1422,7 @@ def test_a_location_search_matches_the_path_not_only_the_name(
     data_dir: Path, key: bytes, osuser: str
 ) -> None:
     """ "Shelf 1" is named without reference to the fridge; only its path
-    says where it is, which is what a query for the container has to match."""
+    records where it is, so a query for the container must match the path."""
     _seed_fridge_layout(data_dir, key, osuser)
     agent, _fake = _make_agent([], data_dir, key)
 
@@ -1468,7 +1467,8 @@ def test_an_unknown_location_rejection_names_real_candidates(
     data_dir: Path, key: bytes, osuser: str
 ) -> None:
     """`decide`'s own `suggestions` are `near_matches` over ids, which a
-    phrase never scores against — so the rejection used to be a dead end."""
+    phrase does not score against, so the rejection previously carried no
+    candidates."""
     _seed_fridge_layout(data_dir, key, osuser)
     agent, _fake = _make_agent([], data_dir, key)
 
@@ -1496,7 +1496,8 @@ def test_an_unknown_location_rejection_names_real_candidates(
 def test_candidates_fall_back_to_the_whole_layout_when_nothing_shares_a_word(
     data_dir: Path, key: bytes, osuser: str
 ) -> None:
-    """Never "not that one" with no indication of what would be."""
+    """The rejection names some valid locations even when none shares a word
+    with the requested value."""
     _seed_fridge_layout(data_dir, key, osuser)
     agent, _fake = _make_agent([], data_dir, key)
 

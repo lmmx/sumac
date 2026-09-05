@@ -1040,9 +1040,9 @@ def test_search_inventory_is_case_insensitive() -> None:
 def test_project_folds_decided_writes_without_appending_them(
     data_dir: Path, osuser: str, key: bytes
 ) -> None:
-    """`project` is the preview's arithmetic: the same fold, over records
-    `decide_change` returned but nobody appended, onto a copy of the current
-    inventory — so the on-disk state is unchanged afterwards."""
+    """`project` performs the preview's arithmetic: the same fold, over
+    records `decide_change` returned but nothing appended, onto a copy of the
+    current inventory, leaving the on-disk state unchanged."""
     config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
     config.add_location(data_dir, key, osuser, models.Location(id="fridge", name="Fridge"))
     config.add_product(data_dir, key, osuser, models.Product(id="milk", name="Milk", unit="l"))
@@ -1083,9 +1083,9 @@ def test_project_includes_the_shortfall_correction_a_subtraction_would_miss(
     data_dir: Path, osuser: str, key: bytes
 ) -> None:
     """Consuming more than the log records emits §3.5's reconciling `Counted`
-    alongside the `Consumed`. Folding both lands on zero; subtracting the
-    amount from the holding would say -2, which is the whole reason
-    `render.print_plan` never computed an "after" by subtraction."""
+    alongside the `Consumed`. Folding both gives zero; subtracting the amount
+    from the holding gives -2, which is why `render.print_plan` never computed
+    an "after" by subtraction."""
     config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
     config.add_product(data_dir, key, osuser, models.Product(id="flour", name="Flour", unit="kg"))
     store.append(
