@@ -146,13 +146,6 @@ In `--loop` mode the model is loaded once, on the first request, and reused for 
 session: a fresh conversation per request, with the same loaded model behind it. Switching model
 with `g` loads the new one and drops the old.
 
-To iterate on the review screens themselves without loading a model:
-
-```sh
-uv run scripts/preview-ask-ui.py            # every screen, against fixed example plans
-uv run scripts/preview-ask-ui.py --svg out/ # one SVG per screen
-```
-
 ### NVIDIA GPU acceleration
 
 ```sh
