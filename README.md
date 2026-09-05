@@ -72,16 +72,15 @@ node and its own descendants.
 ## Evaluating agent behavior
 
 `sumac ask`'s agent (below) has a behavioural eval suite — a seeded inventory and a set of
-find/add/remove/reject scenarios, run against either a real local model or a deployed Modal
-endpoint. It's how a prompt or model change actually gets checked, not just tried once by hand.
+find/add/remove/reject scenarios, run against a real local model. It's how a prompt or model
+change actually gets checked, not just tried once by hand.
 
 ```sh
 uv run pytest evals -v --eval-model qwen3.5-4b
 ```
 
 See `evals/README.md` for the full guide (comparing models, comparing prompt variants, reading the
-output) and `docs/MODAL.md` if you want faster iteration against a deployed Modal endpoint instead
-of local inference.
+output).
 
 ## Development
 

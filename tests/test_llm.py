@@ -1032,10 +1032,8 @@ def test_build_request_passes_default_sampling_config(
     data_dir: Path, key: bytes, osuser: str
 ) -> None:
     """`_build_request` returns a plain dict, not a real (opaque, PyO3)
-    `mistralrs.ChatCompletionRequest` — see
-    docs/journal/2026-09-04-modal-remote-inference-backend.md. Every
-    `SendsCompletions` backend, not just mistral.rs, can be tested against
-    this dict directly."""
+    `mistralrs.ChatCompletionRequest`. Every `SendsCompletions` backend, not
+    just mistral.rs, can be tested against this dict directly."""
     agent, _fake = _make_agent([], data_dir, key)
     request = agent._build_request([{"role": "user", "content": "hi"}], [])
 
@@ -1061,9 +1059,8 @@ def test_build_request_carries_seed_for_a_per_request_backend(
 ) -> None:
     """`_LocalMistralRsBackend` ignores this key (the real engine is seeded
     once at `Runner` construction) — it's carried for a per-request
-    backend (Modal) that has no other way to reproduce a run. Previously
-    missing entirely; see
-    docs/journal/2026-09-04-modal-remote-inference-backend.md."""
+    backend that has no other way to reproduce a run. No such backend
+    exists today."""
     fake = FakeRunner([])
     agent = llm.AgentRunner(data_dir, key, runner=fake, seed=12345)
     request = agent._build_request([{"role": "user", "content": "hi"}], [])

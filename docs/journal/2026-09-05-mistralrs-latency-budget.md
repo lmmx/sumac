@@ -1,11 +1,13 @@
 # sumac: `mistralrs` Latency Budget — Where `sumac ask` Actually Spends Its Time
 
-**Status:** measurement and analysis only, no code in this entry. Nothing in `src/sumac/llm.py`
-changes here. Follows from `docs/journal/2026-09-04-modal-remote-inference-backend.md`, which
-framed local `mistralrs` epoch wall-clock (~15 min for one 20-epoch prompt-variant verdict) as the
-iteration bottleneck and proposed remote inference as the answer. This entry asks the prior
-question that entry skipped — *what is the 15 minutes made of* — and answers it from data already
-committed to this repository.
+**Status:** the entry itself (everything through "Missing / open threads") is measurement and
+analysis only, no code — nothing in `src/sumac/llm.py` changed to produce it. Findings 1, 2, and
+7/10 were subsequently implemented in `llm.py`, in a follow-up session on the same branch; see
+"Confirmed effects" below for what shipped and what it measured. Follows from
+`docs/journal/2026-09-04-modal-remote-inference-backend.md`, which framed local `mistralrs` epoch
+wall-clock (~15 min for one 20-epoch prompt-variant verdict) as the iteration bottleneck and
+proposed remote inference as the answer. This entry asks the prior question that entry skipped —
+*what is the 15 minutes made of* — and answers it from data already committed to this repository.
 
 **Provenance:** every number under "The measured budget" and "Findings" is derived from
 `runs/epochs/verify-qwen3.5-4b-default-20/` (20 epochs × 22 scenarios = 440 scenarios, 1,922 engine
@@ -251,56 +253,109 @@ rate for this workload on this model.
 
 Finding 7 falls in the 60.5 s of non-engine wall clock, not in the engine budget above.
 
+## Confirmed effects **(measured against `evals/`, not the run analyzed above)**
+
+Findings 1, 2, and 7/10 shipped in `llm.py`, each measured against the 22-scenario `evals/` suite
+(`uv run pytest evals`) — a different, much smaller harness than the 440-scenario
+`runs/epochs/verify-qwen3.5-4b-default-20/` run this entry otherwise analyzes. These numbers
+confirm direction and that pass rate holds; they are not comparable in magnitude to the
+"Projected effect" table above, which was fit against the larger run.
+
+| change | `evals/` wall clock | pass rate |
+| --- | --- | --- |
+| baseline | ~45 s | 22/22 |
+| self-review gated (finding 1) + `build_inventory` memoized (finding 7/10) | 41 s | 22/22 |
+| classifier switched to `grammar`/`grammar_type` (finding 2) | 33 s, then 36 s on a rerun | 22/22 |
+
+Each shipped as a narrower or differently-shaped change than the finding above describes verbatim:
+
+- **Finding 1** was gated, not removed. `_maybe_self_review` skips the review round only when the
+  plan has exactly one write and that write's `product_id`/`unit`/`from_location` all trace back to
+  a prior `sumac_find_inventory` result (`_write_is_grounded`, `llm.py`). A plan with more than one
+  write, or any write not grounded in a search, still gets reviewed. Narrower than open thread 4's
+  `SELF_REVIEW_ROUNDS = 0` by design — it targets the specific 0.4 %-effective case finding 1
+  measured, rather than removing the check for every plan.
+- **Finding 2** used `grammar`/`grammar_type="regex"` (`_CLASSIFY_GRAMMAR = "find|add|remove|reject"`,
+  `max_tokens=8`), not `logit_bias` + `max_tokens=1` as open thread 6 also considered. `_classify`
+  now reads `message.content` directly instead of parsing a `classify_request` tool call;
+  `_CLASSIFY_SCHEMA` is gone, and its per-kind `enum` descriptions moved into `CLASSIFIER_PROMPT`
+  so that guidance isn't lost along with the schema. `classify_messages`' recorded assistant turn
+  changed shape (a bare word, not a `<tool_call>` envelope) — nothing in `evals/` or
+  `tests/test_llm.py` asserted on that exact shape, only on `.name`/role, so nothing downstream
+  broke. `modal_backend.py`'s vLLM translation was **not** updated to forward `grammar`/
+  `grammar_type` — a Modal-backed classify call would have run unconstrained (existing no-tools
+  code path, doesn't crash, just isn't grammar-enforced) — left as-is at the time, since the Modal
+  backend wasn't the active path and was already the slower of the two. Moot as of the same
+  session: the Modal backend was removed entirely, `modal_backend.py` included — see
+  docs/journal/2026-09-04-modal-remote-inference-backend.md's retraction note.
+- **Finding 7/10** (`build_inventory` memoization) shipped as designed: one read per
+  `propose()`/`revise()` call, cached on `AgentRunner` and reset at the top of each; `commit()`
+  untouched, since it deliberately re-reads state per write.
+
+Finding 8 (the brand-drop retry) was **not** implemented. "Drop the first word" was rejected as a
+heuristic — a multi-word brand ("Ben & Jerry's") breaks it — and the alternative (reversing
+`search_inventory`'s substring-match direction so a *stored* product name can match as a substring
+of a *longer* query, rather than only the reverse) changes shared matching semantics `sumac find`
+and `evals/` both depend on. Left open pending a design decision, not a heuristic fix; open thread
+9 below is unchanged.
+
 ## Missing / open threads, ranked by expected value
 
-Roughly in the order a follow-up session would get the most out of picking one up:
+Original ranking, kept for the reasoning; status noted per item after the "Confirmed effects"
+implementation session. Live candidates for a next session are 7, 8, and 11.
 
-1. **The roofline measurement that decides whether contributing to mistral.rs is worth anything
-   here.** Decode measures 122 tok/s for `Qwen3.5-4B-Q4_K_M.gguf`. Running the same file on the
-   same GPU through `llama.cpp` bounds the gap: a materially higher `llama.cpp` number localises
-   it to candle's k-quant dequantisation kernels against `llama.cpp`'s MMQ/mmvq path and puts a
-   ceiling on what a kernel contribution could return; a comparable number means the workload is
-   memory-bandwidth-bound and no kernel change helps, leaving only token-count reduction. This
-   experiment is cheap and gates every item below it. Not run this session — no GPU in this
-   container.
-2. **Whether `unsloth/Qwen3.5-4B-GGUF`'s Q4_K_M file carries the `mtp.*` tensors** (finding 6).
-   Readable from the GGUF tensor index without loading the model. If absent, the built-in-head
-   path requires a `Which.Plain`/`Which.MultimodalPlain` preset over safetensors with
-   `in_situ_quant=`, which is a `MODEL_PRESETS` addition (`llm.py:107-117`) rather than upstream
-   work — and changes the quantisation kernel path at the same time, confounding it with item 1
-   unless measured separately.
-3. **Surfacing `MtpConfig::is_builtin` through `mistralrs-pyo3`'s `Runner`** (finding 6) — the
-   binding gap between what `mistralrs-server-core` supports and what the Python `Runner` accepts.
-   Blocked on item 2 being answered affirmatively, or on item 2's safetensors fallback.
-4. **Whether `SELF_REVIEW_ROUNDS = 0` holds the eval suite at 100 %** (finding 1), and if not,
-   which of the 440 scenarios regress. `scripts/eval-prompt-variant.sh` and the 20-epoch harness
-   already measure exactly this; the confound is the RNG-stream shift
-   `docs/journal/2026-09-04-trace-and-verdict-redesign.md` documents, which a removed round
-   induces on every subsequent request.
-5. **A cheap predicate that keeps self-review only where it could act** (finding 1) — e.g.
-   restricted to plans whose write arguments are not verbatim echoes of a preceding
-   `sumac_find_inventory` result, which is the failure class `_propose_write`'s grounding checks
-   (`llm.py:1174-1297`) already reason about.
-6. **Classifier via `grammar`/`grammar_type` or `logit_bias` + `max_tokens=1`** (findings 2, 4),
-   including what a constrained classifier does to `_classify`'s `except ValueError` fallback
-   (`llm.py:1412-1415`) and to `classify_messages`' recorded shape, which `evals/` reads.
+1. **[declined — not pursuing mistral.rs/llama.cpp internals]** The roofline measurement that
+   decides whether contributing to mistral.rs is worth anything here. Decode measures 122 tok/s for
+   `Qwen3.5-4B-Q4_K_M.gguf`. Running the same file on the same GPU through `llama.cpp` bounds the
+   gap: a materially higher `llama.cpp` number localises it to candle's k-quant dequantisation
+   kernels against `llama.cpp`'s MMQ/mmvq path and puts a ceiling on what a kernel contribution
+   could return; a comparable number means the workload is memory-bandwidth-bound and no kernel
+   change helps, leaving only token-count reduction. Cheap and gates every item below it. Not run —
+   no GPU in this container, and a deliberate choice not to go down the mistral.rs-internals path
+   right now.
+2. **[blocked on item 1, declined with it]** Whether `unsloth/Qwen3.5-4B-GGUF`'s Q4_K_M file
+   carries the `mtp.*` tensors (finding 6). Readable from the GGUF tensor index without loading the
+   model. If absent, the built-in-head path requires a `Which.Plain`/`Which.MultimodalPlain` preset
+   over safetensors with `in_situ_quant=`, which is a `MODEL_PRESETS` addition (`llm.py:107-117`)
+   rather than upstream work — and changes the quantisation kernel path at the same time,
+   confounding it with item 1 unless measured separately.
+3. **[blocked on item 2, declined with it]** Surfacing `MtpConfig::is_builtin` through
+   `mistralrs-pyo3`'s `Runner` (finding 6) — the binding gap between what `mistralrs-server-core`
+   supports and what the Python `Runner` accepts. Blocked on item 2 being answered affirmatively,
+   or on item 2's safetensors fallback.
+4. **[superseded — see "Confirmed effects"]** Whether `SELF_REVIEW_ROUNDS = 0` holds the eval suite
+   at 100 % (finding 1), and if not, which of the 440 scenarios regress. Shipped instead as item 5
+   below, a narrower gate rather than a blanket removal.
+5. **[shipped — see "Confirmed effects"]** A cheap predicate that keeps self-review only where it
+   could act (finding 1) — restricted to plans whose write arguments are not verbatim echoes of a
+   preceding `sumac_find_inventory` result. Implemented as `_write_is_grounded`.
+6. **[shipped — see "Confirmed effects"]** Classifier via `grammar`/`grammar_type` or `logit_bias` +
+   `max_tokens=1` (findings 2, 4). Implemented via `grammar`/`grammar_type="regex"`, not
+   `logit_bias`; `classify_messages`' recorded shape did change, and nothing downstream broke.
 7. **Whether `temperature=0` or a set `top_k` changes the 8.17 ms/token slope** (finding 4).
    mistral.rs samples over Qwen's ~151k vocabulary; the current `DEFAULT_TEMPERATURE = 0.2` /
    `DEFAULT_TOP_P = 0.95` (`llm.py:163-164`) with no `top_k` is the configuration most likely to
    take a full-sort path. Untested, and it moves sampling behaviour, so it cannot be measured
-   independently of the eval verdict.
+   independently of the eval verdict. Still open — cheap to try against the now-33s `evals/`
+   baseline.
 8. **What the 67 ms fixed per-request cost is** (measured budget) — 15 % of engine time across a
    4.37-request pipeline. Candidates not distinguished this session: the pyo3 request handoff, the
    engine scheduler tick, per-request sampler construction, minijinja chat-template re-render, and
    full-prompt re-tokenisation. Measurable from Python with a minimal request (short prompt,
-   `max_tokens=1`) before touching Rust.
-9. **Absorbing `_ADD_PROMPT`'s brand-drop retry into `_sumac_find_inventory`** (finding 8), which
-   removes a round-trip on ~60 of 440 scenarios and removes an instruction the model can fail to
-   follow — and changes what `evals/test_add.py::test_duplicate_search_bounded` exercises.
-10. **Memoising `ledger.build_inventory` for the lifetime of one `propose`/`revise`** (finding 7),
-    bounded by the 60.5 s non-engine total and by whether `commit()`'s deliberate reload
-    (`llm.py:1555-1565`) stays untouched.
+   `max_tokens=1`) before touching Rust. Still open, and doesn't require touching mistral.rs's own
+   source — only timing requests from the Python side.
+9. **[open — heuristic rejected, not re-attempted]** Absorbing `_ADD_PROMPT`'s brand-drop retry
+   into `_sumac_find_inventory` (finding 8). "Drop the first word" was rejected (breaks on
+   multi-word brands); see "Confirmed effects" for why the alternative considered (reversing the
+   substring-match direction) wasn't taken up either. Needs a design decision on shared matching
+   semantics before either heuristic returns.
+10. **[shipped — see "Confirmed effects"]** Memoising `ledger.build_inventory` for the lifetime of
+    one `propose`/`revise` (finding 7). `commit()`'s deliberate reload (`llm.py:1555-1565`) is
+    untouched.
 11. **Whether the terminal plain-text reply round is load-bearing for `add`/`remove`** — 682
     plain-text assistant messages across the run, mean ~28 tokens. `render.py:511-512` and
     `cli.py:1057-1058`, `cli.py:1203-1204` print `plan.reply_text` alongside the plan table, so it
-    reaches the person; what is open is whether a person reviewing the table needs it.
+    reaches the person; what is open is whether a person reviewing the table needs it. Still open —
+    unlike 1–3, this is app-level and doesn't need mistral.rs internals, but it's a UX change (the
+    person loses the narration line), not a pure performance one, so it needs a decision on that
+    trade before it ships, not just a measurement.

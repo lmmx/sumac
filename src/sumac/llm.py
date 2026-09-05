@@ -556,8 +556,7 @@ class ToolCallRecord:
     # parser mismatch on the serving side is actually diagnosed from: if a
     # misconfigured parser makes `tool_calls` come back empty because the
     # model's real call landed as unparsed text, this is the only place
-    # that evidence survives. See
-    # docs/journal/2026-09-04-modal-remote-inference-backend.md.
+    # that evidence survives.
     raw_response: str | None = None
 
 
@@ -570,9 +569,7 @@ class AgentPlan:
 
 class ChatResponseUsage(Protocol):
     """The subset of `mistralrs.Usage` (or an equivalent populated by a
-    remote backend) anything in this module ever reads — see the "exact
-    minimal response shape" audit in
-    docs/journal/2026-09-04-modal-remote-inference-backend.md. Declared as
+    remote backend) anything in this module ever reads. Declared as
     read-only `@property` members, not plain attributes: nothing here ever
     writes one back, and a read-only member is covariant, which is what
     lets a real `mistralrs.Usage` (and any other concrete field type)
@@ -630,10 +627,8 @@ class SendsCompletions(Protocol):
     `_LocalMistralRsBackend` below, since `mistralrs.ChatCompletionRequest`
     is an opaque PyO3 object no other backend can construct or read back.
     `request` is therefore the plain dict `_build_request` produces, not
-    that type — see
-    docs/journal/2026-09-04-modal-remote-inference-backend.md for why.
-    Tests pass a hand-built fake instead, with no real model or GGUF
-    download involved."""
+    that type. Tests pass a hand-built fake instead, with no real model or
+    GGUF download involved."""
 
     def send_chat_completion_request(
         self, request: dict, model_id: str | None = None
@@ -758,12 +753,10 @@ def _print_usage(response: ChatResponse, round_num: int) -> None:
 
 class _LocalMistralRsBackend:
     """Wraps a real `mistralrs.Runner` to satisfy `SendsCompletions`'s
-    plain-dict request contract. The one place, for the local backend, that
-    turns `_build_request`'s dict back into a real
-    `mistralrs.ChatCompletionRequest` — immediately before calling the
-    engine. A Modal-backed `SendsCompletions` instead serializes the same
-    dict to an OpenAI-style JSON body; both backends see identical kwargs.
-    See docs/journal/2026-09-04-modal-remote-inference-backend.md."""
+    plain-dict request contract. The one place that turns `_build_request`'s
+    dict back into a real `mistralrs.ChatCompletionRequest` — immediately
+    before calling the engine. Any other `SendsCompletions` implementation
+    consumes the same plain-dict shape."""
 
     def __init__(self, runner: mistralrs.Runner) -> None:
         self._runner = runner
@@ -966,11 +959,9 @@ class AgentRunner:
         # Session-level for the local backend (`_build_runner(seed=...)`
         # seeds the whole `mistralrs.Runner`, not a per-request field — see
         # `_LocalMistralRsBackend`, which ignores this dict key entirely).
-        # Carried into every request dict anyway so a per-request backend
-        # (Modal) has something to seed with — previously not threaded
-        # through at all, meaning every Modal request ran with vLLM's own
-        # unseeded default and no run was reproducible. See
-        # docs/journal/2026-09-04-modal-remote-inference-backend.md.
+        # Carried into every request dict anyway for a per-request backend to
+        # seed itself with — no such backend exists today, but the field
+        # costs nothing to keep for the next one.
         self._seed = seed
         self._messages: list[dict[str, str]] | None = None
         self._kind: QueryKind | None = None
@@ -1320,8 +1311,7 @@ class AgentRunner:
         """A plain dict of every kwarg this module's one request shape ever
         sends — not a real `mistralrs.ChatCompletionRequest`, which is an
         opaque PyO3 object no non-mistralrs backend can construct, and which
-        can't be read back once built even by mistral.rs's own code (see
-        docs/journal/2026-09-04-modal-remote-inference-backend.md). Every
+        can't be read back once built even by mistral.rs's own code. Every
         `SendsCompletions` implementation gets this identical dict;
         `_LocalMistralRsBackend` is the one place that turns it back into a
         real `mistralrs.ChatCompletionRequest`, immediately before calling
@@ -1329,9 +1319,9 @@ class AgentRunner:
 
         `grammar`/`grammar_type` are `_classify`'s only caller today (see
         `_CLASSIFY_GRAMMAR`) — `_LocalMistralRsBackend` forwards them to
-        llguidance; `modal_backend.py`'s vLLM translation does not, since
-        vLLM's guided decoding is a different field entirely, so a
-        grammar-bearing request routed through Modal runs unconstrained."""
+        llguidance. Any future non-mistralrs `SendsCompletions` that ignores
+        these two keys runs the classify request unconstrained rather than
+        failing — worth checking for on the way in, if one gets added."""
         return {
             "messages": messages,
             "model": self._model.quantized_model_id,
@@ -1349,8 +1339,10 @@ class AgentRunner:
             "grammar_type": grammar_type,
             # `_LocalMistralRsBackend` ignores this — the local engine is
             # already seeded once at `Runner` construction, not per
-            # request. A per-request backend (Modal) uses it for whatever
-            # reproducibility a stateless HTTP request can offer.
+            # request. Carried for a per-request backend to use for
+            # whatever reproducibility a stateless HTTP request can offer;
+            # no such backend exists today (see `self._seed`'s own comment
+            # in `__init__`).
             "seed": self._seed,
         }
 
