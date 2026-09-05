@@ -47,7 +47,8 @@ def _final_round(content: str) -> ScriptedResponse:
 
 
 def _classify_round(kind: str) -> ScriptedResponse:
-    return _tool_round("classify_request", {"kind": kind})
+    # `_classify` reads grammar-constrained plain content, not a tool call.
+    return _final_round(kind)
 
 
 class FakeRunner:

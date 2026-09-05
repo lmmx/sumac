@@ -180,37 +180,25 @@ class QueryKind(StrEnum):
     REJECT = "reject"
 
 
-_CLASSIFY_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "classify_request",
-        "description": "Classify the person's request. Call this exactly once, with no other text.",
-        "strict": True,
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "kind": {
-                    "type": "string",
-                    "enum": ["find", "add", "remove", "reject"],
-                    "description": (
-                        "find: locate or ask about something already in inventory, "
-                        "nothing changes. add: record new or additional stock of a "
-                        "product. remove: record that stock was used, thrown away, "
-                        "or moved elsewhere. reject: anything else, or too vague to "
-                        "act on."
-                    ),
-                }
-            },
-            "required": ["kind"],
-            "additionalProperties": False,
-        },
-    },
-}
-_CLASSIFY_SCHEMA_JSON = json.dumps(_CLASSIFY_SCHEMA)
+# Grammar-constrained rather than a `classify_request` tool call: llguidance
+# forces the whole completion to match this regex, so the response is one of
+# these four words verbatim and nothing else can be sampled — no envelope to
+# parse, no malformed-call fallback to reach. See
+# docs/journal/2026-09-05-mistralrs-latency-budget.md finding #2; previously
+# a `<tool_call>{"name": "classify_request", ...}</tool_call>` wrapper cost
+# 27 completion tokens to carry a four-way choice.
+_CLASSIFY_GRAMMAR = "find|add|remove|reject"
+_CLASSIFY_MAX_TOKENS = 8
 
 CLASSIFIER_PROMPT = """\
-You classify one household inventory request. Call classify_request exactly
-once with the single best-fitting kind. Do not answer the request itself.
+You classify one household inventory request. Reply with exactly one word,
+the single best-fitting kind, and nothing else — do not answer the request
+itself.
+
+find: locate or ask about something already in inventory, nothing changes.
+add: record new or additional stock of a product.
+remove: record that stock was used, thrown away, or moved elsewhere.
+reject: anything else, or too vague to act on.
 """
 
 _REJECT_REPLY = "This doesn't look like a request to find, add, or remove something from inventory."
@@ -795,6 +783,8 @@ class _LocalMistralRsBackend:
             temperature=request["temperature"],
             top_p=request["top_p"],
             max_tokens=request["max_tokens"],
+            grammar=request["grammar"],
+            grammar_type=request["grammar_type"],
         )
         # `Runner.send_chat_completion_request` also returns a chunk
         # iterator when `stream=True`; `real_request` never sets it, so
@@ -1318,7 +1308,15 @@ class AgentRunner:
 
     # -- request plumbing (client-side loop — see module docstring) ---------
 
-    def _build_request(self, messages: list[dict[str, str]], schemas: list[str]) -> dict:
+    def _build_request(
+        self,
+        messages: list[dict[str, str]],
+        schemas: list[str],
+        *,
+        grammar: str | None = None,
+        grammar_type: str | None = None,
+        max_tokens: int | None = None,
+    ) -> dict:
         """A plain dict of every kwarg this module's one request shape ever
         sends — not a real `mistralrs.ChatCompletionRequest`, which is an
         opaque PyO3 object no non-mistralrs backend can construct, and which
@@ -1327,7 +1325,13 @@ class AgentRunner:
         `SendsCompletions` implementation gets this identical dict;
         `_LocalMistralRsBackend` is the one place that turns it back into a
         real `mistralrs.ChatCompletionRequest`, immediately before calling
-        the engine."""
+        the engine.
+
+        `grammar`/`grammar_type` are `_classify`'s only caller today (see
+        `_CLASSIFY_GRAMMAR`) — `_LocalMistralRsBackend` forwards them to
+        llguidance; `modal_backend.py`'s vLLM translation does not, since
+        vLLM's guided decoding is a different field entirely, so a
+        grammar-bearing request routed through Modal runs unconstrained."""
         return {
             "messages": messages,
             "model": self._model.quantized_model_id,
@@ -1340,7 +1344,9 @@ class AgentRunner:
             "enable_thinking": False,
             "temperature": self._temperature,
             "top_p": self._top_p,
-            "max_tokens": self._max_tokens,
+            "max_tokens": max_tokens if max_tokens is not None else self._max_tokens,
+            "grammar": grammar,
+            "grammar_type": grammar_type,
             # `_LocalMistralRsBackend` ignores this — the local engine is
             # already seeded once at `Runner` construction, not per
             # request. A per-request backend (Modal) uses it for whatever
@@ -1380,48 +1386,40 @@ class AgentRunner:
         """One single-purpose call, made before the model sees any domain
         tool: which of find/add/remove this request is, or reject. See the
         design journal for why this is a separate step rather than folded
-        into one prompt covering every tool."""
+        into one prompt covering every tool.
+
+        Grammar-constrained to `_CLASSIFY_GRAMMAR` rather than a tool call —
+        the response is one of the four bare words, read straight off
+        `message.content`. A response that somehow doesn't match one of
+        them (an ungrammared backend; see `_build_request`'s docstring)
+        falls back to REJECT the same way an unparseable tool call used
+        to."""
         messages = [
             {"role": "system", "content": self._prompt_variant.classifier_prompt},
             {"role": "user", "content": prompt},
         ]
-        request = self._build_request(messages, [_CLASSIFY_SCHEMA_JSON])
+        request = self._build_request(
+            messages,
+            [],
+            grammar=_CLASSIFY_GRAMMAR,
+            grammar_type="regex",
+            max_tokens=_CLASSIFY_MAX_TOKENS,
+        )
         response = self._runner.send_chat_completion_request(request)
         self._record_usage(response, 0)
-        message = response.choices[0].message
-        if not message.tool_calls:
-            messages.append({"role": "assistant", "content": message.content or ""})
-            self._classify_messages = messages
-            self._record_call(
-                ToolCallRecord(
-                    name="classify_request",
-                    arguments={},
-                    result=message.content or "",
-                    raw_response=getattr(response, "raw_body", None),
-                )
-            )
-            return QueryKind.REJECT
-        call = message.tool_calls[0].function
-        args = json.loads(call.arguments)
-        messages.append(
-            {
-                "role": "assistant",
-                "content": _render_tool_call(
-                    call.name, args, call.arguments, self._model.tool_call_format
-                ),
-            }
-        )
+        content = (response.choices[0].message.content or "").strip()
+        messages.append({"role": "assistant", "content": content})
         self._classify_messages = messages
         self._record_call(
             ToolCallRecord(
                 name="classify_request",
-                arguments=args,
-                result=json.dumps(args),
+                arguments={"kind": content},
+                result=content,
                 raw_response=getattr(response, "raw_body", None),
             )
         )
         try:
-            return QueryKind(args.get("kind"))
+            return QueryKind(content)
         except ValueError:
             return QueryKind.REJECT
 
