@@ -1368,3 +1368,194 @@ By expected value per hour of work, with prerequisites noted.
   <https://github.com/EricLBuehler/mistral.rs/pull/899>
 - This repository: `runs/epochs/verify-qwen3.5-4b-default-20/`, `src/sumac/llm.py`,
   `evals/conftest.py`, `evals/fixtures.py`, and the four preceding journal entries.
+
+---
+
+# Addendum — turning the backlog into an execution plan
+
+**Added after review. Nothing above this line was changed.** The review's verdict, near enough
+verbatim: *"The document is excellent as a research backlog. It is not yet a good execution plan.
+It has effectively ranked by technical upside / conceptual importance, not by what you should
+actually do next."*
+
+That criticism is correct, and it is worth naming precisely what went wrong with "Ranked next
+steps" above. That list is ordered by *expected value per hour of work*, which sounds like an
+execution order and is not one. It ignores two things an execution order must respect: whether an
+experiment's result changes what you do next, and whether an experiment is cheap to *undo*. Idea
+14 sits at position 10 with the largest measured upside on the page — which is precisely the shape
+of a research backlog entry and precisely the wrong thing to look at when deciding what to do on
+a Tuesday.
+
+## The reframing: three optimisation classes, currently mixed together
+
+The twenty ideas are not one list. They are three lists that have been interleaved, and they have
+different costs, different risks, and different consumers.
+
+| class | what it changes | ideas |
+|---|---|---|
+| **A — make inference itself faster** | tokens/second, at fixed token count | 1 greedy, 1 `top_k`, 3 `max_seqs`, 4 PagedAttention, 14 ff-tokens, 15/16 MTP and speculative decoding |
+| **B — make the agent generate less** | token count and request count, at fixed tokens/second | 6 handles, 7 short names, 8 terminal reply, 9 location tree, 10 catalog, 11 fused router, 12 constrained tool calls |
+| **C — make experimentation faster** | how many of A and B you can afford to test | 18 concurrent evals, 19 resident process, 20 the 67 ms micro-benchmark |
+
+The classes differ in a way that decides the order:
+
+- **A is configuration.** One keyword argument, reversible in seconds, no protocol change, no eval
+  fixture work, and the result is a single number.
+- **B is protocol.** It changes tool schemas, message shapes, or what the person sees. Each item
+  needs its own eval run, two of them need new eval scenarios first, and none of them is trivially
+  revertible once downstream code depends on the new shape.
+- **C is neither** — it changes the cost of every A and B experiment that follows, which means its
+  value compounds and it should run *alongside* the early work rather than after it.
+
+Stated that way, the ordering falls out: **do all of A first, because it is cheap and its results
+reprice B; run C in parallel, because it makes the rest affordable; do B in order of
+number-produced-per-unit-of-protocol-churn; and touch the upstream items last, because they are
+the only ones with a review cycle outside this repository.**
+
+## The revised order
+
+The review's list, adopted, with one item struck (see below):
+
+| # | do | class | produces |
+|---|---|---|---|
+| 1 | greedy (`temperature=0.0`) | A | a decode-rate number, and exact comparability for everything after it |
+| 2 | `top_k=20` | A | whether the win is the sort or the sampling path |
+| 3 | the 67 ms micro-benchmark (idea 20) | C | the price of a round-trip, which reprices all of B |
+| ~~4~~ | ~~`llama.cpp` same-model/GPU comparison~~ | ~~A~~ | **struck — see below** |
+| 5 | one-token terminal decision (idea 8B) | B | −16 % projected, no protocol change, no new fixture |
+| 6 | handles (idea 6) | B | −26 % projected, real protocol change |
+| 7 | location tree (idea 9) | B | small win, and the cheap test of idea 10's premise |
+| 8 | fused classifier/router (idea 11) | B | −14 % standalone, gated on item 3's number |
+| 9 | concurrent evals (idea 18) | C | **run in parallel from the start**, gated only on item 1 |
+| 10 | everything else | — | ff-tokens, MTP, constrained-decoding internals |
+
+Three changes from "Ranked next steps" above, each with a reason worth recording.
+
+**Idea 8B moves above idea 6.** The review calls it "sneakily excellent" and the numbers support
+it: 20.7 % of engine time for a sentence Python can synthesize, and the one-token `DONE`
+variant preserves compound requests, so it needs no new eval scenario and changes no tool schema.
+It is the cleanest experiment in class B — the largest win available without touching the
+protocol. Handles are the better *architecture* and remain so; they are simply not the better
+*next move*.
+
+**Idea 6 is P1, not P0.** The reasoning: *"How fast can this model actually run when we aren't
+spending so many tokens on sampling?"* is a question you want answered **before** changing the
+protocol, because the answer changes how much the protocol change is worth. If class A turns out
+to double the decode rate, every class-B saving is halved in absolute terms and the case for a
+disruptive change weakens. If class A does nothing, class B is the whole game. Doing A first is
+not caution, it is sequencing: A's result is an input to B's cost/benefit.
+
+There is a nice secondary argument for handles that the entry above buried under the latency
+figure and the review surfaced properly: **the model should not be responsible for faithfully
+copying opaque identifiers around in the first place.** That is a design argument, independent of
+tokens per second, and it is the reason handles stay high on the list even if class A goes well.
+
+**Idea 17 (the GGUF range request) drops off the front.** It is five minutes, but MTP is not on
+the critical path, and five minutes spent on a branch that cannot affect today's latency is five
+minutes not spent on the empirical fork. Do it later, once something upstream is actually being
+pursued.
+
+## The struck item, and what replaces it
+
+The review moved the `llama.cpp` comparison to position 4 and argued it hard: 122 tok/s should be
+interrogated against a second engine, because *"it tells us which universe we're in — if
+`llama.cpp` gives ~120 tok/s too, stop thinking about kernel optimisation; if it gives ~180 tok/s,
+we have an engine problem."* That is a sound argument in the abstract and it is the same question
+the previous entry's open thread 1 asked.
+
+**It is struck by decision, not by disagreement.** `llama.cpp` is not an engine this project wants
+to run, and the repository owner has ruled out going down that path — including as a
+benchmark-only exercise, on the grounds that a benchmark is how these things start. Open thread 1
+was already declined once; this records that the decline extends to the comparison, and that it
+should not be re-proposed.
+
+What is lost: a clean external bound on whether 122 tok/s is a mistral.rs problem or a hardware
+problem. What can substitute, none of it requiring another engine:
+
+1. **A spec-sheet roofline.** Q4_K_M at 4B is ~2.4 GB of weights, read once per token. Divide by
+   the card's rated memory bandwidth. That gives a floor in milliseconds per token with no
+   software involved at all, and comparing 8.17 ms against it says immediately whether there is a
+   4× gap to explain or a 1.3× one. This is arithmetic, not a benchmark.
+2. **Items 1 and 2 answer most of the same question.** If greedy or `top_k=20` moves the decode
+   rate materially, the gap was the sampler — an engine-side problem, already located, already
+   fixed, and no kernel work implied. If neither moves it, the gap is elsewhere and the roofline
+   from (1) says whether "elsewhere" is the hardware.
+3. **Item 3 bounds the per-request half** independently of the per-token half.
+
+Between them, those three answer the "which universe" question well enough to decide whether Tier
+4 is ever worth opening, without installing a second inference engine. If they leave it genuinely
+ambiguous, that ambiguity is itself the finding, and the decision at that point is to accept
+mistral.rs's decode rate as given and spend everything on class B — which is a legitimate outcome
+and arguably the expected one.
+
+## The decision tree
+
+Every node produces a number or kills a branch. Kill conditions are stated so that a branch can be
+closed by evidence rather than by attrition.
+
+```
+START ──┬── [1] greedy (temperature=0.0)          -> decode rate, pass rate, exact comparability
+        ├── [2] top_k=20                          -> is the win the sort, or the sampling path?
+        └── [3] 67 ms micro-benchmark             -> price of a round-trip
+
+        (in parallel, from the start)
+        └── [9] concurrent evals                  -> gated on [1] only; changes the cost of all below
+```
+
+**Branch A resolves at this point.**
+
+- Decode rate improves materially under [1] or [2] → the sampler was the cost. Class A is **done**;
+  apply the roofline arithmetic above to confirm nothing large remains, and do not open Tier 4.
+- Decode rate barely moves and the roofline says 8.17 ms is near the bandwidth floor → the workload
+  is memory-bound, **no engine change helps**, and Tier 4's ff-token work is the only remaining
+  lever — which is a class-B lever in disguise (it removes tokens; it does not speed up decode).
+- Pass rate drops under greedy → keep `top_k=20`, accept stochastic sampling, and note that the
+  eval-comparability benefit is lost, which raises the cost of every experiment below.
+
+**[3] gates the ordering within class B.** If the round-trip is expensive (67 ms confirmed or
+worse), the ideas that delete *requests* — 8, 11 — outrank the ideas that delete *tokens*. If it is
+cheap (the fit's intercept was an artefact), the reverse, and idea 11's value collapses to almost
+nothing since it saves only ~10 tokens once ideas 6 and 7 have run.
+
+```
+Then, in order, each behind its own eval run:
+
+    [5] one-token terminal DONE (8B)
+         ├─ pass rate holds, ~-16%      -> keep; consider 8A only if a compound scenario exists
+         └─ pass rate drops             -> revert; the narration round is load-bearing, record why
+              ↓
+    [6] handles (6)
+         ├─ pass rate holds, ~-26%      -> keep; _write_is_grounded becomes structural, simplify it
+         └─ pass rate drops             -> revert; the indirection is too much for a 4B model,
+                                           which also kills the closed-alternation half of idea 12
+              ↓
+    [7] location tree (9)
+         ├─ pass rate holds             -> keep; this is also the go/no-go for idea 10
+         └─ pass rate drops             -> KILLS idea 10 outright, no further test needed
+              ↓
+    [8] fused router (11)
+         ├─ pass rate holds             -> keep; must use the shared-prefix construction or it is
+         │                                 worth nothing (see idea 11)
+         └─ pass rate drops             -> revert; and note idea 10 becomes the substitute rather
+                                           than the complement it is elsewhere
+```
+
+**Only after all of the above:** ff-tokens (14), MTP (15) and its prerequisite (17), speculative
+decoding (16), and the constrained-decoding internals of Tier 3. Every one of them is upstream
+work or has an upstream dependency, and none should start before the local questions are
+answered — if class A resolves as "memory-bound, nothing to do" and class B lands its four
+experiments, the pipeline is at roughly 400–500 ms per ask and the case for opening a PR against
+mistral.rs is a different, better-informed conversation than it is today.
+
+**Two fixture prerequisites, unchanged from the risk register above**, both of which sit *before*
+the ideas they gate rather than after: a compound-request scenario before idea 8A (not 8B, which
+is why 8B is the one in the tree), and a larger product fixture before idea 10.
+
+## What this addendum does not change
+
+The analysis above stands as written — the measurements, the source verifications, the
+projections, the risk register, and the per-idea sections. What changes is only the ordering and
+the framing: **"Ranked next steps" is the research backlog, and this section is the execution
+plan.** Where they disagree, this section wins. Where the two agree — idea 1 first, ideas 15/16
+last, idea 10 gated on idea 9 — the agreement is worth noting, because it means the disagreement
+is narrow and about sequencing rather than about substance.
