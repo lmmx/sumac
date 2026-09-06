@@ -584,6 +584,93 @@ def test_repeating_an_identical_successful_write_is_not_queued_twice(
     assert len(agent._pending) == 1
 
 
+# --- idea 8B: DONE grammar (docs/journal/2026-09-06-ask-latency-round-two.md) ---
+
+
+def test_no_grammar_on_find_rounds(data_dir: Path, key: bytes, osuser: str) -> None:
+    """`find` never proposes a write, so `self._pending` stays empty for
+    every round — the DONE grammar must never activate here, or the model
+    could never rephrase the answer in free text."""
+    _seed_pantry_with_jam(data_dir, key, osuser)
+    responses = [
+        _classify_round("find"),
+        _tool_round("sumac_find_inventory", {"query": "jam"}),
+        _final_round("the jam is in the pantry"),
+    ]
+    agent, fake = _make_agent(responses, data_dir, key)
+
+    agent.propose("where is the jam?")
+
+    assert all(r["grammar"] is None for r in fake.requests[1:])  # [1:]: drop the classify round
+
+
+def test_grammar_activates_only_once_a_write_has_succeeded(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    _seed_pantry_with_jam(data_dir, key, osuser)
+    responses = [
+        _classify_round("remove"),
+        _tool_round("sumac_find_inventory", {"query": "jam"}),
+        _tool_round(
+            "sumac_consume_inventory",
+            {"product_id": "jam", "amount": "1", "unit": "jar", "from_location": "pantry"},
+        ),
+        _final_round("DONE"),
+    ]
+    agent, fake = _make_agent(responses, data_dir, key)
+
+    agent.propose("consume 1 jar of jam")
+
+    domain_requests = fake.requests[1:]  # drop the classify round
+    assert domain_requests[0]["grammar"] is None  # the search: nothing pending yet
+    assert domain_requests[1]["grammar"] is None  # the write itself: still nothing pending
+    assert domain_requests[2]["grammar"] == llm._DONE_GRAMMAR
+    assert domain_requests[2]["grammar_type"] == "regex"
+
+
+def test_continue_hands_off_to_a_fully_unconstrained_round(
+    data_dir: Path, key: bytes, osuser: str
+) -> None:
+    """A compound request ("add the widgets and the gadgets") must still
+    produce both writes — but, unlike an earlier version of idea 8B, never
+    by asking the model to emit real tool-call syntax under the DONE
+    grammar. `CONTINUE` only ever hands off to a plain, ungrammared round to
+    get the second tool call; the grammar itself never sees anything but
+    `DONE`/`CONTINUE`."""
+    config.add_location(data_dir, key, osuser, Location(id="pantry", name="Pantry"))
+    responses = [
+        _classify_round("add"),
+        _tool_round(
+            "sumac_discover_inventory",
+            {"product_id": "Widgets", "amount": "1", "unit": "box", "to_location": "pantry"},
+        ),
+        _final_round("CONTINUE"),  # grammar-forced probe after the first write
+        _tool_round(
+            "sumac_discover_inventory",
+            {"product_id": "Gadgets", "amount": "2", "unit": "box", "to_location": "pantry"},
+        ),
+        _final_round("DONE"),  # grammar-forced probe after the second write
+        # Multiple writes always get reviewed, regardless of groundedness —
+        # see `_maybe_self_review`.
+        _final_round("confirmed"),
+    ]
+    agent, fake = _make_agent(responses, data_dir, key)
+
+    plan = agent.propose("add 1 box of widgets and 2 boxes of gadgets to the pantry")
+
+    assert [w.product_id for w in plan.writes] == ["Widgets", "Gadgets"]
+    assert plan.reply_text == (
+        "Recorded discovery of 1 box Widgets\nRecorded discovery of 2 box Gadgets"
+    )
+    domain_requests = fake.requests[1:5]  # the 4 main-loop rounds, before self-review
+    assert [r["grammar"] for r in domain_requests] == [
+        None,  # discover Widgets: nothing pending yet
+        llm._DONE_GRAMMAR,  # CONTINUE probe
+        None,  # discover Gadgets: handed off fully unconstrained
+        llm._DONE_GRAMMAR,  # DONE probe
+    ]
+
+
 # --- self-review -----------------------------------------------------------
 
 
@@ -597,13 +684,16 @@ def test_self_review_replaces_plan_when_model_revises_it(
             "sumac_consume_inventory",
             {"product_id": "jam", "amount": "1", "unit": "jar", "from_location": "pantry"},
         ),
-        _final_round("consumed 1 jar"),
+        # idea 8B: a write already succeeded, so this round is grammar-
+        # constrained to DONE-or-another-tool-call — "DONE" is the only
+        # content a real grammar-constrained round could produce here.
+        _final_round("DONE"),
         # self-review round: the model reconsiders and makes a new call.
         _tool_round(
             "sumac_consume_inventory",
             {"product_id": "jam", "amount": "2", "unit": "jar", "from_location": "pantry"},
         ),
-        _final_round("actually, 2 jars"),
+        _final_round("DONE"),
     ]
     agent, _fake = _make_agent(responses, data_dir, key)
 
@@ -611,7 +701,9 @@ def test_self_review_replaces_plan_when_model_revises_it(
 
     assert len(plan.writes) == 1
     assert plan.writes[0].amount == Decimal(2)
-    assert plan.reply_text == "actually, 2 jars"
+    # Synthesized from the pending write (idea 8B), not read off the
+    # (grammar-forced, content-free) model reply.
+    assert plan.reply_text == "Recorded consumption of 2 jar jam"
 
 
 def test_self_review_keeps_original_plan_when_model_confirms(
@@ -624,8 +716,13 @@ def test_self_review_keeps_original_plan_when_model_confirms(
             "sumac_consume_inventory",
             {"product_id": "jam", "amount": "1", "unit": "jar", "from_location": "pantry"},
         ),
-        _final_round("consumed 1 jar"),
-        # self-review round: no further tool call, so the original plan stands.
+        # idea 8B: a write already succeeded, so this round is grammar-
+        # constrained to DONE-or-another-tool-call.
+        _final_round("DONE"),
+        # self-review round: no further tool call, so the original plan stands
+        # (pending is empty again at the top of the review's own _run_loop,
+        # so this round is unconstrained — a real model would explain itself
+        # in plain text here, hence unlike the round above).
         _final_round("confirmed, no changes"),
     ]
     agent, _fake = _make_agent(responses, data_dir, key)
@@ -634,7 +731,11 @@ def test_self_review_keeps_original_plan_when_model_confirms(
 
     assert len(plan.writes) == 1
     assert plan.writes[0].amount == Decimal(1)
-    assert plan.reply_text == "consumed 1 jar"
+    # Synthesized from the pending write (idea 8B) — the self-review round's
+    # own "confirmed, no changes" is never surfaced, since a review that
+    # makes no new write keeps the original plan wholesale, `reply_text`
+    # included.
+    assert plan.reply_text == "Recorded consumption of 1 jar jam"
 
 
 # --- revise ------------------------------------------------------------

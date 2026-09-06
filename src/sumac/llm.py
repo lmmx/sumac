@@ -203,6 +203,22 @@ class QueryKind(StrEnum):
 _CLASSIFY_GRAMMAR = "find|add|remove|reject"
 _CLASSIFY_MAX_TOKENS = 8
 
+# Idea 8B (docs/journal/2026-09-06-ask-latency-round-two.md): once a write has
+# been proposed, "am I finished?" is forced to one of these two words instead
+# of a free narration reply, the same trick as `_CLASSIFY_GRAMMAR` above. A
+# first version tried to also let this same grammar admit a real tool call
+# (`DONE|<tool_call>[\s\S]*`) so the decision and the next action were one
+# request — measured to reliably corrupt the model's ability to emit a
+# parseable second tool call once forced to start typing under an external
+# regex with no schema awareness past the literal prefix (`grammar` and
+# `tool_schemas` are applied independently — idea 12 — so nothing here
+# understands the tool JSON shape). `CONTINUE` instead only ever hands back
+# to a normal, fully unconstrained round — identical in shape to every round
+# before the first write — to actually get the next tool call. See
+# `_run_loop`.
+_DONE_GRAMMAR = "DONE|CONTINUE"
+_DONE_MAX_TOKENS = 8
+
 CLASSIFIER_PROMPT = """\
 You classify one household inventory request. Reply with exactly one word,
 the single best-fitting kind, and nothing else — do not answer the request
@@ -735,6 +751,15 @@ def _rejected(reason: str, detail: dict) -> str:
     return json.dumps(
         {"status": "rejected", "reason": reason, "detail": detail, "hint": _REJECTION_HINT}
     )
+
+
+def _write_summary(pw: ProposedWrite) -> str:
+    """One line describing `pw`, shared by `commit()`'s own post-write
+    summary and `_run_loop`'s idea-8B synthesis of `reply_text` once a write
+    has been proposed and the model was asked for one grammar-picked token
+    rather than a free narration reply — see docs/journal/2026-09-06-ask-latency-round-two.md
+    idea 8B. One place for the wording keeps the two from drifting apart."""
+    return f"Recorded {pw.kind.value} of {pw.amount} {pw.unit} {pw.product_id}"
 
 
 def _round_preview(message: ChatResponseMessage, limit: int = 100) -> str:
@@ -1476,11 +1501,37 @@ class AgentRunner:
         through unchanged, so this has to be byte-for-byte what the loaded
         model's own chat template would have produced from a real
         `tool_calls` field, and that rendering differs by model family.
-        `MAX_TOOL_ROUNDS` is a termination guarantee, not a plan-size cap."""
+        `MAX_TOOL_ROUNDS` is a termination guarantee, not a plan-size cap.
+
+        Idea 8B (docs/journal/2026-09-06-ask-latency-round-two.md): a round
+        following an unprobed write is constrained to `_DONE_GRAMMAR`
+        (`DONE`/`CONTINUE`, nothing else) rather than left free — a `find`
+        request never writes, so its own rephrase-the-answer reply is never
+        constrained. `probed_writes` counts how many of `self._pending`'s
+        writes have already been asked about, so a search-only round between
+        two writes in a compound request doesn't re-trigger the probe.
+        `CONTINUE` never itself carries a tool call — the round right after
+        it is always a normal, fully unconstrained round, identical in shape
+        to any round before the first write, to actually get the next tool
+        call. An earlier version instead let one grammar admit either `DONE`
+        or the literal start of a tool call in the same request; measured to
+        reliably corrupt the model's ability to complete a second call once
+        forced to start typing under a schema-blind external regex."""
         assert self._messages is not None
         self._pending = []
+        probed_writes = 0
         for round_num in range(1, MAX_TOOL_ROUNDS + 1):
-            request = self._build_request(self._messages, self._schemas)
+            done_grammar_active = len(self._pending) > probed_writes
+            if done_grammar_active:
+                request = self._build_request(
+                    self._messages,
+                    self._schemas,
+                    grammar=_DONE_GRAMMAR,
+                    grammar_type="regex",
+                    max_tokens=_DONE_MAX_TOKENS,
+                )
+            else:
+                request = self._build_request(self._messages, self._schemas)
             if self._debug:
                 render.print_agent_messages(self._messages, f"MESSAGES · round {round_num}")
                 render.print_agent_request(request, round_num)
@@ -1499,6 +1550,17 @@ class AgentRunner:
                 render.print_agent_tool_calls(message.tool_calls)
 
             if not message.tool_calls:
+                if done_grammar_active:
+                    content = (message.content or "").strip()
+                    self._messages.append({"role": "assistant", "content": content})
+                    if content == "CONTINUE":
+                        probed_writes = len(self._pending)
+                        continue
+                    self._terminal = "reply"
+                    return AgentPlan(
+                        reply_text="\n".join(_write_summary(pw) for pw in self._pending),
+                        writes=tuple(self._pending),
+                    )
                 self._messages.append({"role": "assistant", "content": message.content or ""})
                 self._terminal = "reply"
                 return AgentPlan(reply_text=message.content or "", writes=tuple(self._pending))
@@ -1664,5 +1726,5 @@ class AgentRunner:
                 render.print_warning(message)
             for w in writes:
                 store.append(self._data_dir, self._key, w.stream, w.obj)
-            summaries.append(f"Recorded {pw.kind.value} of {pw.amount} {pw.unit} {pw.product_id}")
+            summaries.append(_write_summary(pw))
         return summaries
