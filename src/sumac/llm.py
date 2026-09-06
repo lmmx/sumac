@@ -163,12 +163,18 @@ SELF_REVIEW_ROUNDS = 1
 DEFAULT_TEMPERATURE = 0.2
 DEFAULT_TOP_P = 0.95
 DEFAULT_MAX_TOKENS = 1024
-# `None` for both: `top_k` unset makes mistral.rs's sampler full-sort the
-# vocabulary every token (see docs/journal/2026-09-06-ask-latency-round-two.md
-# idea 1); `min_p` unset is the existing behaviour. Left off by default so
-# turning either on is an explicit `AgentRunner`/eval-CLI choice, not a
-# silent behaviour change.
-DEFAULT_TOP_K: int | None = None
+# `top_k` unset (`None`) or `<= 0` makes mistral.rs's sampler full-sort the
+# whole ~151k vocabulary every token — confirmed against `sampler.rs`
+# (docs/journal/2026-09-06-ask-latency-round-two.md idea 1) and then measured
+# via `scripts/compare-sampling.sh`: 20 turns that into an O(n) partition plus
+# a 20-element sort, +28-30% tok/s over unset at 100% pass rate (3 epochs).
+# `top_k=1` is greedy in effect (only the top token survives the filter, so
+# the categorical draw is invariant to the RNG value) without the exact
+# reproducibility of `temperature=0.0`'s dedicated argmax path, which skips
+# the draw rather than making it moot; `top_k=0` restores the old
+# full-sort/no-limit behaviour explicitly, for comparison. `min_p` unset is
+# the existing behaviour, not yet measured.
+DEFAULT_TOP_K: int | None = 20
 DEFAULT_MIN_P: float | None = None
 
 
