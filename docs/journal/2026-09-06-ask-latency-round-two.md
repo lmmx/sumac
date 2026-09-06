@@ -1559,3 +1559,91 @@ the framing: **"Ranked next steps" is the research backlog, and this section is 
 plan.** Where they disagree, this section wins. Where the two agree — idea 1 first, ideas 15/16
 last, idea 10 gated on idea 9 — the agreement is worth noting, because it means the disagreement
 is narrow and about sequencing rather than about substance.
+
+---
+
+## Current State
+
+- `docs/journal/2026-09-06-ask-latency-round-two.md` records twenty proposals against `sumac ask`
+  latency, none of which is implemented — the commit carrying the entry changes no file outside
+  `docs/journal/`.
+- The per-request budget re-segmented by request role reads 598 s of engine time across the 440
+  scenarios of `runs/epochs/verify-qwen3.5-4b-default-20/`, at 3.58 requests per scenario: write
+  calls 43.7 %, first `sumac_find_inventory` 27.0 %, terminal plain-text reply 20.7 %, classifier
+  5.5 %, second `sumac_find_inventory` 3.1 %.
+- The 598 s figure counts only each scenario's first `_run_loop` segment and prices the classifier
+  at one completion token — two adjustments that model the gated `_maybe_self_review`
+  (`llm.py:1530-1556`) and the `_CLASSIFY_GRAMMAR` constraint (`llm.py:190`) shipped since
+  `runs/epochs/verify-qwen3.5-4b-default-20/` was recorded.
+- Tool-call messages in `runs/epochs/verify-qwen3.5-4b-default-20/` carry 84.0 fixed characters
+  against 12.1 variable for `sumac_find_inventory`, 133.0 against 32.6 for
+  `sumac_consume_inventory`, 132.0 against 39.3 for `sumac_discover_inventory`, and 147.0 against
+  33.5 for `sumac_move_inventory` — 77 % to 87 % of each call is determined by the schema rather
+  than by the request.
+- Write-call messages in the same run decode at 1.98 characters per token against 3.26 for
+  `sumac_find_inventory` calls — location values in write calls average 16.5 characters across 400
+  calls.
+- 0 of the 800 tool-call assistant messages in `runs/epochs/verify-qwen3.5-4b-default-20/` carry
+  text before `<tool_call>`.
+- The first domain tool call is `sumac_find_inventory` in 380 of the 380 non-`reject` scenarios of
+  `runs/epochs/verify-qwen3.5-4b-default-20/`.
+- `_build_request` sends `temperature`, `top_p` and no `top_k` (`llm.py:1302-1348`), with
+  `DEFAULT_TEMPERATURE = 0.2` and `DEFAULT_TOP_P = 0.95` (`llm.py:163-164`).
+- `mistralrs-core/src/sampler.rs` at `v0.9.2` sets the partial-sort bound to the full vocabulary
+  length when `top_k` is not positive, and takes `sample_argmax` only when temperature is `None` or
+  below `1e-7`.
+- `_LocalMistralRsBackend.send_chat_completion_request` constructs
+  `mistralrs.ChatCompletionRequest` with ten named fields (`llm.py:770-782`), omitting the
+  `top_k`, `min_p`, `stop_seqs`, `logit_bias` and penalty fields `mistralrs-pyo3/mistralrs.pyi`
+  declares at `v0.9.2`.
+- `_build_runner` constructs `mistralrs.Runner` with `which` and `seed` (`llm.py:810`), leaving
+  `max_seqs`, `prefix_cache_n`, `no_paged_attn`, `paged_attn`, `mtp_model` and the `pa_*` family at
+  their defaults.
+- `mistralrs-pyo3/src/lib.rs` at `v0.9.2` maps `grammar_type` to `Constraint::Regex`,
+  `Constraint::Lark`, `Constraint::JsonSchema` and `Constraint::Llguidance`, and parses
+  `tool_schemas` into `NormalRequest` independently of the constraint — a single request carries
+  both.
+- `mistralrs-core/src/pipeline/sampling.rs` at `v0.9.2` calls `compute_mask_or_eos` and
+  `consume_token` on the `llguidance::Matcher` held by `SequenceRecognizer`
+  (`mistralrs-core/src/sequence.rs`), and calls none of `compute_ff_tokens`, `consume_ff_tokens` or
+  `compute_ff_bytes`.
+- The entry's addendum orders the twenty proposals as greedy sampling, `top_k=20`, the 67 ms
+  micro-benchmark, the one-token terminal decision, handles, the location tree, the fused router,
+  and upstream work last, with concurrent evals running alongside from the start.
+- The addendum records the `llama.cpp` decode-rate comparison as struck by decision, benchmark-only
+  runs included, and names a spec-sheet bandwidth roofline as the substitute that answers the same
+  question without a second inference engine.
+
+## Stubbed
+
+- None found — the entry adds no code.
+
+## Missing
+
+- No measurement exists for the effect of any of the twenty proposals; every figure in the entry's
+  projection tables is arithmetic over the previous entry's 67 ms-per-request and
+  8.17 ms-per-completion-token fit.
+- No tokenizer was loaded to produce the entry — the 77 %-to-87 % scaffold split is by character,
+  and the token counts derived from it are estimated from measured chars-per-token density.
+- No `evals/` run exists at `temperature=0.0` or with `top_k` set, so the decode-rate effect of
+  `mistralrs-core/src/sampler.rs`'s full-vocabulary sort is unquantified.
+- No micro-benchmark of the 67 ms fixed per-request cost has been run, and the six candidate causes
+  the entry lists are undistinguished.
+- `evals/` contains no compound-request scenario, so a hard-stop terminal reply that drops a second
+  write in one request passes the suite unchanged.
+- `evals/fixtures.py` seeds 9 products across 25 locations, which does not distinguish a model
+  reading a full product catalog in-prompt from a model reading a 9-line one.
+- No tensor index has been read from `unsloth/Qwen3.5-4B-GGUF`'s `Qwen3.5-4B-Q4_K_M.gguf`, so
+  whether the file carries `mtp.*` tensors is unrecorded.
+- No issue or pull request has been opened against `EricLBuehler/mistral.rs` for fast-forward token
+  support in the constrained-decode path.
+- `evals/conftest.py` runs `pytest.mark.model` scenarios one at a time (`_shuffle_model_scenarios`,
+  `evals/conftest.py:66-101`); no code runs scenarios concurrently against one `mistralrs.Runner`.
+- No resident-process or socket entry point exists for `sumac ask`; `shared_runner`
+  (`llm.py:826-854`) reuses a backend within one process only.
+
+## Divergence
+
+- None found against `README.md`, which documents `sumac ask --loop`'s single model load and the
+  `ask-cuda` wheel build without making claims about sampling configuration, per-request latency,
+  or tokens per second.
