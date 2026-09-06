@@ -1039,6 +1039,8 @@ def test_build_request_passes_default_sampling_config(
 
     assert request["temperature"] == llm.DEFAULT_TEMPERATURE
     assert request["top_p"] == llm.DEFAULT_TOP_P
+    assert request["top_k"] == llm.DEFAULT_TOP_K
+    assert request["min_p"] == llm.DEFAULT_MIN_P
     assert request["max_tokens"] == llm.DEFAULT_MAX_TOKENS
 
 
@@ -1046,11 +1048,22 @@ def test_build_request_passes_custom_sampling_config(
     data_dir: Path, key: bytes, osuser: str
 ) -> None:
     fake = FakeRunner([])
-    agent = llm.AgentRunner(data_dir, key, runner=fake, temperature=0.7, top_p=0.5, max_tokens=256)
+    agent = llm.AgentRunner(
+        data_dir,
+        key,
+        runner=fake,
+        temperature=0.7,
+        top_p=0.5,
+        top_k=20,
+        min_p=0.05,
+        max_tokens=256,
+    )
     request = agent._build_request([{"role": "user", "content": "hi"}], [])
 
     assert request["temperature"] == 0.7
     assert request["top_p"] == 0.5
+    assert request["top_k"] == 20
+    assert request["min_p"] == 0.05
     assert request["max_tokens"] == 256
 
 
@@ -1100,6 +1113,28 @@ def test_build_runner_defaults_seed_to_none(monkeypatch: pytest.MonkeyPatch) -> 
     llm._build_runner(llm.DEFAULT_MODEL_PRESET)
 
     assert captured["seed"] is None
+
+
+def test_build_runner_passes_max_seqs_and_no_paged_attn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Defaults match `mistralrs.Runner`'s own (16, False) — see
+    docs/journal/2026-09-06-ask-latency-round-two.md ideas 3/4 — and both
+    are overridable per call rather than hardcoded."""
+    captured: dict = {}
+
+    class _CapturingRunner:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(llm.mistralrs, "Runner", _CapturingRunner)
+    monkeypatch.setattr(llm.render.console, "print", lambda *a, **k: None)
+
+    llm._build_runner(llm.DEFAULT_MODEL_PRESET)
+    assert captured["max_seqs"] == 16
+    assert captured["no_paged_attn"] is False
+
+    llm._build_runner(llm.DEFAULT_MODEL_PRESET, max_seqs=2, no_paged_attn=True)
+    assert captured["max_seqs"] == 2
+    assert captured["no_paged_attn"] is True
 
 
 # --- projected effects -------------------------------------------------
@@ -1211,7 +1246,13 @@ def _count_builds(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Records which model a backend is built for, without building one."""
     built: list[str] = []
 
-    def fake_build(model: llm.ModelPreset, *, seed: int | None = None) -> object:
+    def fake_build(
+        model: llm.ModelPreset,
+        *,
+        seed: int | None = None,
+        max_seqs: int = 16,
+        no_paged_attn: bool = False,
+    ) -> object:
         built.append(model.name)
         return FakeRunner([])
 
@@ -1272,6 +1313,21 @@ def test_a_different_seed_is_a_different_backend(
     llm.AgentRunner(data_dir, key, seed=2)
 
     assert len(built) == 2
+
+
+def test_different_max_seqs_or_paged_attn_is_a_different_backend(
+    data_dir: Path, key: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale runner built for the previous `max_seqs`/`no_paged_attn` must
+    not be silently reused once a caller asks for different ones."""
+    built = _count_builds(monkeypatch)
+
+    llm.AgentRunner(data_dir, key, max_seqs=16, no_paged_attn=False)
+    llm.AgentRunner(data_dir, key, max_seqs=16, no_paged_attn=False)
+    llm.AgentRunner(data_dir, key, max_seqs=2, no_paged_attn=False)
+    llm.AgentRunner(data_dir, key, max_seqs=2, no_paged_attn=True)
+
+    assert len(built) == 3
 
 
 def test_an_injected_backend_never_builds_or_caches(

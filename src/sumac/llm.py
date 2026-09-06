@@ -163,6 +163,13 @@ SELF_REVIEW_ROUNDS = 1
 DEFAULT_TEMPERATURE = 0.2
 DEFAULT_TOP_P = 0.95
 DEFAULT_MAX_TOKENS = 1024
+# `None` for both: `top_k` unset makes mistral.rs's sampler full-sort the
+# vocabulary every token (see docs/journal/2026-09-06-ask-latency-round-two.md
+# idea 1); `min_p` unset is the existing behaviour. Left off by default so
+# turning either on is an explicit `AgentRunner`/eval-CLI choice, not a
+# silent behaviour change.
+DEFAULT_TOP_K: int | None = None
+DEFAULT_MIN_P: float | None = None
 
 
 # --- Query classification ----------------------------------------------------
@@ -775,6 +782,8 @@ class _LocalMistralRsBackend:
             enable_thinking=request["enable_thinking"],
             temperature=request["temperature"],
             top_p=request["top_p"],
+            top_k=request["top_k"],
+            min_p=request["min_p"],
             max_tokens=request["max_tokens"],
             grammar=request["grammar"],
             grammar_type=request["grammar_type"],
@@ -789,13 +798,23 @@ class _LocalMistralRsBackend:
         )
 
 
-def _build_runner(model: ModelPreset, *, seed: int | None = None) -> SendsCompletions:
+def _build_runner(
+    model: ModelPreset,
+    *,
+    seed: int | None = None,
+    max_seqs: int = 16,
+    no_paged_attn: bool = False,
+) -> SendsCompletions:
     # No `tool_callbacks` here — see the module docstring for why:
     # `AgentRunner` dispatches tool calls itself instead (`_run_loop`).
     # `seed` is `None` for interactive `sumac ask` use (no fixed seed — the
     # existing "regenerate" retry already gets its variety from resampling);
     # an eval run passes an explicit seed so one epoch reproduces exactly
     # from that seed alone. See docs/journal/2026-09-02-eval-suite.md.
+    # `max_seqs`/`no_paged_attn` default to mistral.rs's own defaults — see
+    # docs/journal/2026-09-06-ask-latency-round-two.md ideas 3/4, sized for a
+    # single-sequence CLI by callers that pass something else (the eval
+    # suite's `--eval-max-seqs`/`--eval-no-paged-attn`).
     render.console.print(
         f"[dim]Loading {model.quantized_model_id} "
         "(first run downloads it; may take a while)...[/dim]"
@@ -807,7 +826,12 @@ def _build_runner(model: ModelPreset, *, seed: int | None = None) -> SendsComple
     # `Which.GGUF` is a nested dataclass, not a `Which` subclass, in the
     # installed 0.9.2 stub — the mismatch below is a stub-modeling gap, not a
     # real one; `Which.GGUF(...)` is mistral.rs's own documented construction.
-    runner = mistralrs.Runner(which=which, seed=seed)  # ty: ignore[invalid-argument-type]
+    runner = mistralrs.Runner(
+        which=which,  # ty: ignore[invalid-argument-type]
+        seed=seed,
+        max_seqs=max_seqs,
+        no_paged_attn=no_paged_attn,
+    )
     return _LocalMistralRsBackend(runner)
 
 
@@ -820,10 +844,16 @@ def _build_runner(model: ModelPreset, *, seed: int | None = None) -> SendsComple
 # the backend holds no state this module depends on. `evals/conftest.py` has
 # shared one `base_runner` across every scenario in a run since the eval suite
 # existed; this applies the same reuse to the interactive loop.
-_SHARED_RUNNER: tuple[tuple[str, int | None], SendsCompletions] | None = None
+_SHARED_RUNNER: tuple[tuple[str, int | None, int, bool], SendsCompletions] | None = None
 
 
-def shared_runner(model: ModelPreset, *, seed: int | None = None) -> SendsCompletions:
+def shared_runner(
+    model: ModelPreset,
+    *,
+    seed: int | None = None,
+    max_seqs: int = 16,
+    no_paged_attn: bool = False,
+) -> SendsCompletions:
     """A backend for `model`, reusing the last one when it matches, so a
     `--loop` session loads the model once rather than once per request.
 
@@ -831,7 +861,9 @@ def shared_runner(model: ModelPreset, *, seed: int | None = None) -> SendsComple
     resident at once can exhaust a GPU that fits either alone when switching
     models mid-session. Dropping this module's reference is all it can do —
     a caller still holding the previous `AgentRunner` keeps that backend
-    alive until the caller releases it.
+    alive until the caller releases it. `max_seqs`/`no_paged_attn` are part
+    of the cache key for the same reason `seed` is: a stale runner built
+    with the previous value would silently keep serving it.
 
     Reuse has one observable effect, the same one `evals/` already accounts
     for: mistral.rs's RNG stream and prefix cache carry across requests, so a
@@ -843,11 +875,14 @@ def shared_runner(model: ModelPreset, *, seed: int | None = None) -> SendsComple
     `AgentRunner` builds its own backend when handed one, so `evals/` and the
     benchmark scripts continue to control when a model is loaded."""
     global _SHARED_RUNNER
-    cache_key = (model.name, seed)
+    cache_key = (model.name, seed, max_seqs, no_paged_attn)
     if _SHARED_RUNNER is not None and _SHARED_RUNNER[0] == cache_key:
         return _SHARED_RUNNER[1]
     _SHARED_RUNNER = None
-    _SHARED_RUNNER = (cache_key, _build_runner(model, seed=seed))
+    _SHARED_RUNNER = (
+        cache_key,
+        _build_runner(model, seed=seed, max_seqs=max_seqs, no_paged_attn=no_paged_attn),
+    )
     return _SHARED_RUNNER[1]
 
 
@@ -939,8 +974,12 @@ class AgentRunner:
         show_usage: bool = True,
         temperature: float = DEFAULT_TEMPERATURE,
         top_p: float = DEFAULT_TOP_P,
+        top_k: int | None = DEFAULT_TOP_K,
+        min_p: float | None = DEFAULT_MIN_P,
         max_tokens: int = DEFAULT_MAX_TOKENS,
         seed: int | None = None,
+        max_seqs: int = 16,
+        no_paged_attn: bool = False,
     ) -> None:
         self._data_dir = data_dir
         self._key = key
@@ -955,6 +994,8 @@ class AgentRunner:
         self._show_usage = show_usage
         self._temperature = temperature
         self._top_p = top_p
+        self._top_k = top_k
+        self._min_p = min_p
         self._max_tokens = max_tokens
         # Session-level for the local backend (`_build_runner(seed=...)`
         # seeds the whole `mistralrs.Runner`, not a per-request field — see
@@ -999,7 +1040,11 @@ class AgentRunner:
         # one; `evals/conftest.py` builds exactly one per run that way, and
         # has since the suite existed.
         self._runner: SendsCompletions = (
-            runner if runner is not None else shared_runner(model, seed=seed)
+            runner
+            if runner is not None
+            else shared_runner(
+                model, seed=seed, max_seqs=max_seqs, no_paged_attn=no_paged_attn
+            )
         )
 
     @property
@@ -1334,6 +1379,8 @@ class AgentRunner:
             "enable_thinking": False,
             "temperature": self._temperature,
             "top_p": self._top_p,
+            "top_k": self._top_k,
+            "min_p": self._min_p,
             "max_tokens": max_tokens if max_tokens is not None else self._max_tokens,
             "grammar": grammar,
             "grammar_type": grammar_type,

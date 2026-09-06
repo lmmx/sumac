@@ -112,6 +112,26 @@ alongside `"model"` — `epoch_report.py` groups by the pair, labeling a non-def
 for every model × every variant — with one variant registered, neither would earn its keep yet;
 add them if/when there are enough variants to need listing or a full grid compared at once.
 
+### Sampling config: `--eval-temperature`/`--eval-top-k`/`--eval-min-p`/`--eval-max-seqs`/`--eval-no-paged-attn`
+
+For A/B'ing the engine/process-config ideas in
+`docs/journal/2026-09-06-ask-latency-round-two.md` (tier 1) without editing `src/sumac/llm.py` and
+reverting it. The first three override `AgentRunner`'s per-request sampling fields (unset leaves
+its own defaults — `DEFAULT_TEMPERATURE`/`DEFAULT_TOP_K`/`DEFAULT_MIN_P`); the last two are
+`mistralrs.Runner` construction args, not per-request.
+
+```sh
+uv run pytest evals --eval-model qwen3.5-4b --eval-temperature 0.0 --eval-json runs/greedy.json
+uv run pytest evals --eval-model qwen3.5-4b --eval-top-k 20 --eval-json runs/top-k-20.json
+```
+
+`scripts/compare-sampling.sh MODEL [EPOCHS]` runs the entry's three-config ladder (greedy,
+`top_k=20`, baseline) as separate epoch directories with separate `epoch_report.py` summaries —
+not one combined report, since `epoch_report.py` groups by `model`/`prompt_variant`/`backend` only
+and none of those fields would tell two sampling configs apart.
+`scripts/measure-fixed-overhead.sh MODEL` prices the fixed per-request cost (idea 20) directly
+against `_LocalMistralRsBackend`, no eval suite involved.
+
 ## What's here
 
 ```
