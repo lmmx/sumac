@@ -34,7 +34,14 @@ from sumac import llm
 
 model = llm.model_preset('${MODEL}')
 print(f'loading {model.quantized_model_id}...')
-backend = llm._build_runner(model, seed=0)
+# max_seqs=1: this probe only ever sends one sequence at a time. Measured
+# NOT to raise the length sweep's capacity ceiling below (same ~8k-token
+# failure at max_seqs=1 as at the default 16), so that ceiling is some
+# absolute PagedAttention KV-cache sizing (plausibly pa_gpu_mem_usage's
+# auto-allocated fraction of GPU memory), not max_seqs splitting the budget
+# — kept at 1 anyway since it costs nothing and matches this probe's own
+# single-sequence shape.
+backend = llm._build_runner(model, seed=0, max_seqs=1)
 
 def send(messages, max_tokens=1, grammar=None, grammar_type=None):
     request = {
@@ -78,8 +85,12 @@ for n_repeat in (5, 50, 200, 400, 800):
         {'role': 'system', 'content': SYSTEM + ' ' + filler},
         {'role': 'user', 'content': PROMPT},
     ]
-    send(messages)  # warm this length's prefill once
-    reps = sorted(send(messages) for _ in range(10))
+    try:
+        send(messages)  # warm this length's prefill once
+        reps = sorted(send(messages) for _ in range(10))
+    except ValueError as e:
+        print(f'~{len(filler):6d} filler chars: hit a capacity ceiling ({e}) — stopping the sweep')
+        break
     print(f'~{len(filler):6d} filler chars: min={reps[0]*1000:.2f}ms median={reps[5]*1000:.2f}ms')
 
 print()
