@@ -1,0 +1,416 @@
+diff --git a/mistralrs-core/src/gdn/backend.rs b/mistralrs-core/src/gdn/backend.rs
+index acb5b93..051a61c 100644
+--- a/mistralrs-core/src/gdn/backend.rs
++++ b/mistralrs-core/src/gdn/backend.rs
+@@ -683,10 +683,14 @@ pub fn causal_conv1d(
+     batch_kind: RecurrentBatchKind,
+ ) -> Result<Tensor> {
+     let (_, seq_len, _) = x.dims3()?;
+-    if matches!(batch_kind, RecurrentBatchKind::Decode) {
+-        if seq_len != 1 {
+-            candle_core::bail!("GDN decode expects a single-token query.");
+-        }
++    // A `Decode` step normally queries one new token, but a grammar fast-forward window (see
++    // `Sequence::pending_ff_tokens`) can present several already-known tokens at once. The
++    // single-token path below is a specialized fast path for width 1; `causal_conv1d_full`
++    // handles any width and already continues from `cache.conv_state` rather than resetting
++    // it (proven by both real prompt prefill and `advance_state_from_stash`'s multi-token
++    // speculative-replay use, which calls it under `RecurrentBatchKind::Prefill` for the same
++    // "extend cached state by N already-known tokens" case).
++    if matches!(batch_kind, RecurrentBatchKind::Decode) && seq_len == 1 {
+         causal_conv1d_update(x, conv1d_weight, dims, cache)
+     } else {
+         causal_conv1d_full(x, conv1d_weight, dims, cache)
+diff --git a/mistralrs-core/src/pipeline/diffusion.rs b/mistralrs-core/src/pipeline/diffusion.rs
+index 6c77f93..35de13f 100644
+--- a/mistralrs-core/src/pipeline/diffusion.rs
++++ b/mistralrs-core/src/pipeline/diffusion.rs
+@@ -249,6 +249,7 @@ impl Loader for DiffusionLoader {
+                     output: vec![SupportedModality::Vision],
+                 },
+                 loaded_for_uqff_write: false,
++                supports_grammar_fast_forward: false,
+             }),
+             dummy_cache: EitherCache::Full(Cache::new(0, false)),
+         })))
+diff --git a/mistralrs-core/src/pipeline/embedding.rs b/mistralrs-core/src/pipeline/embedding.rs
+index f8532ce..5a97c2d 100644
+--- a/mistralrs-core/src/pipeline/embedding.rs
++++ b/mistralrs-core/src/pipeline/embedding.rs
+@@ -678,6 +678,7 @@ impl Loader for EmbeddingLoader {
+                     output: vec![SupportedModality::Embedding],
+                 },
+                 loaded_for_uqff_write: self.config.write_uqff.is_some(),
++                supports_grammar_fast_forward: false,
+             }),
+             mapper: pipeline_mapper,
+             modules,
+diff --git a/mistralrs-core/src/pipeline/ggml.rs b/mistralrs-core/src/pipeline/ggml.rs
+index 4e6b863..cb31825 100644
+--- a/mistralrs-core/src/pipeline/ggml.rs
++++ b/mistralrs-core/src/pipeline/ggml.rs
+@@ -397,6 +397,7 @@ impl Loader for GGMLLoader {
+                     output: vec![SupportedModality::Text],
+                 },
+                 loaded_for_uqff_write: false,
++                supports_grammar_fast_forward: false,
+             }),
+             generation_defaults,
+         })))
+diff --git a/mistralrs-core/src/pipeline/gguf.rs b/mistralrs-core/src/pipeline/gguf.rs
+index 2b095ff..4b97a2f 100644
+--- a/mistralrs-core/src/pipeline/gguf.rs
++++ b/mistralrs-core/src/pipeline/gguf.rs
+@@ -1398,6 +1398,11 @@ impl Loader for GGUFLoader {
+                     output: vec![SupportedModality::Text],
+                 },
+                 loaded_for_uqff_write: false,
++                // Mechanism validated correct on CPU (byte-identical output vs. unpatched
++                // decode) but measured *slower* wall-clock there -- see
++                // docs/journal/2026-09-07-fast-forward-cpu-result.md. Left off by default
++                // until someone measures it on the GPU target this was designed for.
++                supports_grammar_fast_forward: false,
+             }),
+             generation_defaults,
+             mapper: pipeline_mapper,
+diff --git a/mistralrs-core/src/pipeline/inputs_processor.rs b/mistralrs-core/src/pipeline/inputs_processor.rs
+index af12679..cbe384a 100644
+--- a/mistralrs-core/src/pipeline/inputs_processor.rs
++++ b/mistralrs-core/src/pipeline/inputs_processor.rs
+@@ -1384,6 +1384,34 @@ pub mod text_models_inputs_processor {
+         })
+     }
+ 
++    /// Homogeneous-width check for `pending_ff_tokens`, mirroring
++    /// `speculative::staging::staged_batch_width`: a batch mixing forced and non-forced
++    /// sequences, or forced sequences of differing splice length, falls back to `None`
++    /// (no widening for this step) rather than a ragged decode window.
++    fn pending_ff_batch_width(seqs: &[&mut Sequence]) -> Option<usize> {
++        let mut width = None;
++        let mut saw_empty = false;
++        for seq in seqs {
++            let len = seq.active_pending_ff_tokens().len();
++            if len == 0 {
++                if width.is_some() {
++                    return None;
++                }
++                saw_empty = true;
++            } else {
++                if saw_empty {
++                    return None;
++                }
++                match width {
++                    Some(existing) if existing != len => return None,
++                    Some(_) => {}
++                    None => width = Some(len),
++                }
++            }
++        }
++        width
++    }
++
+     fn make_completion_chunk<T: WithDType + From<u32> + Clone + std::fmt::Debug>(
+         toks: Vec<&[T]>,
+         input_seqs: &[&mut Sequence],
+@@ -1414,19 +1442,42 @@ pub mod text_models_inputs_processor {
+         // one-token decode and the driver clears the stale staged proposals.
+         let use_staged_speculative =
+             crate::speculative::staging::staged_batch_width(input_seqs).is_some();
++        let use_pending_ff = pending_ff_batch_width(input_seqs).is_some();
++        // The full per-row window width (staged/forced tokens included), independent of how
++        // much of it `context_lens` below selects logits for -- `DecodePagedRows` needs the
++        // former to size KV writes, not the latter.
++        let mut query_lens = Vec::with_capacity(input_seqs.len());
+         for (seq, ctxt) in input_seqs.iter().zip(toks) {
+             let staged_speculative = if use_staged_speculative {
+                 seq.active_staged_speculative_tokens()
+             } else {
+                 &[]
+             };
++            let pending_ff = if use_pending_ff {
++                seq.active_pending_ff_tokens()
++            } else {
++                &[]
++            };
+             let start_pos = ctxt.len().saturating_sub(decode_window);
+             let mut ctxt = ctxt[start_pos..].to_vec();
+             ctxt.extend(staged_speculative.iter().copied().map(T::from));
++            ctxt.extend(pending_ff.iter().copied().map(T::from));
+             let query_len = ctxt.len();
+             let effective_context_len = start_pos + query_len;
+             seqlen_offsets.push(start_pos);
+-            context_lens.push((0, query_len));
++            // Forced tokens are already known -- only the position after them needs a
++            // sampled logit, so narrow the (otherwise full-window) hidden-state selection
++            // to it instead of paying lm_head's vocab projection for every forced position.
++            // Staged speculative proposals need every position's logits for verification, so
++            // never narrow when both mechanisms happen to be active on the same sequence --
++            // the two are mutually exclusive in every pipeline this repo tests today (GGUF's
++            // decode never sets staged_speculative), but the general engine allows either.
++            context_lens.push(if pending_ff.is_empty() || !staged_speculative.is_empty() {
++                (0, query_len)
++            } else {
++                (query_len - 1, 1)
++            });
++            query_lens.push(query_len);
+             position_ids.push(effective_context_len);
+ 
+             if flash_attn {
+@@ -1522,7 +1573,7 @@ pub mod text_models_inputs_processor {
+                 context_lens: paged_attn_context_lens,
+                 full_block_tables,
+                 full_context_lens: full_paged_attn_context_lens,
+-                query_len: context_lens.first().map_or(1, |(_, q)| *q),
++                query_len: query_lens.first().copied().unwrap_or(1),
+                 block_size: paged_attn_input.block_size,
+                 use_standard_metadata: paged_attn_input.attention_backend
+                     == AttentionBackendKind::Standard,
+diff --git a/mistralrs-core/src/pipeline/mod.rs b/mistralrs-core/src/pipeline/mod.rs
+index 165f4a4..34f24e5 100644
+--- a/mistralrs-core/src/pipeline/mod.rs
++++ b/mistralrs-core/src/pipeline/mod.rs
+@@ -932,6 +932,12 @@ pub struct GeneralMetadata {
+     pub modalities: Modalities,
+     // UQFF writes force the whole model onto CPU, so the pipeline is not servable afterwards.
+     pub loaded_for_uqff_write: bool,
++    /// Whether this pipeline's decode step feeds `Sequence::pending_ff_tokens` (grammar
++    /// fast-forward splices) through the generic `text_models_inputs_processor` windowed
++    /// decode path. Vision/embedding/diffusion/speech pipelines build their own inputs and
++    /// never consume that field, so leaving this false there is a correctness requirement,
++    /// not just an optimization opt-out: `sample_sequence` only stages a splice when true.
++    pub supports_grammar_fast_forward: bool,
+ }
+ 
+ impl GeneralMetadata {
+diff --git a/mistralrs-core/src/pipeline/multimodal.rs b/mistralrs-core/src/pipeline/multimodal.rs
+index 4983366..fa4eef4 100644
+--- a/mistralrs-core/src/pipeline/multimodal.rs
++++ b/mistralrs-core/src/pipeline/multimodal.rs
+@@ -1309,6 +1309,7 @@ impl Loader for MultimodalLoader {
+                 model_metadata: Some(model_metadata),
+                 modalities,
+                 loaded_for_uqff_write: self.config.write_uqff.is_some(),
++                supports_grammar_fast_forward: false,
+             }),
+             processor,
+             prefixer: self.inner.prefixer(&config),
+diff --git a/mistralrs-core/src/pipeline/normal.rs b/mistralrs-core/src/pipeline/normal.rs
+index 9341233..74564e3 100644
+--- a/mistralrs-core/src/pipeline/normal.rs
++++ b/mistralrs-core/src/pipeline/normal.rs
+@@ -227,6 +227,12 @@ pub(crate) fn build_normal_pipeline(
+                 output: vec![SupportedModality::Text],
+             },
+             loaded_for_uqff_write,
++            // Mechanism validated correct on CPU (byte-identical output vs. unpatched decode)
++            // but measured *slower* wall-clock there -- see
++            // docs/journal/2026-09-07-fast-forward-cpu-result.md. Left off by default until
++            // someone measures it on the GPU target this was designed for, where decode is
++            // memory-bandwidth- rather than compute-bound and batching may pay off differently.
++            supports_grammar_fast_forward: false,
+         }),
+         #[cfg(feature = "cuda")]
+         cuda_decode_graph: StdMutex::new(CudaDecodeGraphState::default()),
+diff --git a/mistralrs-core/src/pipeline/sampling.rs b/mistralrs-core/src/pipeline/sampling.rs
+index 4471843..6dd66ca 100644
+--- a/mistralrs-core/src/pipeline/sampling.rs
++++ b/mistralrs-core/src/pipeline/sampling.rs
+@@ -543,6 +543,35 @@ pub(crate) async fn finalize_block_gen(
+     Ok(())
+ }
+ 
++/// Replays a grammar-forced token splice through the normal per-token completion path
++/// (`finish_or_add_toks_to_seq`), one token at a time, so tool-call detection, mid-stream
++/// grammar activation, and stop handling all run exactly as they would for a sampled token --
++/// the only difference is these tokens skip the forward pass, since the grammar already
++/// determined them (see the `compute_ff_tokens` call in `sample_sequence`).
++/// Returns `true` if the sequence reached a `Done` state partway through the splice, in which
++/// case the caller must not go on to apply the token sampled after it.
++async fn apply_pending_ff_tokens(
++    this: &dyn Pipeline,
++    prefix_cacher: &mut PrefixCacheManagerV2,
++    seq: &mut Sequence,
++    pending_ff: Vec<u32>,
++    eos_tok: Option<&[u32]>,
++) -> Result<bool> {
++    for tok in pending_ff {
++        let ff_logprobs = Logprobs {
++            token: tok,
++            logprob: 0.0,
++            bytes: None,
++            top_logprobs: Some(Vec::new()),
++        };
++        finish_or_add_toks_to_seq(this, prefix_cacher, seq, ff_logprobs, eos_tok, true).await?;
++        if matches!(seq.getstate(), SequenceState::Done(_)) {
++            return Ok(true);
++        }
++    }
++    Ok(false)
++}
++
+ pub async fn sample_and_add_toks(
+     this: &dyn Pipeline,
+     seqs: &mut [&mut Sequence],
+@@ -559,6 +588,15 @@ pub async fn sample_and_add_toks(
+     let llg_factory = metadata.llg_factory.clone();
+     let max_model_len = metadata.max_seq_len;
+     let eos_toks = metadata.eos_tok.clone();
++    let supports_fast_forward = metadata.supports_grammar_fast_forward;
++
++    // The window this step decoded may have included a previously staged fast-forward splice
++    // (see `sample_sequence`'s `compute_ff_tokens` call). Captured here, before `sample_sequence`
++    // runs below and stages a *new* splice for the following step onto the same field.
++    let applied_ff_toks: Vec<Vec<u32>> = seqs
++        .iter_mut()
++        .map(|seq| seq.take_pending_ff_tokens())
++        .collect();
+ 
+     let sampled_vec = match try_sample_batch_cuda(&logits_seq, seqs, &rng)? {
+         Some(sampled) => sampled,
+@@ -579,6 +617,7 @@ pub async fn sample_and_add_toks(
+                         use_async_pool,
+                         false,
+                         use_async_pool,
++                        supports_fast_forward,
+                     )
+                 })
+                 .collect();
+@@ -586,12 +625,18 @@ pub async fn sample_and_add_toks(
+         }
+     };
+ 
+-    for (sampled, seq) in std::iter::zip(sampled_vec, seqs.iter_mut()) {
+-        let next_token = crate::handle_seq_error_stateaware_ok!(sampled, seq);
+-
++    for ((sampled, seq), ff_toks) in
++        std::iter::zip(std::iter::zip(sampled_vec, seqs.iter_mut()), applied_ff_toks)
++    {
+         let metadata = this.get_metadata();
+         let eos_tok = seq.effective_eos_tokens(&metadata.eos_tok, disable_eos_stop);
+ 
++        if apply_pending_ff_tokens(this, prefix_cacher, seq, ff_toks, eos_tok).await? {
++            continue;
++        }
++
++        let next_token = crate::handle_seq_error_stateaware_ok!(sampled, seq);
++
+         finish_or_add_toks_to_seq(this, prefix_cacher, seq, next_token, eos_tok, true).await?;
+     }
+ 
+@@ -782,6 +827,7 @@ pub async fn sample_sequence(
+     use_async_pool: bool,
+     sample_speculative: bool,
+     multiple_sequences: bool,
++    supports_fast_forward: bool,
+ ) -> Result<Logprobs> {
+     activate_required_tool_call_grammar(seq, llg_factory.as_ref(), max_model_len, false);
+ 
+@@ -908,6 +954,19 @@ pub async fn sample_sequence(
+             if !llg.is_stopped() && !ends_turn {
+                 llg.consume_token(second_logprobs_response.token)
+                     .map_err(candle_core::Error::msg)?;
++                // The matcher may now have a single legal continuation for the next several
++                // tokens (e.g. the rest of a forced tool-call scaffold). Stage it so the next
++                // decode window can feed these back in without a forward pass each -- only for
++                // pipelines whose input builder actually consumes `pending_ff_tokens`; see
++                // `GeneralMetadata::supports_grammar_fast_forward`.
++                if supports_fast_forward && !llg.is_stopped() {
++                    let splice = llg.compute_ff_tokens();
++                    tracing::debug!(splice_len = splice.len(), "fast-forward splice computed");
++                    if !splice.is_empty() {
++                        llg.consume_tokens(&splice).map_err(candle_core::Error::msg)?;
++                        seq.set_pending_ff_tokens(splice);
++                    }
++                }
+             }
+         }
+         SequenceRecognizer::None => {}
+diff --git a/mistralrs-core/src/pipeline/speech.rs b/mistralrs-core/src/pipeline/speech.rs
+index 0d93029..e3b2914 100644
+--- a/mistralrs-core/src/pipeline/speech.rs
++++ b/mistralrs-core/src/pipeline/speech.rs
+@@ -327,6 +327,7 @@ impl Loader for SpeechLoader {
+                     output: vec![SupportedModality::Audio],
+                 },
+                 loaded_for_uqff_write: false,
++                supports_grammar_fast_forward: false,
+             }),
+             dummy_cache: EitherCache::Full(Cache::new(0, false)),
+             cfg: self
+diff --git a/mistralrs-core/src/sequence.rs b/mistralrs-core/src/sequence.rs
+index 6a4b3d3..d1e5da0 100644
+--- a/mistralrs-core/src/sequence.rs
++++ b/mistralrs-core/src/sequence.rs
+@@ -711,6 +711,10 @@ pub struct Sequence {
+     staged_speculative_tokens: Vec<u32>,
+     staged_speculative_logits: Option<Tensor>,
+ 
++    // Grammar fast-forward: tokens the active llguidance matcher has already committed to
++    // (compute_ff_tokens), staged for the next decode window instead of a forward pass each.
++    pending_ff_tokens: Vec<u32>,
++
+     // Prefix caching
+     prefill_prompt_toks: Option<PrefillTokens>,
+     /// Number of tokens at the start of the prompt that are cached (KV already computed).
+@@ -863,6 +867,7 @@ impl Sequence {
+             last_is_done: None,
+             staged_speculative_tokens: Vec::new(),
+             staged_speculative_logits: None,
++            pending_ff_tokens: Vec::new(),
+             scheduling_urgency: 0,
+             // Multimodal data
+             multimodal: MultimodalData::new(
+@@ -1140,6 +1145,18 @@ impl Sequence {
+         self.staged_speculative_logits = None;
+     }
+ 
++    pub(crate) fn active_pending_ff_tokens(&self) -> &[u32] {
++        &self.pending_ff_tokens
++    }
++
++    pub(crate) fn set_pending_ff_tokens(&mut self, tokens: Vec<u32>) {
++        self.pending_ff_tokens = tokens;
++    }
++
++    pub(crate) fn take_pending_ff_tokens(&mut self) -> Vec<u32> {
++        std::mem::take(&mut self.pending_ff_tokens)
++    }
++
+     pub fn get_initial_prompt(&self) -> &str {
+         &self.prompt
+     }
+diff --git a/mistralrs-core/src/speculative/driver.rs b/mistralrs-core/src/speculative/driver.rs
+index bed0e67..a943893 100644
+--- a/mistralrs-core/src/speculative/driver.rs
++++ b/mistralrs-core/src/speculative/driver.rs
+@@ -171,6 +171,9 @@ where
+             use_async_pool,
+             false,
+             use_async_pool,
++            // Speculative decoding already runs its own windowed propose/verify loop; grammar
++            // fast-forward tokens are a separate mechanism this driver doesn't stage or replay.
++            false,
+         )
+         .await?;
+         let sampled_token = anchor.token;
+diff --git a/mistralrs-core/src/speculative/verifier.rs b/mistralrs-core/src/speculative/verifier.rs
+index 5f51937..b0ab085 100644
+--- a/mistralrs-core/src/speculative/verifier.rs
++++ b/mistralrs-core/src/speculative/verifier.rs
+@@ -148,6 +148,8 @@ pub async fn finish_verified_step<P: Pipeline>(
+                     false,
+                     false,
+                     false,
++                    // Verification has its own propose/verify windowing; not fast-forward.
++                    false,
+                 )
+                 .await?
+             }
+@@ -203,6 +205,7 @@ pub async fn finish_verified_step<P: Pipeline>(
+                 false,
+                 false,
+                 false,
++                false,
+             )
+             .await?
+         }
