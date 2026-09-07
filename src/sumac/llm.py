@@ -1073,9 +1073,7 @@ class AgentRunner:
         self._runner: SendsCompletions = (
             runner
             if runner is not None
-            else shared_runner(
-                model, seed=seed, max_seqs=max_seqs, no_paged_attn=no_paged_attn
-            )
+            else shared_runner(model, seed=seed, max_seqs=max_seqs, no_paged_attn=no_paged_attn)
         )
 
     @property

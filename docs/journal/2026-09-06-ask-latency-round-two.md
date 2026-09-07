@@ -166,12 +166,14 @@ import json, glob, collections
 
 files = sorted(glob.glob("runs/epochs/verify-qwen3.5-4b-default-20/epoch-*.log.jsonl"))
 scen = [json.loads(l) for f in files for l in open(f)]
-cat = collections.Counter(); n = collections.Counter(); tok = collections.Counter()
+cat = collections.Counter()
+n = collections.Counter()
+tok = collections.Counter()
 for s in scen:
     uh = s["usage_history"]
     assts = [m for m in (s["messages"] or []) if m["role"] == "assistant"]
     dom = [u for u in uh if u["round"] >= 1]
-    first = []                       # first _run_loop segment only
+    first = []  # first _run_loop segment only
     for u in dom:
         if first and u["round"] <= first[-1]["round"]:
             break
@@ -183,9 +185,12 @@ for s in scen:
             lab = "1st_find" if (i == 0 and nm == "sumac_find_inventory") else nm
         else:
             lab = "terminal_reply"
-        cat[lab] += u["total_time_sec"]; n[lab] += 1; tok[lab] += u["completion_tokens"]
-    cat["classify(grammar,est)"] += 0.067 + 0.00817   # 1 token under _CLASSIFY_GRAMMAR
-    n["classify(grammar,est)"] += 1; tok["classify(grammar,est)"] += 1
+        cat[lab] += u["total_time_sec"]
+        n[lab] += 1
+        tok[lab] += u["completion_tokens"]
+    cat["classify(grammar,est)"] += 0.067 + 0.00817  # 1 token under _CLASSIFY_GRAMMAR
+    n["classify(grammar,est)"] += 1
+    tok["classify(grammar,est)"] += 1
 ```
 
 Two adjustments make this an estimate of *today's* budget rather than a measurement of the
@@ -1085,10 +1090,10 @@ The previous entry's finding 6, unchanged and still accurate. `mistralrs-server-
 exposes only:
 
 ```python
-mtp_model: str | None = None       # "attaches an MTP assistant from a model id or path"
-mtp_n_predict: int | None = None   # "controls the number of assistant tokens proposed per
-                                   #  speculative step. If unset, the assistant generation
-                                   #  config is used"
+mtp_model: str | None = None  # "attaches an MTP assistant from a model id or path"
+mtp_n_predict: int | None = None  # "controls the number of assistant tokens proposed per
+#  speculative step. If unset, the assistant generation
+#  config is used"
 ```
 
 No boolean or sentinel corresponding to `is_builtin`. The built-in-head path is reachable from the
