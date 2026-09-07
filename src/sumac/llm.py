@@ -163,6 +163,19 @@ SELF_REVIEW_ROUNDS = 1
 DEFAULT_TEMPERATURE = 0.2
 DEFAULT_TOP_P = 0.95
 DEFAULT_MAX_TOKENS = 1024
+# `top_k` unset (`None`) or `<= 0` makes mistral.rs's sampler full-sort the
+# whole ~151k vocabulary every token — confirmed against `sampler.rs`
+# (docs/journal/2026-09-06-ask-latency-round-two.md idea 1) and then measured
+# via `scripts/compare-sampling.sh`: 20 turns that into an O(n) partition plus
+# a 20-element sort, +28-30% tok/s over unset at 100% pass rate (3 epochs).
+# `top_k=1` is greedy in effect (only the top token survives the filter, so
+# the categorical draw is invariant to the RNG value) without the exact
+# reproducibility of `temperature=0.0`'s dedicated argmax path, which skips
+# the draw rather than making it moot; `top_k=0` restores the old
+# full-sort/no-limit behaviour explicitly, for comparison. `min_p` unset is
+# the existing behaviour, not yet measured.
+DEFAULT_TOP_K: int | None = 20
+DEFAULT_MIN_P: float | None = None
 
 
 # --- Query classification ----------------------------------------------------
@@ -189,6 +202,22 @@ class QueryKind(StrEnum):
 # 27 completion tokens to carry a four-way choice.
 _CLASSIFY_GRAMMAR = "find|add|remove|reject"
 _CLASSIFY_MAX_TOKENS = 8
+
+# Idea 8B (docs/journal/2026-09-06-ask-latency-round-two.md): once a write has
+# been proposed, "am I finished?" is forced to one of these two words instead
+# of a free narration reply, the same trick as `_CLASSIFY_GRAMMAR` above. A
+# first version tried to also let this same grammar admit a real tool call
+# (`DONE|<tool_call>[\s\S]*`) so the decision and the next action were one
+# request — measured to reliably corrupt the model's ability to emit a
+# parseable second tool call once forced to start typing under an external
+# regex with no schema awareness past the literal prefix (`grammar` and
+# `tool_schemas` are applied independently — idea 12 — so nothing here
+# understands the tool JSON shape). `CONTINUE` instead only ever hands back
+# to a normal, fully unconstrained round — identical in shape to every round
+# before the first write — to actually get the next tool call. See
+# `_run_loop`.
+_DONE_GRAMMAR = "DONE|CONTINUE"
+_DONE_MAX_TOKENS = 8
 
 CLASSIFIER_PROMPT = """\
 You classify one household inventory request. Reply with exactly one word,
@@ -724,6 +753,15 @@ def _rejected(reason: str, detail: dict) -> str:
     )
 
 
+def _write_summary(pw: ProposedWrite) -> str:
+    """One line describing `pw`, shared by `commit()`'s own post-write
+    summary and `_run_loop`'s idea-8B synthesis of `reply_text` once a write
+    has been proposed and the model was asked for one grammar-picked token
+    rather than a free narration reply — see docs/journal/2026-09-06-ask-latency-round-two.md
+    idea 8B. One place for the wording keeps the two from drifting apart."""
+    return f"Recorded {pw.kind.value} of {pw.amount} {pw.unit} {pw.product_id}"
+
+
 def _round_preview(message: ChatResponseMessage, limit: int = 100) -> str:
     """What the model actually did this round, truncated — a tool call's
     name and arguments, or its plain-text reply."""
@@ -775,6 +813,8 @@ class _LocalMistralRsBackend:
             enable_thinking=request["enable_thinking"],
             temperature=request["temperature"],
             top_p=request["top_p"],
+            top_k=request["top_k"],
+            min_p=request["min_p"],
             max_tokens=request["max_tokens"],
             grammar=request["grammar"],
             grammar_type=request["grammar_type"],
@@ -789,13 +829,23 @@ class _LocalMistralRsBackend:
         )
 
 
-def _build_runner(model: ModelPreset, *, seed: int | None = None) -> SendsCompletions:
+def _build_runner(
+    model: ModelPreset,
+    *,
+    seed: int | None = None,
+    max_seqs: int = 16,
+    no_paged_attn: bool = False,
+) -> SendsCompletions:
     # No `tool_callbacks` here — see the module docstring for why:
     # `AgentRunner` dispatches tool calls itself instead (`_run_loop`).
     # `seed` is `None` for interactive `sumac ask` use (no fixed seed — the
     # existing "regenerate" retry already gets its variety from resampling);
     # an eval run passes an explicit seed so one epoch reproduces exactly
     # from that seed alone. See docs/journal/2026-09-02-eval-suite.md.
+    # `max_seqs`/`no_paged_attn` default to mistral.rs's own defaults — see
+    # docs/journal/2026-09-06-ask-latency-round-two.md ideas 3/4, sized for a
+    # single-sequence CLI by callers that pass something else (the eval
+    # suite's `--eval-max-seqs`/`--eval-no-paged-attn`).
     render.console.print(
         f"[dim]Loading {model.quantized_model_id} "
         "(first run downloads it; may take a while)...[/dim]"
@@ -807,7 +857,12 @@ def _build_runner(model: ModelPreset, *, seed: int | None = None) -> SendsComple
     # `Which.GGUF` is a nested dataclass, not a `Which` subclass, in the
     # installed 0.9.2 stub — the mismatch below is a stub-modeling gap, not a
     # real one; `Which.GGUF(...)` is mistral.rs's own documented construction.
-    runner = mistralrs.Runner(which=which, seed=seed)  # ty: ignore[invalid-argument-type]
+    runner = mistralrs.Runner(
+        which=which,  # ty: ignore[invalid-argument-type]
+        seed=seed,
+        max_seqs=max_seqs,
+        no_paged_attn=no_paged_attn,
+    )
     return _LocalMistralRsBackend(runner)
 
 
@@ -820,10 +875,16 @@ def _build_runner(model: ModelPreset, *, seed: int | None = None) -> SendsComple
 # the backend holds no state this module depends on. `evals/conftest.py` has
 # shared one `base_runner` across every scenario in a run since the eval suite
 # existed; this applies the same reuse to the interactive loop.
-_SHARED_RUNNER: tuple[tuple[str, int | None], SendsCompletions] | None = None
+_SHARED_RUNNER: tuple[tuple[str, int | None, int, bool], SendsCompletions] | None = None
 
 
-def shared_runner(model: ModelPreset, *, seed: int | None = None) -> SendsCompletions:
+def shared_runner(
+    model: ModelPreset,
+    *,
+    seed: int | None = None,
+    max_seqs: int = 16,
+    no_paged_attn: bool = False,
+) -> SendsCompletions:
     """A backend for `model`, reusing the last one when it matches, so a
     `--loop` session loads the model once rather than once per request.
 
@@ -831,7 +892,9 @@ def shared_runner(model: ModelPreset, *, seed: int | None = None) -> SendsComple
     resident at once can exhaust a GPU that fits either alone when switching
     models mid-session. Dropping this module's reference is all it can do —
     a caller still holding the previous `AgentRunner` keeps that backend
-    alive until the caller releases it.
+    alive until the caller releases it. `max_seqs`/`no_paged_attn` are part
+    of the cache key for the same reason `seed` is: a stale runner built
+    with the previous value would silently keep serving it.
 
     Reuse has one observable effect, the same one `evals/` already accounts
     for: mistral.rs's RNG stream and prefix cache carry across requests, so a
@@ -843,11 +906,14 @@ def shared_runner(model: ModelPreset, *, seed: int | None = None) -> SendsComple
     `AgentRunner` builds its own backend when handed one, so `evals/` and the
     benchmark scripts continue to control when a model is loaded."""
     global _SHARED_RUNNER
-    cache_key = (model.name, seed)
+    cache_key = (model.name, seed, max_seqs, no_paged_attn)
     if _SHARED_RUNNER is not None and _SHARED_RUNNER[0] == cache_key:
         return _SHARED_RUNNER[1]
     _SHARED_RUNNER = None
-    _SHARED_RUNNER = (cache_key, _build_runner(model, seed=seed))
+    _SHARED_RUNNER = (
+        cache_key,
+        _build_runner(model, seed=seed, max_seqs=max_seqs, no_paged_attn=no_paged_attn),
+    )
     return _SHARED_RUNNER[1]
 
 
@@ -939,8 +1005,12 @@ class AgentRunner:
         show_usage: bool = True,
         temperature: float = DEFAULT_TEMPERATURE,
         top_p: float = DEFAULT_TOP_P,
+        top_k: int | None = DEFAULT_TOP_K,
+        min_p: float | None = DEFAULT_MIN_P,
         max_tokens: int = DEFAULT_MAX_TOKENS,
         seed: int | None = None,
+        max_seqs: int = 16,
+        no_paged_attn: bool = False,
     ) -> None:
         self._data_dir = data_dir
         self._key = key
@@ -955,6 +1025,8 @@ class AgentRunner:
         self._show_usage = show_usage
         self._temperature = temperature
         self._top_p = top_p
+        self._top_k = top_k
+        self._min_p = min_p
         self._max_tokens = max_tokens
         # Session-level for the local backend (`_build_runner(seed=...)`
         # seeds the whole `mistralrs.Runner`, not a per-request field — see
@@ -999,7 +1071,11 @@ class AgentRunner:
         # one; `evals/conftest.py` builds exactly one per run that way, and
         # has since the suite existed.
         self._runner: SendsCompletions = (
-            runner if runner is not None else shared_runner(model, seed=seed)
+            runner
+            if runner is not None
+            else shared_runner(
+                model, seed=seed, max_seqs=max_seqs, no_paged_attn=no_paged_attn
+            )
         )
 
     @property
@@ -1334,6 +1410,8 @@ class AgentRunner:
             "enable_thinking": False,
             "temperature": self._temperature,
             "top_p": self._top_p,
+            "top_k": self._top_k,
+            "min_p": self._min_p,
             "max_tokens": max_tokens if max_tokens is not None else self._max_tokens,
             "grammar": grammar,
             "grammar_type": grammar_type,
@@ -1423,11 +1501,37 @@ class AgentRunner:
         through unchanged, so this has to be byte-for-byte what the loaded
         model's own chat template would have produced from a real
         `tool_calls` field, and that rendering differs by model family.
-        `MAX_TOOL_ROUNDS` is a termination guarantee, not a plan-size cap."""
+        `MAX_TOOL_ROUNDS` is a termination guarantee, not a plan-size cap.
+
+        Idea 8B (docs/journal/2026-09-06-ask-latency-round-two.md): a round
+        following an unprobed write is constrained to `_DONE_GRAMMAR`
+        (`DONE`/`CONTINUE`, nothing else) rather than left free — a `find`
+        request never writes, so its own rephrase-the-answer reply is never
+        constrained. `probed_writes` counts how many of `self._pending`'s
+        writes have already been asked about, so a search-only round between
+        two writes in a compound request doesn't re-trigger the probe.
+        `CONTINUE` never itself carries a tool call — the round right after
+        it is always a normal, fully unconstrained round, identical in shape
+        to any round before the first write, to actually get the next tool
+        call. An earlier version instead let one grammar admit either `DONE`
+        or the literal start of a tool call in the same request; measured to
+        reliably corrupt the model's ability to complete a second call once
+        forced to start typing under a schema-blind external regex."""
         assert self._messages is not None
         self._pending = []
+        probed_writes = 0
         for round_num in range(1, MAX_TOOL_ROUNDS + 1):
-            request = self._build_request(self._messages, self._schemas)
+            done_grammar_active = len(self._pending) > probed_writes
+            if done_grammar_active:
+                request = self._build_request(
+                    self._messages,
+                    self._schemas,
+                    grammar=_DONE_GRAMMAR,
+                    grammar_type="regex",
+                    max_tokens=_DONE_MAX_TOKENS,
+                )
+            else:
+                request = self._build_request(self._messages, self._schemas)
             if self._debug:
                 render.print_agent_messages(self._messages, f"MESSAGES · round {round_num}")
                 render.print_agent_request(request, round_num)
@@ -1446,6 +1550,17 @@ class AgentRunner:
                 render.print_agent_tool_calls(message.tool_calls)
 
             if not message.tool_calls:
+                if done_grammar_active:
+                    content = (message.content or "").strip()
+                    self._messages.append({"role": "assistant", "content": content})
+                    if content == "CONTINUE":
+                        probed_writes = len(self._pending)
+                        continue
+                    self._terminal = "reply"
+                    return AgentPlan(
+                        reply_text="\n".join(_write_summary(pw) for pw in self._pending),
+                        writes=tuple(self._pending),
+                    )
                 self._messages.append({"role": "assistant", "content": message.content or ""})
                 self._terminal = "reply"
                 return AgentPlan(reply_text=message.content or "", writes=tuple(self._pending))
@@ -1611,5 +1726,5 @@ class AgentRunner:
                 render.print_warning(message)
             for w in writes:
                 store.append(self._data_dir, self._key, w.stream, w.obj)
-            summaries.append(f"Recorded {pw.kind.value} of {pw.amount} {pw.unit} {pw.product_id}")
+            summaries.append(_write_summary(pw))
         return summaries
