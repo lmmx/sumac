@@ -180,7 +180,7 @@ No code changes result from this entry — Section 1's correction changes nothin
 patch (`supports_grammar_fast_forward` still defaults `false` everywhere, per the prior entry), and
 Section 4's profiling instrumentation was diagnostic-only and was reverted (`git checkout --
 mistralrs-core/src/vision_models/qwen3_5/text.rs`) before this entry was written; the committed
-`vendor/patches/mistralrs-v0.9.2-grammar-fast-forward.patch` is unchanged and still matches the
+`docs/journal/2026-09-07-fast-forward-mistralrs-v0.9.2.patch` is unchanged and still matches the
 working tree exactly (`cargo check -p mistralrs-core`, clean, verified after reverting).
 
 What this entry adds is a corrected and load-bearing account of *why* `sumac ask` is slow on this

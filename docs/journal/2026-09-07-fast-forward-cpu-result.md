@@ -13,7 +13,7 @@ in both pipelines it could apply to; nothing is enabled or shipped as a result o
   container as the prototype entry, `unsloth/Qwen3.5-4B-GGUF` (`Qwen3.5-4B-Q4_K_M.gguf`).
 - **(verified against mistral.rs `v0.9.2` source)** — read and edited directly in a clone at
   `.build/mistralrs-cpu-ff/src` (gitignored, not part of this commit); the diff against that
-  clone is `vendor/patches/mistralrs-v0.9.2-grammar-fast-forward.patch`, committed for reference.
+  clone is `docs/journal/2026-09-07-fast-forward-mistralrs-v0.9.2.patch`, committed for reference.
 
 ---
 
@@ -231,7 +231,7 @@ Two things this session can measure, and one it cannot:
 `sumac`'s runtime behavior — `src/sumac/llm.py` is untouched, and no build of this patched wheel
 is wired into `pyproject.toml` or `vendor/wheels/`, unlike `scripts/build-mistralrs-cuda.sh`'s
 committed CUDA build. The patch against the `v0.9.2` clone is
-`vendor/patches/mistralrs-v0.9.2-grammar-fast-forward.patch`, kept for whoever next has GPU access
+`docs/journal/2026-09-07-fast-forward-mistralrs-v0.9.2.patch`, kept for whoever next has GPU access
 to check Section 5's open question — flipping the flag to `true` and rerunning the eval suite's
 latency measurement is the entire next step, no further Rust changes anticipated unless the GPU
 number also disappoints, in which case the per-window overhead itself (not just its CPU-vs-GPU
@@ -244,7 +244,7 @@ cost model) would need profiling.
 ```bash
 git clone --depth 1 --branch v0.9.2 https://github.com/EricLBuehler/mistral.rs.git .build/mistralrs-cpu-ff/src
 cd .build/mistralrs-cpu-ff/src
-git apply /path/to/sumac/vendor/patches/mistralrs-v0.9.2-grammar-fast-forward.patch
+git apply /path/to/sumac/docs/journal/2026-09-07-fast-forward-mistralrs-v0.9.2.patch
 # flip both `supports_grammar_fast_forward: false` lines to `true` (pipeline/gguf.rs, pipeline/normal.rs)
 # to reproduce Section 4/5's numbers rather than the shipped disabled state
 uv venv --python 3.12 build-venv && source build-venv/bin/activate && uv pip install "maturin[patchelf]"
@@ -258,7 +258,7 @@ No files under `.build/` are committed, same convention as the prototype entry a
 
 ## Current State
 
-- `vendor/patches/mistralrs-v0.9.2-grammar-fast-forward.patch` (14 files, 168 insertions) implements grammar fast-forward tokens against a `mistral.rs` `v0.9.2` clone, applying and compiling cleanly (`cargo check -p mistralrs-core`, zero errors) in this session's container.
+- `docs/journal/2026-09-07-fast-forward-mistralrs-v0.9.2.patch` (14 files, 168 insertions) implements grammar fast-forward tokens against a `mistral.rs` `v0.9.2` clone, applying and compiling cleanly (`cargo check -p mistralrs-core`, zero errors) in this session's container.
 - `Sequence::pending_ff_tokens` (`mistralrs-core/src/sequence.rs`), `sample_sequence`'s post-`consume_token` `compute_ff_tokens` call and `sample_and_add_toks`'s capture-before-resample-and-replay loop (`mistralrs-core/src/pipeline/sampling.rs`), and `make_completion_chunk`'s window extension plus narrowed `context_lens` (`mistralrs-core/src/pipeline/inputs_processor.rs`) together implement the mechanism the prototype entry's Section 4 planned, with the `decode_window` correction described in Section 1 of this entry.
 - `GeneralMetadata::supports_grammar_fast_forward` (`mistralrs-core/src/pipeline/mod.rs`) gates the mechanism per-pipeline; set in all seven `GeneralMetadata` construction sites in the tree (`gguf.rs`, `normal.rs`, `ggml.rs`, `multimodal.rs`, `diffusion.rs`, `embedding.rs`, `speech.rs`), `false` in every one as shipped in this commit.
 - `unsloth/Qwen3.5-4B-GGUF`'s GGUF architecture `qwen35` loads through `pipeline/normal.rs`'s `NormalPipeline` running `vision_models/qwen3_5::text::Qwen3_5TextModel`, confirmed by `RUST_LOG=mistralrs_core::pipeline::gguf=debug` logging `Loading GGUF architecture qwen35 through native Qwen3_5` — not through `pipeline/gguf.rs`'s `GGUFPipeline`/`quantized_llama.rs`, which the prototype entry's Section 4 was anchored to and which is a real, correct pipeline for GGUF files whose architecture resolves to plain Llama or Phi3 family instead.
