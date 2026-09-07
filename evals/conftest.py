@@ -53,6 +53,44 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="Print raw agent request/response diagnostics (AgentRunner(debug=True)).",
     )
     parser.addoption(
+        "--eval-temperature",
+        action="store",
+        type=float,
+        default=None,
+        help="Sampling temperature (default: llm.DEFAULT_TEMPERATURE). 0.0 takes mistral.rs's "
+        "argmax path — see docs/journal/2026-09-06-ask-latency-round-two.md idea 1.",
+    )
+    parser.addoption(
+        "--eval-top-k",
+        action="store",
+        type=int,
+        default=None,
+        help="Sampler top_k (default: unset, which full-sorts the vocabulary every token — "
+        "see docs/journal/2026-09-06-ask-latency-round-two.md idea 1).",
+    )
+    parser.addoption(
+        "--eval-min-p",
+        action="store",
+        type=float,
+        default=None,
+        help="Sampler min_p (default: unset).",
+    )
+    parser.addoption(
+        "--eval-max-seqs",
+        action="store",
+        type=int,
+        default=16,
+        help="mistralrs.Runner max_seqs (default: 16, mistral.rs's own default — see "
+        "docs/journal/2026-09-06-ask-latency-round-two.md idea 3).",
+    )
+    parser.addoption(
+        "--eval-no-paged-attn",
+        action="store_true",
+        default=False,
+        help="Disable PagedAttention on the built Runner — see "
+        "docs/journal/2026-09-06-ask-latency-round-two.md idea 4.",
+    )
+    parser.addoption(
         "--eval-json",
         action="store",
         type=str,
@@ -184,6 +222,8 @@ def agent_runner_factory(request: pytest.FixtureRequest, inventory: tuple[Path, 
     )
     variant = llm.prompt_variant(variant_name)
     seed_value = request.config.getoption("--eval-seed")
+    max_seqs = request.config.getoption("--eval-max-seqs")
+    no_paged_attn = request.config.getoption("--eval-no-paged-attn")
 
     pytest.importorskip("mistralrs")
     if not llm.is_cached(model):
@@ -192,12 +232,27 @@ def agent_runner_factory(request: pytest.FixtureRequest, inventory: tuple[Path, 
             "Hugging Face cache — refusing to trigger a network download from a test fixture"
         )
     try:
-        base_runner = llm._build_runner(model, seed=seed_value)
+        base_runner = llm._build_runner(
+            model, seed=seed_value, max_seqs=max_seqs, no_paged_attn=no_paged_attn
+        )
     except Exception as e:  # noqa: BLE001 - last-resort guard; the cache check above is primary
         pytest.skip(f"could not load {model.quantized_model_id}: {e}")
 
     data_dir, key = inventory
     debug = request.config.getoption("--eval-debug")
+    # `None` (the flag's default) leaves `AgentRunner`'s own default in
+    # place; only an explicit `--eval-temperature`/`--eval-top-k`/
+    # `--eval-min-p` overrides it, matching --eval-model/--eval-prompt-variant's
+    # sentinel style above.
+    sampling_kwargs = {
+        k: v
+        for k, v in {
+            "temperature": request.config.getoption("--eval-temperature"),
+            "top_k": request.config.getoption("--eval-top-k"),
+            "min_p": request.config.getoption("--eval-min-p"),
+        }.items()
+        if v is not None
+    }
 
     def make() -> llm.AgentRunner:
         return llm.AgentRunner(
@@ -208,6 +263,7 @@ def agent_runner_factory(request: pytest.FixtureRequest, inventory: tuple[Path, 
             runner=base_runner,
             debug=debug,
             seed=seed_value,
+            **sampling_kwargs,
         )
 
     return make
