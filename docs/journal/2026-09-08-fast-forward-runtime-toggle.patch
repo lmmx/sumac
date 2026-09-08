@@ -1,0 +1,56 @@
+diff --git a/mistralrs-core/src/pipeline/mod.rs b/mistralrs-core/src/pipeline/mod.rs
+index 34f24e5..4cb1750 100644
+--- a/mistralrs-core/src/pipeline/mod.rs
++++ b/mistralrs-core/src/pipeline/mod.rs
+@@ -940,6 +940,14 @@ pub struct GeneralMetadata {
+     pub supports_grammar_fast_forward: bool,
+ }
+ 
++/// Runtime opt-in for `GeneralMetadata::supports_grammar_fast_forward`, checked once per
++/// process. Off unless `MISTRALRS_GRAMMAR_FAST_FORWARD=1` is set -- see that field's doc
++/// comment for which pipelines this is safe to enable for.
++pub(crate) fn grammar_fast_forward_env_enabled() -> bool {
++    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    *ENABLED.get_or_init(|| std::env::var("MISTRALRS_GRAMMAR_FAST_FORWARD").as_deref() == Ok("1"))
++}
++
+ impl GeneralMetadata {
+     pub fn tok_env(&self) -> Option<TokEnv> {
+         self.llg_factory.as_ref().map(|f| f.tok_env().clone())
+diff --git a/mistralrs-core/src/pipeline/normal.rs b/mistralrs-core/src/pipeline/normal.rs
+index 74564e3..59a7aec 100644
+--- a/mistralrs-core/src/pipeline/normal.rs
++++ b/mistralrs-core/src/pipeline/normal.rs
+@@ -1,8 +1,8 @@
+ use super::llg::build_llg_factory;
+ use super::{
+-    get_model_paths, text_models_inputs_processor::ModelInputs, AdapterKind, CacheManager,
+-    DecodeGraphPrecaptureCtx, GeneralMetadata, Loader, ModelKind, ModelPaths, NormalModel,
+-    NormalModelLoader, TokenSource,
++    get_model_paths, grammar_fast_forward_env_enabled, text_models_inputs_processor::ModelInputs,
++    AdapterKind, CacheManager, DecodeGraphPrecaptureCtx, GeneralMetadata, Loader, ModelKind,
++    ModelPaths, NormalModel, NormalModelLoader, TokenSource,
+ };
+ use super::{
+     AnyMoePipelineMixin, CacheManagerMixin, EitherCache, ForwardInputsResult, IsqOrganization,
+@@ -227,12 +227,14 @@ pub(crate) fn build_normal_pipeline(
+                 output: vec![SupportedModality::Text],
+             },
+             loaded_for_uqff_write,
+-            // Mechanism validated correct on CPU (byte-identical output vs. unpatched decode)
+-            // but measured *slower* wall-clock there -- see
+-            // docs/journal/2026-09-07-fast-forward-cpu-result.md. Left off by default until
+-            // someone measures it on the GPU target this was designed for, where decode is
+-            // memory-bandwidth- rather than compute-bound and batching may pay off differently.
+-            supports_grammar_fast_forward: false,
++            // Mechanism validated correct (byte-identical output vs. unpatched decode) and
++            // measured on CPU: neutral-to-small-positive on typical tool-call grammars, several
++            // times faster on grammars with long forced literal spans -- see
++            // docs/journal/2026-09-07-fast-forward-cpu-result.md and
++            // docs/journal/2026-09-08-fast-forward-cpu-reopened.md. Off by default: the payoff
++            // depends on how forceable the caller's own grammar is, so this is an opt-in via
++            // `MISTRALRS_GRAMMAR_FAST_FORWARD=1` rather than an unconditional default.
++            supports_grammar_fast_forward: grammar_fast_forward_env_enabled(),
+         }),
+         #[cfg(feature = "cuda")]
+         cuda_decode_graph: StdMutex::new(CudaDecodeGraphState::default()),
