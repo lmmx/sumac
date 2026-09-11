@@ -107,7 +107,9 @@ class ModelPreset:
 MODEL_PRESETS: tuple[ModelPreset, ...] = (
     # The winner of a real multi-model/multi-quant comparison
     # See docs/journal/2026-09-02-eval-suite.md
-    ModelPreset("qwen3.5-4b", "unsloth/Qwen3.5-4B-GGUF",
+    ModelPreset("qwen3.5-4b-bartowski", "bartowski/Qwen_Qwen3.5-4B-GGUF",
+                "Qwen_Qwen3.5-4B-Q4_K_M.gguf", ToolCallFormat.QWEN),
+    ModelPreset("qwen3.5-4b-unsloth", "unsloth/Qwen3.5-4B-GGUF",
                 "Qwen3.5-4B-Q4_K_M.gguf", ToolCallFormat.QWEN),
     # Same family/tool_call_format, one size up — kept on hand for a later
     # comparison, not benchmarked yet. See docs/journal/2026-09-02-eval-suite.md.
@@ -125,7 +127,7 @@ def model_preset(name: str) -> ModelPreset:
     return _MODEL_PRESETS_BY_NAME[name]
 
 
-DEFAULT_MODEL_PRESET = MODEL_PRESETS[0]
+DEFAULT_MODEL_PRESET = model_preset("qwen3.5-4b-bartowski")
 
 
 def is_cached(model: ModelPreset) -> bool:
@@ -1073,9 +1075,7 @@ class AgentRunner:
         self._runner: SendsCompletions = (
             runner
             if runner is not None
-            else shared_runner(
-                model, seed=seed, max_seqs=max_seqs, no_paged_attn=no_paged_attn
-            )
+            else shared_runner(model, seed=seed, max_seqs=max_seqs, no_paged_attn=no_paged_attn)
         )
 
     @property
