@@ -32,7 +32,8 @@ user of the household's vault.
 ## Usage
 
 ```sh
-sumac init                                              # once, creates data/
+sumac init                                              # once per household: creates data/ and
+                                                        #   your writer/<id> branch (--writer names it)
 sumac config add-location "Fridge" --id fridge
 sumac config add-location "Pantry" --id pantry
 sumac config show
@@ -46,10 +47,31 @@ sumac status                                             # current inventory, al
 sumac status fridge                                      # current inventory, one location
 sumac find milk                                           # where is milk right now?
 sumac log                                                 # full ordered event log
-sumac verify                                              # re-authenticate every line; check actors
+sumac verify                                              # re-authenticate every line; check actors and history
+sumac sync                                               # fetch other writers' branches
 ```
 
 All commands take `--data-dir` (default `data`, or `$SUMAC_DATA_DIR`).
+
+On a second machine, after cloning the household's repo, join it before writing anything:
+
+```sh
+git clone <household-repo-url> household && cd household
+sumac init-writer --data-dir data                        # creates your own writer/<id> branch
+```
+
+`sumac init` is run exactly once per household, by whoever creates the vault; everyone else runs
+`sumac init-writer` against the clone.
+
+### The branch-per-writer model
+
+Each person (or each machine, if you use more than one) writes to their own git branch,
+`writer/<id>`. Your data lives on your branch: `sumac add`, `sumac snapshot`, and every `sumac
+config` write commit to it, one commit per command. Reads — `sumac status`, `sumac find`, `sumac
+log` — combine every writer's branch in memory, so you see the whole household's inventory
+regardless of whose branch a record is on. You don't switch to anyone else's branch; `sumac sync`
+only fetches, it never merges or pushes. Pushing your own branch stays a manual `git push` for
+now.
 
 ### Locations nest
 

@@ -156,13 +156,14 @@ def eval_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
 @pytest.fixture(scope="session", autouse=True)
 def _eval_environment(eval_root: Path):
     """Rail 1: overrides `SUMAC_DATA_DIR`/`SUMAC_PASSPHRASE` for the whole
-    session so an ambient value is never read. `getpass.getuser` is pinned
-    too, so the inventory's `log:<osuser>` stream (`docs/LAYOUT.md`) is
-    consistent regardless of which OS user actually runs the suite."""
+    session so an ambient value is never read. `SUMAC_WRITER_ID` is pinned too
+    (filesystem mode, §2 step 1), so the inventory's `log:<writer_id>` stream
+    is consistent regardless of which OS user or branch actually runs the
+    suite."""
     mp = pytest.MonkeyPatch()
     mp.setenv("SUMAC_PASSPHRASE", eval_fixtures.EVAL_PASSPHRASE)
     mp.setenv("SUMAC_DATA_DIR", str(eval_root / "must-not-be-used"))
-    mp.setattr("getpass.getuser", lambda: eval_fixtures.EVAL_OSUSER)
+    mp.setenv("SUMAC_WRITER_ID", eval_fixtures.EVAL_WRITER_ID)
     yield
     mp.undo()
 

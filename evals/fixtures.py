@@ -29,7 +29,7 @@ from sumac.cli import app
 from sumac.models import Location
 
 EVAL_PASSPHRASE = "sumac-eval-fixed-passphrase-not-a-secret"
-EVAL_OSUSER = "sumac-eval"
+EVAL_WRITER_ID = "sumac-eval"
 
 # Single source of truth for the location tree, checked against what
 # `config add-array`/`config add-grid` actually produce

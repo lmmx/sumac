@@ -1,15 +1,14 @@
 """Encrypted JSONL append/iterate over a `stream_id`, backed by `sealedlog`.
 
-A `stream_id` is `"config"` or `"log:<osuser>"`. `append` is the ownership
-boundary: it refuses to write to any `log:<osuser>` stream other than the
-caller's own — sealedlog's AAD binding then backs that up cryptographically,
-since `append` is the only function that can produce a valid sealed line.
+A `stream_id` is `"config:<writer_id>"` or `"log:<writer_id>"`. See docs/journal
+2026-09-11-branch-per-user-design.md §2, §5.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+import os
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,17 +16,14 @@ from sealedlog import SealedLog, aead
 from sealedlog._aad import build_aad
 from sealedlog.errors import AuthenticationError
 
-from sumac import NAMESPACE, paths
-from sumac.errors import ForeignStreamError
-
-CONFIG_STREAM_ID = "config"
+from sumac import NAMESPACE, gitrepo, paths, sources, writer
 
 
 def _path_for_stream(data_dir: Path, stream_id: str) -> Path:
-    if stream_id == CONFIG_STREAM_ID:
+    if stream_id.startswith("config:"):
         return paths.config_path(data_dir)
     if stream_id.startswith("log:"):
-        return paths.log_path(data_dir, stream_id.removeprefix("log:"))
+        return paths.log_path(data_dir)
     raise ValueError(f"unknown stream_id: {stream_id!r}")
 
 
@@ -51,10 +47,6 @@ def assigned_seqs(objs: list[dict]) -> list[int]:
 
 def append(data_dir: Path, key: bytes, stream_id: str, obj: dict) -> None:
     if stream_id.startswith("log:"):
-        osuser = stream_id.removeprefix("log:")
-        current = paths.current_user()
-        if osuser != current:
-            raise ForeignStreamError(f"cannot append to {stream_id!r} as {current!r}: not your log")
         # seq is append-time, not decide-time (docs/journal §3.7): it depends
         # on what's already on disk, which `decide` (pure, no I/O) can't see.
         # Config records never get one — config is latest-revision-wins, not
@@ -65,21 +57,36 @@ def append(data_dir: Path, key: bytes, stream_id: str, obj: dict) -> None:
     _log_for_stream(data_dir, key, stream_id).append(obj)
 
 
+def commit_records(data_dir: Path, n: int) -> None:
+    """One commit per command, covering every record it wrote; the message is a
+    fixed literal plus a count and nothing else (§2 "Writes commit"; threat
+    model in docs/FORMAT.md). Filesystem mode (§2's step 1) has no repo to
+    commit to and skips silently."""
+    if os.environ.get(writer.WRITER_ID_ENV) or not gitrepo.is_repo(data_dir):
+        return
+    repo_root = gitrepo.toplevel(data_dir)
+    assert repo_root is not None  # `is_repo` above guarantees a toplevel
+    rel_data = gitrepo.rel_to_toplevel(data_dir)
+    plural = "record" if n == 1 else "records"
+    gitrepo.commit_paths(repo_root, [rel_data.as_posix()], f"sumac: {n} {plural}")
+
+
 def iter_stream(data_dir: Path, key: bytes, stream_id: str) -> Iterator[dict]:
     yield from _log_for_stream(data_dir, key, stream_id)
 
 
 def iter_all_logs(data_dir: Path, key: bytes) -> Iterator[tuple[str, dict]]:
-    for path in paths.all_log_paths(data_dir):
-        osuser = path.stem
-        stream_id = f"log:{osuser}"
-        for obj in SealedLog(path, key, stream_id, namespace=NAMESPACE):
-            yield osuser, obj
+    for source in sources.writer_sources(data_dir):
+        stream_id = writer.log_stream_id(source.writer_id)
+        lines = source.log_text().splitlines()
+        objs, _failures = verify_lines(lines, key, stream_id, source.label)
+        for obj in objs:
+            yield source.writer_id, obj
 
 
 @dataclass(frozen=True, slots=True)
 class LineFailure:
-    path: Path
+    source: str
     lineno: int
     error: str
 
@@ -94,8 +101,10 @@ def _read_lines(path: Path) -> Iterator[str]:
                 yield line
 
 
-def verify_stream(path: Path, key: bytes, stream_id: str) -> tuple[list[dict], list[LineFailure]]:
-    """Open every line of `path` under `stream_id`, collecting failures instead of raising.
+def verify_lines(
+    lines: Iterable[str], key: bytes, stream_id: str, source: str
+) -> tuple[list[dict], list[LineFailure]]:
+    """Open every line under `stream_id`, collecting failures instead of raising.
 
     `sealedlog.SealedLog` offers `__iter__` (stops at the first bad line) and
     `verify()` (never raises, but doesn't return decoded records) — neither
@@ -106,14 +115,18 @@ def verify_stream(path: Path, key: bytes, stream_id: str) -> tuple[list[dict], l
     aad = build_aad(NAMESPACE, stream_id)
     ok: list[dict] = []
     failures: list[LineFailure] = []
-    for lineno, line in enumerate(_read_lines(path), start=1):
+    for lineno, line in enumerate((line for line in lines if line.strip()), start=1):
         try:
-            plaintext = aead.open_(key, aad, line)
+            plaintext = aead.open_(key, aad, line.strip())
         except AuthenticationError as e:
-            failures.append(LineFailure(path=path, lineno=lineno, error=str(e)))
+            failures.append(LineFailure(source=source, lineno=lineno, error=str(e)))
             continue
         try:
             ok.append(json.loads(plaintext))
         except json.JSONDecodeError as e:
-            failures.append(LineFailure(path=path, lineno=lineno, error=f"not valid JSON: {e}"))
+            failures.append(LineFailure(source=source, lineno=lineno, error=f"not valid JSON: {e}"))
     return ok, failures
+
+
+def verify_stream(path: Path, key: bytes, stream_id: str) -> tuple[list[dict], list[LineFailure]]:
+    return verify_lines(_read_lines(path), key, stream_id, str(path))

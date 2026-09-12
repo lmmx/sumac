@@ -5,8 +5,17 @@ class SumacError(Exception):
     """Base for all sumac errors."""
 
 
-class ForeignStreamError(SumacError):
-    """Attempted to append to a stream_id that isn't the current user's."""
+class GitError(SumacError):
+    """A git subprocess call exited non-zero. See docs/journal
+    2026-09-11-branch-per-user-design.md §2."""
+
+
+class NotAWriterBranchError(SumacError):
+    """§2 step 3: no `SUMAC_WRITER_ID` and HEAD isn't `writer/<id>`."""
+
+
+class WriterBranchExistsError(SumacError):
+    """`init-writer` refused: the candidate writer id's branch already exists."""
 
 
 class SchemaVersionError(SumacError):

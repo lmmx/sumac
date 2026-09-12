@@ -10,6 +10,7 @@ property suite (model agreement, determinism, upcaster round-trip) once `decide`
 
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -17,8 +18,10 @@ from pathlib import Path
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from sumac import ledger, paths, store
+from sumac import ledger, store, writer
 from sumac import vault as sumac_vault
+
+_WRITER_ID = "alice-mac"
 
 _id = st.text(min_size=0, max_size=8)
 _maybe_id = st.one_of(st.none(), _id)
@@ -78,13 +81,18 @@ _record = st.fixed_dictionaries(
 @given(records=st.lists(_record, max_size=6))
 def test_build_inventory_never_raises(records: list[dict]) -> None:
     tmp = Path(tempfile.mkdtemp())
+    prior_env = os.environ.get(writer.WRITER_ID_ENV)
+    os.environ[writer.WRITER_ID_ENV] = _WRITER_ID
     try:
         data_dir = tmp / "data"
         vault = sumac_vault.create("pw")
         key = sumac_vault.unlock(vault, "pw")
-        osuser = paths.current_user()
         for obj in records:
-            store.append(data_dir, key, f"log:{osuser}", obj)
+            store.append(data_dir, key, writer.log_stream_id(_WRITER_ID), obj)
         ledger.build_inventory(data_dir, key)  # must not raise
     finally:
+        if prior_env is None:
+            os.environ.pop(writer.WRITER_ID_ENV, None)
+        else:
+            os.environ[writer.WRITER_ID_ENV] = prior_env
         shutil.rmtree(tmp, ignore_errors=True)
