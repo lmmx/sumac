@@ -530,8 +530,13 @@ def print_verify(result: ledger.VerifyResult) -> None:
         console.print("[green]✓ all lines verified[/green]")
         return
     for f in result.line_failures:
-        console.print(f"[red]line failure[/red] {f.path}:{f.lineno}: {f.error}")
-    for path, actor, osuser in result.actor_mismatches:
+        console.print(f"[red]line failure[/red] {f.source}:{f.lineno}: {f.error}")
+    for label, actor, writer_id in result.actor_mismatches:
         console.print(
-            f"[red]actor mismatch[/red] {path}: record actor={actor!r} owning user={osuser!r}"
+            f"[red]actor mismatch[/red] {label}: record actor={actor!r} writer={writer_id!r}"
+        )
+    for v in result.history_violations:
+        console.print(
+            f"[red]history violation[/red] writer={v.writer_id} stream={v.stream_id} "
+            f"{v.from_commit}->{v.to_commit}: {v.reason}"
         )

@@ -1,5 +1,5 @@
 """Location and product config on top of `store`: an append-only, latest-revision-wins
-registry for each, sharing one stream (`store.CONFIG_STREAM_ID`) with a record being
+registry for each, one `config:<writer_id>` stream per writer, with a record being
 one or the other, never both — see `ConfigRecordSchema`.
 
 Nothing is ever deleted — `retire_location`/`retire_product` are the only removal
@@ -17,7 +17,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from sumac import SCHEMA_VERSION, models, paths, store
+from sumac import SCHEMA_VERSION, models, sources, store, writer
 from sumac.errors import UnknownLocationError, UnknownProductError
 from sumac.schemas import ConfigRecordSchema
 
@@ -35,7 +35,7 @@ def add_location(data_dir: Path, key: bytes, actor: str, location: models.Locati
             "retired": location.retired,
         },
     }
-    store.append(data_dir, key, store.CONFIG_STREAM_ID, obj)
+    store.append(data_dir, key, writer.config_stream_id(actor), obj)
 
 
 def retire_location(data_dir: Path, key: bytes, actor: str, location_id: str) -> None:
@@ -68,7 +68,7 @@ def add_product(data_dir: Path, key: bytes, actor: str, product: models.Product)
             "conversions": {u: str(r) for u, r in product.conversions.items()},
         },
     }
-    store.append(data_dir, key, store.CONFIG_STREAM_ID, obj)
+    store.append(data_dir, key, writer.config_stream_id(actor), obj)
 
 
 def retire_product(data_dir: Path, key: bytes, actor: str, product_id: str) -> None:
@@ -104,39 +104,60 @@ def _load_config_records(data_dir: Path, key: bytes) -> _ConfigLoadResult:
     neither or both of location/product, or a too-new `schema_version` each
     become an anomaly and are skipped, never a raise. One bad config line must
     not make the rest of config unreadable — same blast-radius concern §3.1
-    raises for the main log, just one layer up the stack."""
-    latest_locations: dict[str, tuple[datetime, models.Location]] = {}
-    latest_products: dict[str, tuple[datetime, models.Product]] = {}
+    raises for the main log, just one layer up the stack.
+
+    Folds every source's config stream; latest-wins tie-break is `(ts, writer_id)`
+    (docs/journal §2's build_config note) so two writers' same-`ts` records
+    resolve deterministically rather than by ref enumeration order."""
+    latest_locations: dict[str, tuple[datetime, str, models.Location]] = {}
+    latest_products: dict[str, tuple[datetime, str, models.Product]] = {}
     anomalies: list[models.Anomaly] = []
 
-    objs, failures = store.verify_stream(paths.config_path(data_dir), key, store.CONFIG_STREAM_ID)
-    for f in failures:
-        anomalies.append(models.Anomaly(None, "line_failure", f"{f.path}:{f.lineno}: {f.error}"))
+    for source in sources.writer_sources(data_dir):
+        stream_id = writer.config_stream_id(source.writer_id)
+        lines = source.config_text().splitlines()
+        objs, failures = store.verify_lines(lines, key, stream_id, source.label)
+        for f in failures:
+            anomalies.append(
+                models.Anomaly(None, "line_failure", f"{f.source}:{f.lineno}: {f.error}")
+            )
 
-    for obj in objs:
-        version = obj.get("schema_version") if isinstance(obj, dict) else None
-        if isinstance(version, int) and version > SCHEMA_VERSION:
-            anomalies.append(models.Anomaly(None, "schema_too_new", f"schema_version={version}"))
-            continue
-        try:
-            record = ConfigRecordSchema.model_validate(obj)
-        except ValidationError as e:
-            anomalies.append(models.Anomaly(None, "invalid_config_record", str(e)))
-            continue
+        for obj in objs:
+            version = obj.get("schema_version") if isinstance(obj, dict) else None
+            if isinstance(version, int) and version > SCHEMA_VERSION:
+                anomalies.append(
+                    models.Anomaly(None, "schema_too_new", f"schema_version={version}")
+                )
+                continue
+            try:
+                record = ConfigRecordSchema.model_validate(obj)
+            except ValidationError as e:
+                anomalies.append(models.Anomaly(None, "invalid_config_record", str(e)))
+                continue
 
-        if record.location is not None:
-            prior = latest_locations.get(record.location.id)
-            if prior is None or record.ts >= prior[0]:
-                latest_locations[record.location.id] = (record.ts, record.location.to_domain())
-        else:
-            assert record.product is not None
-            prior = latest_products.get(record.product.id)
-            if prior is None or record.ts >= prior[0]:
-                latest_products[record.product.id] = (record.ts, record.product.to_domain())
+            if record.location is not None:
+                key_ = (record.ts, source.writer_id)
+                prior = latest_locations.get(record.location.id)
+                if prior is None or key_ >= (prior[0], prior[1]):
+                    latest_locations[record.location.id] = (
+                        record.ts,
+                        source.writer_id,
+                        record.location.to_domain(),
+                    )
+            else:
+                assert record.product is not None
+                key_ = (record.ts, source.writer_id)
+                prior = latest_products.get(record.product.id)
+                if prior is None or key_ >= (prior[0], prior[1]):
+                    latest_products[record.product.id] = (
+                        record.ts,
+                        source.writer_id,
+                        record.product.to_domain(),
+                    )
 
     return _ConfigLoadResult(
-        locations={loc_id: loc for loc_id, (_, loc) in latest_locations.items()},
-        products={prod_id: p for prod_id, (_, p) in latest_products.items()},
+        locations={loc_id: loc for loc_id, (_, _, loc) in latest_locations.items()},
+        products={prod_id: p for prod_id, (_, _, p) in latest_products.items()},
         anomalies=anomalies,
     )
 

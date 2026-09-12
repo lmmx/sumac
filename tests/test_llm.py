@@ -88,11 +88,11 @@ def _make_agent(
 
 
 def _apply_change(
-    data_dir: Path, key: bytes, osuser: str, *, kind: ChangeKind, **kwargs: Any
+    data_dir: Path, key: bytes, writer_id: str, *, kind: ChangeKind, **kwargs: Any
 ) -> None:
     writes, _messages = decide.decide_change(
         kind=kind,
-        actor=osuser,
+        actor=writer_id,
         occurred_at=datetime.now(UTC),
         inventory=ledger.build_inventory(data_dir, key),
         cfg=config.build_config(data_dir, key),
@@ -102,13 +102,13 @@ def _apply_change(
         store.append(data_dir, key, w.stream, w.obj)
 
 
-def _seed_pantry_with_jam(data_dir: Path, key: bytes, osuser: str) -> None:
-    config.add_location(data_dir, key, osuser, Location(id="pantry", name="Pantry"))
-    config.add_product(data_dir, key, osuser, Product(id="jam", name="Jam", unit="jar"))
+def _seed_pantry_with_jam(data_dir: Path, key: bytes, writer_id: str) -> None:
+    config.add_location(data_dir, key, writer_id, Location(id="pantry", name="Pantry"))
+    config.add_product(data_dir, key, writer_id, Product(id="jam", name="Jam", unit="jar"))
     _apply_change(
         data_dir,
         key,
-        osuser,
+        writer_id,
         kind=ChangeKind.PURCHASE,
         product_id="jam",
         amount=Decimal(3),
@@ -121,8 +121,8 @@ def _seed_pantry_with_jam(data_dir: Path, key: bytes, osuser: str) -> None:
 # --- find_inventory ----------------------------------------------------
 
 
-def test_find_inventory_returns_matches(data_dir: Path, key: bytes, osuser: str) -> None:
-    _seed_pantry_with_jam(data_dir, key, osuser)
+def test_find_inventory_returns_matches(data_dir: Path, key: bytes, writer_id: str) -> None:
+    _seed_pantry_with_jam(data_dir, key, writer_id)
     agent, _fake = _make_agent([], data_dir, key)
 
     result = json.loads(
@@ -146,7 +146,7 @@ def test_find_inventory_returns_matches(data_dir: Path, key: bytes, osuser: str)
 
 
 def test_find_inventory_no_match_returns_empty_list(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
     agent, _fake = _make_agent([], data_dir, key)
 
@@ -158,9 +158,9 @@ def test_find_inventory_no_match_returns_empty_list(
     assert result["products"] == []
 
 
-def _seed_freezer_and_fridge_butters(data_dir: Path, key: bytes, osuser: str) -> None:
-    config.add_location(data_dir, key, osuser, Location(id="freezer", name="Freezer"))
-    config.add_location(data_dir, key, osuser, Location(id="fridge", name="Fridge"))
+def _seed_freezer_and_fridge_butters(data_dir: Path, key: bytes, writer_id: str) -> None:
+    config.add_location(data_dir, key, writer_id, Location(id="freezer", name="Freezer"))
+    config.add_location(data_dir, key, writer_id, Location(id="fridge", name="Fridge"))
     # Products are unregistered — `decide_change` auto-registers under the
     # exact product_id string passed below, which is all `_sumac_find_
     # inventory` needs (it matches/returns raw product_id, not a `Product`).
@@ -172,7 +172,7 @@ def _seed_freezer_and_fridge_butters(data_dir: Path, key: bytes, osuser: str) ->
         _apply_change(
             data_dir,
             key,
-            osuser,
+            writer_id,
             kind=ChangeKind.PURCHASE,
             product_id=product_id,
             amount=Decimal(1),
@@ -183,7 +183,7 @@ def _seed_freezer_and_fridge_butters(data_dir: Path, key: bytes, osuser: str) ->
 
 
 def test_find_inventory_includes_every_tier_marked_by_is_exact_match(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
     """Nothing is withheld or excluded here — every matching product comes
     back, grouped, ordered by `ledger.search_inventory`'s tier (exact, then
@@ -191,7 +191,7 @@ def test_find_inventory_includes_every_tier_marked_by_is_exact_match(
     judgment (is "Butternut Box" plausibly what someone means by "butter"?)
     is left entirely to the model — this only checks the deterministic data
     shape it's given to reason over."""
-    _seed_freezer_and_fridge_butters(data_dir, key, osuser)
+    _seed_freezer_and_fridge_butters(data_dir, key, writer_id)
     agent, _fake = _make_agent([], data_dir, key)
 
     result = json.loads(
@@ -204,12 +204,12 @@ def test_find_inventory_includes_every_tier_marked_by_is_exact_match(
 
 
 def test_find_inventory_substring_only_query_still_returns_a_match(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
     """ "nut" matches no product as a whole word here, only as a substring of
     "Butternut" — that match still comes back, marked as not an exact
     match, rather than an empty result."""
-    _seed_freezer_and_fridge_butters(data_dir, key, osuser)
+    _seed_freezer_and_fridge_butters(data_dir, key, writer_id)
     agent, _fake = _make_agent([], data_dir, key)
 
     result = json.loads(
@@ -224,7 +224,7 @@ def test_find_inventory_substring_only_query_still_returns_a_match(
 
 
 def test_classify_reject_short_circuits_without_running_domain_loop(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
     responses = [_classify_round("reject")]
     agent, fake = _make_agent(responses, data_dir, key)
@@ -252,7 +252,7 @@ def test_classify_reject_short_circuits_without_running_domain_loop(
     }
 
 
-def test_revise_after_reject_raises(data_dir: Path, key: bytes, osuser: str) -> None:
+def test_revise_after_reject_raises(data_dir: Path, key: bytes, writer_id: str) -> None:
     responses = [_classify_round("reject")]
     agent, _fake = _make_agent(responses, data_dir, key)
     agent.propose("what's the capital of France?")
@@ -262,7 +262,7 @@ def test_revise_after_reject_raises(data_dir: Path, key: bytes, osuser: str) -> 
 
 
 def test_find_request_scopes_tool_schemas_to_find_only(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
     """`mistralrs.ChatCompletionRequest` is an opaque Rust object with no
     readable `tool_schemas` attribute, so this checks the scoping
@@ -277,7 +277,7 @@ def test_find_request_scopes_tool_schemas_to_find_only(
 
 
 def test_add_request_scopes_tool_schemas_to_find_and_discover(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
     responses = [
         _classify_round("add"),
@@ -293,7 +293,7 @@ def test_add_request_scopes_tool_schemas_to_find_and_discover(
         _final_round("added 6 cartons"),
         _final_round("confirmed"),
     ]
-    config.add_location(data_dir, key, osuser, Location(id="pantry", name="Pantry"))
+    config.add_location(data_dir, key, writer_id, Location(id="pantry", name="Pantry"))
     agent, _fake = _make_agent(responses, data_dir, key)
 
     plan = agent.propose("add 6 cartons of Moma pistachio milk to the pantry")
@@ -304,7 +304,7 @@ def test_add_request_scopes_tool_schemas_to_find_and_discover(
 
 
 def test_remove_request_scopes_tool_schemas_to_find_consume_move(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
     responses = [
         _classify_round("remove"),
@@ -325,13 +325,13 @@ def test_remove_request_scopes_tool_schemas_to_find_consume_move(
 
 
 def test_tool_call_outside_current_kind_is_rejected_not_dispatched(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
     """A `find`-classified request only ever has `sumac_find_inventory` on
     the request, but a small model can still emit a call for a tool it
     wasn't given — this must not crash `_run_loop` or reach a domain
     callback outside the classified kind's scope."""
-    _seed_pantry_with_jam(data_dir, key, osuser)
+    _seed_pantry_with_jam(data_dir, key, writer_id)
     responses = [
         _classify_round("find"),
         _tool_round(
@@ -358,7 +358,7 @@ def test_tool_call_outside_current_kind_is_rejected_not_dispatched(
 
 
 def test_propose_read_only_request_produces_no_writes(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
     responses = [_classify_round("find"), _final_round("the jam is in the pantry")]
     agent, fake = _make_agent(responses, data_dir, key)
@@ -376,9 +376,9 @@ def test_propose_read_only_request_produces_no_writes(
 
 
 def test_propose_resolves_a_consume_call_into_a_pending_write(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
-    _seed_pantry_with_jam(data_dir, key, osuser)
+    _seed_pantry_with_jam(data_dir, key, writer_id)
     responses = [
         _classify_round("remove"),
         _tool_round("sumac_find_inventory", {"query": "jam"}),
@@ -423,9 +423,9 @@ def test_propose_resolves_a_consume_call_into_a_pending_write(
 
 
 def test_rejected_tool_call_is_reported_and_not_added_to_pending(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
-    _seed_pantry_with_jam(data_dir, key, osuser)
+    _seed_pantry_with_jam(data_dir, key, writer_id)
     responses = [
         _classify_round("remove"),
         _tool_round(
@@ -463,14 +463,14 @@ def test_rejected_tool_call_is_reported_and_not_added_to_pending(
 
 
 def test_add_request_with_no_writes_forces_one_more_round(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
     """A real LFM2.5 run classified as "add" narrated the change it would
     make in plain text without ever calling `sumac_discover_inventory` —
     the classifier already decided a change was needed, so ending with no
     writes is not the normal "nothing to do" outcome `find` has; it's a
     miss. One forced follow-up round, and this one actually acts."""
-    config.add_location(data_dir, key, osuser, Location(id="pantry", name="Pantry"))
+    config.add_location(data_dir, key, writer_id, Location(id="pantry", name="Pantry"))
     responses = [
         _classify_round("add"),
         _final_round("I would add 1 box of Widgets to the pantry."),
@@ -494,7 +494,7 @@ def test_add_request_with_no_writes_forces_one_more_round(
 
 
 def test_add_request_still_producing_no_writes_after_the_forced_round_gives_up(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
     """The forced round is not unbounded — if the model still doesn't act,
     that becomes the human's call (feedback/regenerate/start over), not
@@ -518,13 +518,13 @@ def test_add_request_still_producing_no_writes_after_the_forced_round_gives_up(
 
 
 def test_missing_required_argument_names_what_was_missing_and_received(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
     """A real LFM2.5 run produced `_amount` instead of `amount` — this is
     the callback's response to that case: name exactly what's missing and
     what was actually received, rather than a bare `invalid_amount` with no
     hint the key itself was wrong."""
-    _seed_pantry_with_jam(data_dir, key, osuser)
+    _seed_pantry_with_jam(data_dir, key, writer_id)
     agent, _fake = _make_agent([], data_dir, key)
 
     result = json.loads(
@@ -549,14 +549,14 @@ def test_missing_required_argument_names_what_was_missing_and_received(
 
 
 def test_repeating_an_identical_successful_write_is_not_queued_twice(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
     """A real LFM2.5 run repeated an already-successful `sumac_discover_
     inventory` call three more times, byte-for-byte — each repeat silently
     became a second, third, fourth full write, so accepting the resulting
     plan would have recorded four times the requested quantity. The second
     (and third, fourth, ...) identical call must not add another write."""
-    config.add_location(data_dir, key, osuser, Location(id="pantry", name="Pantry"))
+    config.add_location(data_dir, key, writer_id, Location(id="pantry", name="Pantry"))
     agent, _fake = _make_agent([], data_dir, key)
     call_args = {
         "product_id": "Moma Pistachio Milk",
@@ -587,11 +587,11 @@ def test_repeating_an_identical_successful_write_is_not_queued_twice(
 # --- idea 8B: DONE grammar (docs/journal/2026-09-06-ask-latency-round-two.md) ---
 
 
-def test_no_grammar_on_find_rounds(data_dir: Path, key: bytes, osuser: str) -> None:
+def test_no_grammar_on_find_rounds(data_dir: Path, key: bytes, writer_id: str) -> None:
     """`find` never proposes a write, so `self._pending` stays empty for
     every round — the DONE grammar must never activate here, or the model
     could never rephrase the answer in free text."""
-    _seed_pantry_with_jam(data_dir, key, osuser)
+    _seed_pantry_with_jam(data_dir, key, writer_id)
     responses = [
         _classify_round("find"),
         _tool_round("sumac_find_inventory", {"query": "jam"}),
@@ -605,9 +605,9 @@ def test_no_grammar_on_find_rounds(data_dir: Path, key: bytes, osuser: str) -> N
 
 
 def test_grammar_activates_only_once_a_write_has_succeeded(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
-    _seed_pantry_with_jam(data_dir, key, osuser)
+    _seed_pantry_with_jam(data_dir, key, writer_id)
     responses = [
         _classify_round("remove"),
         _tool_round("sumac_find_inventory", {"query": "jam"}),
@@ -629,7 +629,7 @@ def test_grammar_activates_only_once_a_write_has_succeeded(
 
 
 def test_continue_hands_off_to_a_fully_unconstrained_round(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
     """A compound request ("add the widgets and the gadgets") must still
     produce both writes — but, unlike an earlier version of idea 8B, never
@@ -637,7 +637,7 @@ def test_continue_hands_off_to_a_fully_unconstrained_round(
     grammar. `CONTINUE` only ever hands off to a plain, ungrammared round to
     get the second tool call; the grammar itself never sees anything but
     `DONE`/`CONTINUE`."""
-    config.add_location(data_dir, key, osuser, Location(id="pantry", name="Pantry"))
+    config.add_location(data_dir, key, writer_id, Location(id="pantry", name="Pantry"))
     responses = [
         _classify_round("add"),
         _tool_round(
@@ -675,9 +675,9 @@ def test_continue_hands_off_to_a_fully_unconstrained_round(
 
 
 def test_self_review_replaces_plan_when_model_revises_it(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
-    _seed_pantry_with_jam(data_dir, key, osuser)
+    _seed_pantry_with_jam(data_dir, key, writer_id)
     responses = [
         _classify_round("remove"),
         _tool_round(
@@ -707,9 +707,9 @@ def test_self_review_replaces_plan_when_model_revises_it(
 
 
 def test_self_review_keeps_original_plan_when_model_confirms(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
-    _seed_pantry_with_jam(data_dir, key, osuser)
+    _seed_pantry_with_jam(data_dir, key, writer_id)
     responses = [
         _classify_round("remove"),
         _tool_round(
@@ -741,14 +741,14 @@ def test_self_review_keeps_original_plan_when_model_confirms(
 # --- revise ------------------------------------------------------------
 
 
-def test_revise_before_propose_raises(data_dir: Path, key: bytes, osuser: str) -> None:
+def test_revise_before_propose_raises(data_dir: Path, key: bytes, writer_id: str) -> None:
     agent, _fake = _make_agent([], data_dir, key)
     with pytest.raises(RuntimeError):
         agent.revise("actually make it 2")
 
 
-def test_revise_continues_after_propose(data_dir: Path, key: bytes, osuser: str) -> None:
-    _seed_pantry_with_jam(data_dir, key, osuser)
+def test_revise_continues_after_propose(data_dir: Path, key: bytes, writer_id: str) -> None:
+    _seed_pantry_with_jam(data_dir, key, writer_id)
     responses = [
         # propose (classify once; revise does not reclassify)
         _classify_round("remove"),
@@ -789,9 +789,9 @@ def test_revise_continues_after_propose(data_dir: Path, key: bytes, osuser: str)
 
 
 def test_commit_appends_writes_and_returns_summaries(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
-    _seed_pantry_with_jam(data_dir, key, osuser)
+    _seed_pantry_with_jam(data_dir, key, writer_id)
     agent, _fake = _make_agent([], data_dir, key)
     plan = llm.AgentPlan(
         reply_text="",
@@ -813,7 +813,7 @@ def test_commit_appends_writes_and_returns_summaries(
     assert ledger.build_inventory(data_dir, key).at("pantry")["jam"].amount == Decimal(2)
 
 
-def test_commit_reraises_rejected_uncaught(data_dir: Path, key: bytes, osuser: str) -> None:
+def test_commit_reraises_rejected_uncaught(data_dir: Path, key: bytes, writer_id: str) -> None:
     """A `Rejected` at commit time is not a modeled outcome the model gets
     to react to — it propagates, unlike a `Rejected` from a tool callback
     during propose/revise."""
@@ -837,14 +837,14 @@ def test_commit_reraises_rejected_uncaught(data_dir: Path, key: bytes, osuser: s
 
 
 def test_commit_re_decides_against_fresh_state_not_stale_snapshot(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
     """ "Shelf is authoritative, not the log, even between preview and
     accept": commit re-runs `decide_change` against current state rather
     than replaying the `Write`s computed during `propose`. Simulated here by
     reducing stock between propose-equivalent plan construction and commit —
     the shortfall reconciliation should still kick in at commit time."""
-    _seed_pantry_with_jam(data_dir, key, osuser)
+    _seed_pantry_with_jam(data_dir, key, writer_id)
     agent, _fake = _make_agent([], data_dir, key)
     plan = llm.AgentPlan(
         reply_text="",
@@ -864,7 +864,7 @@ def test_commit_re_decides_against_fresh_state_not_stale_snapshot(
     _apply_change(
         data_dir,
         key,
-        osuser,
+        writer_id,
         kind=ChangeKind.CONSUMPTION,
         product_id="jam",
         amount=Decimal(2),
@@ -1006,7 +1006,7 @@ def test_render_tool_call_gemma_uses_call_colon_syntax() -> None:
 
 
 def test_run_loop_appends_lfm_formatted_assistant_message_when_configured(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
     """Confirms the active `ModelPreset`'s `tool_call_format` actually
     reaches `_run_loop`'s message history, not just that `_render_tool_call`
@@ -1018,7 +1018,7 @@ def test_run_loop_appends_lfm_formatted_assistant_message_when_configured(
     # GGUF, and the registry itself (`llm.MODEL_PRESETS`) may not carry an
     # LFM-format entry at all (see docs/journal/2026-09-02-eval-suite.md).
     lfm_preset = llm.ModelPreset("test-lfm", "unused/repo", "unused.gguf", llm.ToolCallFormat.LFM)
-    _seed_pantry_with_jam(data_dir, key, osuser)
+    _seed_pantry_with_jam(data_dir, key, writer_id)
     responses = [
         _classify_round("find"),
         _tool_round("sumac_find_inventory", {"query": "jam"}),
@@ -1039,16 +1039,16 @@ def test_run_loop_appends_lfm_formatted_assistant_message_when_configured(
     assert "<tool_call>" not in tool_call_messages[0]["content"]
 
 
-def test_messages_is_none_before_propose(data_dir: Path, key: bytes, osuser: str) -> None:
+def test_messages_is_none_before_propose(data_dir: Path, key: bytes, writer_id: str) -> None:
     agent, _fake = _make_agent([], data_dir, key)
     assert agent.messages is None
     assert agent.classify_messages is None
 
 
 def test_nudge_not_fired_when_the_first_round_already_writes(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
-    config.add_location(data_dir, key, osuser, Location(id="pantry", name="Pantry"))
+    config.add_location(data_dir, key, writer_id, Location(id="pantry", name="Pantry"))
     responses = [
         _classify_round("add"),
         _tool_round(
@@ -1066,14 +1066,14 @@ def test_nudge_not_fired_when_the_first_round_already_writes(
 
 
 def test_terminal_is_round_cap_when_max_tool_rounds_exhausted(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
     """A `find`-classified request (never subject to `_maybe_force_action`)
     that keeps calling a tool and never produces a final reply — `_run_loop`
     falls through its `for` loop instead of returning early, which
     `reply_text == ""` alone can't be told apart from a genuine empty
     text reply."""
-    _seed_pantry_with_jam(data_dir, key, osuser)
+    _seed_pantry_with_jam(data_dir, key, writer_id)
     responses = [_classify_round("find")] + [
         _tool_round("sumac_find_inventory", {"query": "jam"}) for _ in range(llm.MAX_TOOL_ROUNDS)
     ]
@@ -1087,7 +1087,7 @@ def test_terminal_is_round_cap_when_max_tool_rounds_exhausted(
 
 
 def test_terminal_is_reply_for_an_ordinary_final_round(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
     responses = [_classify_round("find"), _final_round("the jam is in the pantry")]
     agent, _fake = _make_agent(responses, data_dir, key)
@@ -1098,7 +1098,7 @@ def test_terminal_is_reply_for_an_ordinary_final_round(
 
 
 def test_classify_messages_captures_the_classifier_round(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
     responses = [_classify_round("find"), _final_round("the jam is in the pantry")]
     agent, _fake = _make_agent(responses, data_dir, key)
@@ -1122,7 +1122,7 @@ def test_classify_messages_captures_the_classifier_round(
 
 
 def test_classify_public_alias_delegates_to_private_method(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
     agent, _fake = _make_agent([_classify_round("find")], data_dir, key)
 
@@ -1130,7 +1130,7 @@ def test_classify_public_alias_delegates_to_private_method(
 
 
 def test_build_request_passes_default_sampling_config(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
     """`_build_request` returns a plain dict, not a real (opaque, PyO3)
     `mistralrs.ChatCompletionRequest`. Every `SendsCompletions` backend, not
@@ -1146,7 +1146,7 @@ def test_build_request_passes_default_sampling_config(
 
 
 def test_build_request_passes_custom_sampling_config(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
     fake = FakeRunner([])
     agent = llm.AgentRunner(
@@ -1169,7 +1169,7 @@ def test_build_request_passes_custom_sampling_config(
 
 
 def test_build_request_carries_seed_for_a_per_request_backend(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
     """`_LocalMistralRsBackend` ignores this key (the real engine is seeded
     once at `Runner` construction) — it's carried for a per-request
@@ -1242,12 +1242,12 @@ def test_build_runner_passes_max_seqs_and_no_paged_attn(monkeypatch: pytest.Monk
 
 
 def test_proposed_write_carries_the_projected_before_and_after(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
     """`_propose_write` folds the records `decide_change` returned onto the
     inventory it just read, so the preview shows the resulting holding as well
     as the starting one."""
-    _seed_pantry_with_jam(data_dir, key, osuser)
+    _seed_pantry_with_jam(data_dir, key, writer_id)
     agent, _fake = _make_agent([], data_dir, key)
 
     agent.tool_callbacks["sumac_consume_inventory"](
@@ -1268,10 +1268,10 @@ def test_proposed_write_carries_the_projected_before_and_after(
 
 
 def test_a_movement_projects_both_endpoints_source_first(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
-    _seed_pantry_with_jam(data_dir, key, osuser)
-    config.add_location(data_dir, key, osuser, Location(id="fridge", name="Fridge"))
+    _seed_pantry_with_jam(data_dir, key, writer_id)
+    config.add_location(data_dir, key, writer_id, Location(id="fridge", name="Fridge"))
     agent, _fake = _make_agent([], data_dir, key)
 
     agent.tool_callbacks["sumac_move_inventory"](
@@ -1293,11 +1293,11 @@ def test_a_movement_projects_both_endpoints_source_first(
 
 
 def test_projected_after_reflects_the_shortfall_correction_not_a_subtraction(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
     """Consuming 5 of a recorded 3 emits §3.5's `Counted` first, so the
     projected holding is zero rather than the -2 a subtraction gives."""
-    _seed_pantry_with_jam(data_dir, key, osuser)
+    _seed_pantry_with_jam(data_dir, key, writer_id)
     agent, _fake = _make_agent([], data_dir, key)
 
     agent.tool_callbacks["sumac_consume_inventory"](
@@ -1312,12 +1312,12 @@ def test_projected_after_reflects_the_shortfall_correction_not_a_subtraction(
 
 
 def test_an_auto_registering_write_projects_without_its_config_record(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
     """`decide_change` returns a config write alongside the log record when it
     auto-registers an unknown product; only the log record carries a delta the
     fold can interpret."""
-    _seed_pantry_with_jam(data_dir, key, osuser)
+    _seed_pantry_with_jam(data_dir, key, writer_id)
     agent, _fake = _make_agent([], data_dir, key)
 
     agent.tool_callbacks["sumac_discover_inventory"](
@@ -1448,17 +1448,17 @@ def test_an_injected_backend_never_builds_or_caches(
 
 
 def test_a_display_path_endpoint_is_recorded_as_its_location_id(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
     """`decide.resolve_location` accepts a display path as well as an id, so
     a write naming one is valid and commits correctly. Keeping the raw string
     on the `ProposedWrite` made every lookup downstream fail: the preview
     showed no before/after (`— → —`), and `review` reported a configured
     location as new."""
-    _seed_pantry_with_jam(data_dir, key, osuser)
-    config.add_location(data_dir, key, osuser, Location(id="fridge", name="Fridge"))
+    _seed_pantry_with_jam(data_dir, key, writer_id)
+    config.add_location(data_dir, key, writer_id, Location(id="fridge", name="Fridge"))
     config.add_location(
-        data_dir, key, osuser, Location(id="fridge-top", name="Top Shelf", parent_id="fridge")
+        data_dir, key, writer_id, Location(id="fridge-top", name="Top Shelf", parent_id="fridge")
     )
     agent, _fake = _make_agent([], data_dir, key)
 
@@ -1480,12 +1480,12 @@ def test_a_display_path_endpoint_is_recorded_as_its_location_id(
 
 
 def test_a_display_path_endpoint_is_not_reported_as_a_new_location(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
     from sumac import review
 
-    _seed_pantry_with_jam(data_dir, key, osuser)
-    config.add_location(data_dir, key, osuser, Location(id="fridge", name="Fridge"))
+    _seed_pantry_with_jam(data_dir, key, writer_id)
+    config.add_location(data_dir, key, writer_id, Location(id="fridge", name="Fridge"))
     agent, _fake = _make_agent([], data_dir, key)
 
     agent.tool_callbacks["sumac_discover_inventory"](
@@ -1499,12 +1499,12 @@ def test_a_display_path_endpoint_is_not_reported_as_a_new_location(
 
 
 def test_the_same_write_named_two_ways_is_only_proposed_once(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
     """Resolving before recording also lets the duplicate guard match a
     second call naming the same location by its display path."""
-    _seed_pantry_with_jam(data_dir, key, osuser)
-    config.add_location(data_dir, key, osuser, Location(id="fridge", name="Fridge"))
+    _seed_pantry_with_jam(data_dir, key, writer_id)
+    config.add_location(data_dir, key, writer_id, Location(id="fridge", name="Fridge"))
     agent, _fake = _make_agent([], data_dir, key)
 
     for endpoint in ("fridge", "Fridge"):
@@ -1522,24 +1522,26 @@ def test_the_same_write_named_two_ways_is_only_proposed_once(
 # --- finding a location, not just a product ----------------------------
 
 
-def _seed_fridge_layout(data_dir: Path, key: bytes, osuser: str) -> None:
+def _seed_fridge_layout(data_dir: Path, key: bytes, writer_id: str) -> None:
     for loc_id, name, parent in (
         ("fridge", "Fridge", None),
         ("fridge-main", "Main Shelves", "fridge"),
         ("fridge-main-shelf-1", "Shelf 1", "fridge-main"),
         ("pantry", "Pantry", None),
     ):
-        config.add_location(data_dir, key, osuser, Location(id=loc_id, name=name, parent_id=parent))
+        config.add_location(
+            data_dir, key, writer_id, Location(id=loc_id, name=name, parent_id=parent)
+        )
 
 
 def test_searching_a_place_returns_locations_not_only_products(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
     """A real run searched "fridge" seventeen times and received nothing each
     time: `ledger.search_inventory` matches products, and no product has that
     name. With no route to a location id, the model used one it had seen in an
     unrelated result."""
-    _seed_fridge_layout(data_dir, key, osuser)
+    _seed_fridge_layout(data_dir, key, writer_id)
     agent, _fake = _make_agent([], data_dir, key)
 
     result = json.loads(
@@ -1556,11 +1558,11 @@ def test_searching_a_place_returns_locations_not_only_products(
 
 
 def test_a_location_search_matches_the_path_not_only_the_name(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
     """ "Shelf 1" is named without reference to the fridge; only its path
     records where it is, so a query for the container must match the path."""
-    _seed_fridge_layout(data_dir, key, osuser)
+    _seed_fridge_layout(data_dir, key, writer_id)
     agent, _fake = _make_agent([], data_dir, key)
 
     result = json.loads(
@@ -1571,9 +1573,9 @@ def test_a_location_search_matches_the_path_not_only_the_name(
 
 
 def test_a_repeated_search_comes_back_labelled_as_one(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
-    _seed_pantry_with_jam(data_dir, key, osuser)
+    _seed_pantry_with_jam(data_dir, key, writer_id)
     agent, _fake = _make_agent([], data_dir, key)
     call = agent.tool_callbacks["sumac_find_inventory"]
 
@@ -1585,10 +1587,10 @@ def test_a_repeated_search_comes_back_labelled_as_one(
     assert second["products"] == first["products"]
 
 
-def test_a_repeat_is_scoped_to_one_propose_call(data_dir: Path, key: bytes, osuser: str) -> None:
+def test_a_repeat_is_scoped_to_one_propose_call(data_dir: Path, key: bytes, writer_id: str) -> None:
     """`propose` clears it alongside the trace, so the same question asked
     about a later request is a fresh one."""
-    _seed_pantry_with_jam(data_dir, key, osuser)
+    _seed_pantry_with_jam(data_dir, key, writer_id)
     agent, _fake = _make_agent([ScriptedResponse(content="done")], data_dir, key)
     agent.tool_callbacks["sumac_find_inventory"]("sumac_find_inventory", {"query": "jam"})
 
@@ -1601,12 +1603,12 @@ def test_a_repeat_is_scoped_to_one_propose_call(data_dir: Path, key: bytes, osus
 
 
 def test_an_unknown_location_rejection_names_real_candidates(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
     """`decide`'s own `suggestions` are `near_matches` over ids, which a
     phrase does not score against, so the rejection previously carried no
     candidates."""
-    _seed_fridge_layout(data_dir, key, osuser)
+    _seed_fridge_layout(data_dir, key, writer_id)
     agent, _fake = _make_agent([], data_dir, key)
 
     result = json.loads(
@@ -1631,11 +1633,11 @@ def test_an_unknown_location_rejection_names_real_candidates(
 
 
 def test_candidates_fall_back_to_the_whole_layout_when_nothing_shares_a_word(
-    data_dir: Path, key: bytes, osuser: str
+    data_dir: Path, key: bytes, writer_id: str
 ) -> None:
     """The rejection names some valid locations even when none shares a word
     with the requested value."""
-    _seed_fridge_layout(data_dir, key, osuser)
+    _seed_fridge_layout(data_dir, key, writer_id)
     agent, _fake = _make_agent([], data_dir, key)
 
     result = json.loads(

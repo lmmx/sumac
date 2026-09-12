@@ -230,7 +230,7 @@ def test_unknown_product_auto_registers_before_the_change() -> None:
     cfg = _cfg(locations={"pantry": Location(id="pantry", name="Pantry")}, products={})
     writes, messages = _decide(product_id="kimchi", unit="jar", cfg=cfg)
     assert len(writes) == 2
-    assert writes[0].stream == "config"
+    assert writes[0].stream == "config:alice"
     assert writes[0].obj["product"]["id"] == "kimchi"
     assert writes[0].obj["product"]["unit"] == "jar"
     assert writes[0].obj["product"]["metadata"] == {"auto": True}

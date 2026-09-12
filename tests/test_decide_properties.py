@@ -101,9 +101,9 @@ def test_gate_soundness_accepted_writes_reference_only_known_entities(
     except Rejected:
         return  # rejection is a legal outcome
 
-    config_writes = [w for w in writes if w.stream == "config"]
+    config_writes = [w for w in writes if w.stream.startswith("config:")]
     for w in writes:
-        if w.stream == "config":
+        if w.stream.startswith("config:"):
             continue
         payload = w.obj["payload"]
         for key in _LOCATION_KEYS_BY_TYPE[w.obj["type"]]:

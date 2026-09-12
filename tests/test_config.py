@@ -6,28 +6,29 @@ from pathlib import Path
 
 import pytest
 
-from sumac import SCHEMA_VERSION, config, paths, store
+from sumac import SCHEMA_VERSION, config, paths, store, writer
 from sumac.errors import UnknownLocationError, UnknownProductError
 from sumac.models import Location, Product, Quantity
+from tests.conftest import seed_writer
 
 
-def test_add_and_load_location(data_dir: Path, osuser: str, key: bytes) -> None:
-    config.add_location(data_dir, key, osuser, Location(id="fridge", name="Fridge"))
+def test_add_and_load_location(data_dir: Path, writer_id: str, key: bytes) -> None:
+    config.add_location(data_dir, key, writer_id, Location(id="fridge", name="Fridge"))
     locations = config.load_locations(data_dir, key)
     assert locations["fridge"].name == "Fridge"
 
 
-def test_latest_revision_wins(data_dir: Path, osuser: str, key: bytes) -> None:
-    config.add_location(data_dir, key, osuser, Location(id="fridge", name="Fridge"))
-    config.add_location(data_dir, key, osuser, Location(id="fridge", name="Renamed Fridge"))
+def test_latest_revision_wins(data_dir: Path, writer_id: str, key: bytes) -> None:
+    config.add_location(data_dir, key, writer_id, Location(id="fridge", name="Fridge"))
+    config.add_location(data_dir, key, writer_id, Location(id="fridge", name="Renamed Fridge"))
     locations = config.load_locations(data_dir, key)
     assert len(locations) == 1
     assert locations["fridge"].name == "Renamed Fridge"
 
 
-def test_multiple_locations(data_dir: Path, osuser: str, key: bytes) -> None:
-    config.add_location(data_dir, key, osuser, Location(id="fridge", name="Fridge"))
-    config.add_location(data_dir, key, osuser, Location(id="pantry", name="Pantry"))
+def test_multiple_locations(data_dir: Path, writer_id: str, key: bytes) -> None:
+    config.add_location(data_dir, key, writer_id, Location(id="fridge", name="Fridge"))
+    config.add_location(data_dir, key, writer_id, Location(id="pantry", name="Pantry"))
     locations = config.load_locations(data_dir, key)
     assert set(locations) == {"fridge", "pantry"}
 
@@ -85,36 +86,38 @@ def test_location_path_of_unknown_id_falls_back_to_id() -> None:
 
 
 def test_retire_location_marks_retired_without_deleting(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
-    config.add_location(data_dir, key, osuser, Location(id="fridge", name="Fridge"))
-    config.retire_location(data_dir, key, osuser, "fridge")
+    config.add_location(data_dir, key, writer_id, Location(id="fridge", name="Fridge"))
+    config.retire_location(data_dir, key, writer_id, "fridge")
     locations = config.load_locations(data_dir, key)
     assert locations["fridge"].retired is True
     assert locations["fridge"].name == "Fridge"
 
 
-def test_retire_location_preserves_parent_and_name(data_dir: Path, osuser: str, key: bytes) -> None:
-    config.add_location(data_dir, key, osuser, Location(id="fridge", name="Fridge"))
+def test_retire_location_preserves_parent_and_name(
+    data_dir: Path, writer_id: str, key: bytes
+) -> None:
+    config.add_location(data_dir, key, writer_id, Location(id="fridge", name="Fridge"))
     config.add_location(
-        data_dir, key, osuser, Location(id="fridge-door", name="Door", parent_id="fridge")
+        data_dir, key, writer_id, Location(id="fridge-door", name="Door", parent_id="fridge")
     )
-    config.retire_location(data_dir, key, osuser, "fridge-door")
+    config.retire_location(data_dir, key, writer_id, "fridge-door")
     loc = config.load_locations(data_dir, key)["fridge-door"]
     assert loc.retired is True
     assert loc.parent_id == "fridge"
     assert loc.name == "Door"
 
 
-def test_retire_unknown_location_raises(data_dir: Path, osuser: str, key: bytes) -> None:
+def test_retire_unknown_location_raises(data_dir: Path, writer_id: str, key: bytes) -> None:
     with pytest.raises(UnknownLocationError):
-        config.retire_location(data_dir, key, osuser, "nonexistent")
+        config.retire_location(data_dir, key, writer_id, "nonexistent")
 
 
-def test_build_config_splits_active_from_known(data_dir: Path, osuser: str, key: bytes) -> None:
-    config.add_location(data_dir, key, osuser, Location(id="fridge", name="Fridge"))
-    config.add_location(data_dir, key, osuser, Location(id="pantry", name="Pantry"))
-    config.retire_location(data_dir, key, osuser, "pantry")
+def test_build_config_splits_active_from_known(data_dir: Path, writer_id: str, key: bytes) -> None:
+    config.add_location(data_dir, key, writer_id, Location(id="fridge", name="Fridge"))
+    config.add_location(data_dir, key, writer_id, Location(id="pantry", name="Pantry"))
+    config.retire_location(data_dir, key, writer_id, "pantry")
 
     cfg = config.build_config(data_dir, key)
     assert set(cfg.known_locations) == {"fridge", "pantry"}
@@ -122,9 +125,9 @@ def test_build_config_splits_active_from_known(data_dir: Path, osuser: str, key:
     assert cfg.anomalies == ()
 
 
-def test_build_config_detects_direct_cycle(data_dir: Path, osuser: str, key: bytes) -> None:
-    config.add_location(data_dir, key, osuser, Location(id="a", name="A", parent_id="b"))
-    config.add_location(data_dir, key, osuser, Location(id="b", name="B", parent_id="a"))
+def test_build_config_detects_direct_cycle(data_dir: Path, writer_id: str, key: bytes) -> None:
+    config.add_location(data_dir, key, writer_id, Location(id="a", name="A", parent_id="b"))
+    config.add_location(data_dir, key, writer_id, Location(id="b", name="B", parent_id="a"))
 
     cfg = config.build_config(data_dir, key)
     assert any(a.reason == "circular_parent" for a in cfg.anomalies)
@@ -133,55 +136,55 @@ def test_build_config_detects_direct_cycle(data_dir: Path, osuser: str, key: byt
     assert set(cfg.active_locations) == {"a", "b"}
 
 
-def test_build_config_detects_self_parent(data_dir: Path, osuser: str, key: bytes) -> None:
-    config.add_location(data_dir, key, osuser, Location(id="a", name="A", parent_id="a"))
+def test_build_config_detects_self_parent(data_dir: Path, writer_id: str, key: bytes) -> None:
+    config.add_location(data_dir, key, writer_id, Location(id="a", name="A", parent_id="a"))
     cfg = config.build_config(data_dir, key)
     assert any(a.reason == "circular_parent" for a in cfg.anomalies)
 
 
-def test_build_config_no_cycle_for_normal_tree(data_dir: Path, osuser: str, key: bytes) -> None:
+def test_build_config_no_cycle_for_normal_tree(data_dir: Path, writer_id: str, key: bytes) -> None:
     for loc in _tree().values():
-        config.add_location(data_dir, key, osuser, loc)
+        config.add_location(data_dir, key, writer_id, loc)
     cfg = config.build_config(data_dir, key)
     assert cfg.anomalies == ()
 
 
-def test_add_and_load_product(data_dir: Path, osuser: str, key: bytes) -> None:
-    config.add_product(data_dir, key, osuser, Product(id="milk", name="Milk", unit="l"))
+def test_add_and_load_product(data_dir: Path, writer_id: str, key: bytes) -> None:
+    config.add_product(data_dir, key, writer_id, Product(id="milk", name="Milk", unit="l"))
     products = config.load_products(data_dir, key)
     assert products["milk"].name == "Milk"
     assert products["milk"].unit == "l"
 
 
-def test_product_latest_revision_wins(data_dir: Path, osuser: str, key: bytes) -> None:
-    config.add_product(data_dir, key, osuser, Product(id="milk", name="Milk", unit="l"))
-    config.add_product(data_dir, key, osuser, Product(id="milk", name="Whole Milk", unit="l"))
+def test_product_latest_revision_wins(data_dir: Path, writer_id: str, key: bytes) -> None:
+    config.add_product(data_dir, key, writer_id, Product(id="milk", name="Milk", unit="l"))
+    config.add_product(data_dir, key, writer_id, Product(id="milk", name="Whole Milk", unit="l"))
     products = config.load_products(data_dir, key)
     assert len(products) == 1
     assert products["milk"].name == "Whole Milk"
 
 
 def test_retire_product_marks_retired_without_deleting(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
-    config.add_product(data_dir, key, osuser, Product(id="milk", name="Milk", unit="l"))
-    config.retire_product(data_dir, key, osuser, "milk")
+    config.add_product(data_dir, key, writer_id, Product(id="milk", name="Milk", unit="l"))
+    config.retire_product(data_dir, key, writer_id, "milk")
     products = config.load_products(data_dir, key)
     assert products["milk"].retired is True
     assert products["milk"].name == "Milk"
 
 
-def test_retire_unknown_product_raises(data_dir: Path, osuser: str, key: bytes) -> None:
+def test_retire_unknown_product_raises(data_dir: Path, writer_id: str, key: bytes) -> None:
     with pytest.raises(UnknownProductError):
-        config.retire_product(data_dir, key, osuser, "nonexistent")
+        config.retire_product(data_dir, key, writer_id, "nonexistent")
 
 
 def test_build_config_splits_active_from_known_products(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
-    config.add_product(data_dir, key, osuser, Product(id="milk", name="Milk", unit="l"))
-    config.add_product(data_dir, key, osuser, Product(id="eggs", name="Eggs", unit="ct"))
-    config.retire_product(data_dir, key, osuser, "eggs")
+    config.add_product(data_dir, key, writer_id, Product(id="milk", name="Milk", unit="l"))
+    config.add_product(data_dir, key, writer_id, Product(id="eggs", name="Eggs", unit="ct"))
+    config.retire_product(data_dir, key, writer_id, "eggs")
 
     cfg = config.build_config(data_dir, key)
     assert set(cfg.known_products) == {"milk", "eggs"}
@@ -189,21 +192,21 @@ def test_build_config_splits_active_from_known_products(
 
 
 def test_locations_and_products_coexist_in_shared_stream(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
-    """Locations and products both live in `store.CONFIG_STREAM_ID`; each loader
+    """Locations and products both live in `writer.config_stream_id(writer_id)`; each loader
     must only see its own kind."""
-    config.add_location(data_dir, key, osuser, Location(id="fridge", name="Fridge"))
-    config.add_product(data_dir, key, osuser, Product(id="milk", name="Milk", unit="l"))
-    config.add_location(data_dir, key, osuser, Location(id="pantry", name="Pantry"))
-    config.add_product(data_dir, key, osuser, Product(id="eggs", name="Eggs", unit="ct"))
+    config.add_location(data_dir, key, writer_id, Location(id="fridge", name="Fridge"))
+    config.add_product(data_dir, key, writer_id, Product(id="milk", name="Milk", unit="l"))
+    config.add_location(data_dir, key, writer_id, Location(id="pantry", name="Pantry"))
+    config.add_product(data_dir, key, writer_id, Product(id="eggs", name="Eggs", unit="ct"))
 
     assert set(config.load_locations(data_dir, key)) == {"fridge", "pantry"}
     assert set(config.load_products(data_dir, key)) == {"milk", "eggs"}
 
 
 def test_old_shape_location_record_without_product_key_still_loads(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
     """A config line written before products (or `retired`) existed has only
     `location`, no `product` key, and no `retired` key inside `location` — must
@@ -211,10 +214,10 @@ def test_old_shape_location_record_without_product_key_still_loads(
     obj = {
         "schema_version": SCHEMA_VERSION,
         "ts": datetime.now(UTC).isoformat(),
-        "actor": osuser,
+        "actor": writer_id,
         "location": {"id": "fridge", "name": "Fridge", "parent_id": None, "metadata": {}},
     }
-    store.append(data_dir, key, store.CONFIG_STREAM_ID, obj)
+    store.append(data_dir, key, writer.config_stream_id(writer_id), obj)
     locations = config.load_locations(data_dir, key)
     assert locations["fridge"].name == "Fridge"
     assert locations["fridge"].retired is False
@@ -222,22 +225,22 @@ def test_old_shape_location_record_without_product_key_still_loads(
 
 
 def test_malformed_config_record_becomes_anomaly_others_still_resolve(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
     """A record setting neither (or both) of location/product must not take the
     rest of config down with it — same blast-radius principle as the main log."""
-    config.add_location(data_dir, key, osuser, Location(id="fridge", name="Fridge"))
+    config.add_location(data_dir, key, writer_id, Location(id="fridge", name="Fridge"))
     store.append(
         data_dir,
         key,
-        store.CONFIG_STREAM_ID,
+        writer.config_stream_id(writer_id),
         {
             "schema_version": SCHEMA_VERSION,
             "ts": datetime.now(UTC).isoformat(),
-            "actor": osuser,
+            "actor": writer_id,
         },  # neither location nor product set
     )
-    config.add_location(data_dir, key, osuser, Location(id="pantry", name="Pantry"))
+    config.add_location(data_dir, key, writer_id, Location(id="pantry", name="Pantry"))
 
     cfg = config.build_config(data_dir, key)
     assert any(a.reason == "invalid_config_record" for a in cfg.anomalies)
@@ -245,16 +248,16 @@ def test_malformed_config_record_becomes_anomaly_others_still_resolve(
 
 
 def test_schema_too_new_config_record_becomes_anomaly_others_still_resolve(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
-    config.add_location(data_dir, key, osuser, Location(id="fridge", name="Fridge"))
+    config.add_location(data_dir, key, writer_id, Location(id="fridge", name="Fridge"))
     obj = {
         "schema_version": SCHEMA_VERSION + 1,
         "ts": datetime.now(UTC).isoformat(),
-        "actor": osuser,
+        "actor": writer_id,
         "location": {"id": "pantry", "name": "Pantry", "parent_id": None, "metadata": {}},
     }
-    store.append(data_dir, key, store.CONFIG_STREAM_ID, obj)
+    store.append(data_dir, key, writer.config_stream_id(writer_id), obj)
 
     cfg = config.build_config(data_dir, key)
     assert any(a.reason == "schema_too_new" for a in cfg.anomalies)
@@ -262,45 +265,45 @@ def test_schema_too_new_config_record_becomes_anomaly_others_still_resolve(
 
 
 def test_corrupted_config_line_becomes_anomaly_others_still_resolve(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
-    config.add_location(data_dir, key, osuser, Location(id="fridge", name="Fridge"))
+    config.add_location(data_dir, key, writer_id, Location(id="fridge", name="Fridge"))
     config_path = paths.config_path(data_dir)
     with config_path.open("a", encoding="utf-8") as f:
         f.write("not-valid-base64!!!\n")
-    config.add_location(data_dir, key, osuser, Location(id="pantry", name="Pantry"))
+    config.add_location(data_dir, key, writer_id, Location(id="pantry", name="Pantry"))
 
     cfg = config.build_config(data_dir, key)
     assert any(a.reason == "line_failure" for a in cfg.anomalies)
     assert set(cfg.known_locations) == {"fridge", "pantry"}
 
 
-def test_product_conversions_round_trip(data_dir: Path, osuser: str, key: bytes) -> None:
+def test_product_conversions_round_trip(data_dir: Path, writer_id: str, key: bytes) -> None:
     product = Product(
         id="rice-pudding",
         name="Rice Pudding",
         unit="g",
         conversions={"jar": Decimal("340")},
     )
-    config.add_product(data_dir, key, osuser, product)
+    config.add_product(data_dir, key, writer_id, product)
     loaded = config.load_products(data_dir, key)["rice-pudding"]
     assert loaded.unit == "g"
     assert loaded.conversions == {"jar": Decimal("340")}
 
 
 def test_convert_identity_when_unit_matches_canonical(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
-    config.add_product(data_dir, key, osuser, Product(id="milk", name="Milk", unit="l"))
+    config.add_product(data_dir, key, writer_id, Product(id="milk", name="Milk", unit="l"))
     cfg = config.build_config(data_dir, key)
     assert cfg.convert("milk", Decimal("2"), "l") == Quantity(Decimal("2"), "l")
 
 
-def test_convert_applies_conversion_ratio(data_dir: Path, osuser: str, key: bytes) -> None:
+def test_convert_applies_conversion_ratio(data_dir: Path, writer_id: str, key: bytes) -> None:
     config.add_product(
         data_dir,
         key,
-        osuser,
+        writer_id,
         Product(
             id="rice-pudding", name="Rice Pudding", unit="g", conversions={"jar": Decimal("340")}
         ),
@@ -312,24 +315,26 @@ def test_convert_applies_conversion_ratio(data_dir: Path, osuser: str, key: byte
     assert result.unit == "g"
 
 
-def test_convert_returns_none_for_unknown_product(data_dir: Path, osuser: str, key: bytes) -> None:
+def test_convert_returns_none_for_unknown_product(
+    data_dir: Path, writer_id: str, key: bytes
+) -> None:
     cfg = config.build_config(data_dir, key)
     assert cfg.convert("nonexistent", Decimal("1"), "l") is None
 
 
 def test_convert_returns_none_for_unconvertible_unit(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
-    config.add_product(data_dir, key, osuser, Product(id="milk", name="Milk", unit="l"))
+    config.add_product(data_dir, key, writer_id, Product(id="milk", name="Milk", unit="l"))
     cfg = config.build_config(data_dir, key)
     assert cfg.convert("milk", Decimal("1"), "kg") is None
 
 
-def test_can_convert_mirrors_convert(data_dir: Path, osuser: str, key: bytes) -> None:
+def test_can_convert_mirrors_convert(data_dir: Path, writer_id: str, key: bytes) -> None:
     config.add_product(
         data_dir,
         key,
-        osuser,
+        writer_id,
         Product(
             id="rice-pudding", name="Rice Pudding", unit="g", conversions={"jar": Decimal("340")}
         ),
@@ -345,12 +350,12 @@ def test_can_convert_mirrors_convert(data_dir: Path, osuser: str, key: bytes) ->
 
 
 def test_convert_with_basis_returns_no_basis_when_unit_matches_canonical(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
     """Nothing was converted, so there's nothing for a basis record to add
     beyond what the resulting event's own amount/unit already say — see
     docs/journal/2026-08-31-decide-simplification-review.md §5.3, Decision 1."""
-    config.add_product(data_dir, key, osuser, Product(id="milk", name="Milk", unit="l"))
+    config.add_product(data_dir, key, writer_id, Product(id="milk", name="Milk", unit="l"))
     cfg = config.build_config(data_dir, key)
     result = cfg.convert_with_basis("milk", Decimal("2"), "l")
     assert result is not None
@@ -360,12 +365,12 @@ def test_convert_with_basis_returns_no_basis_when_unit_matches_canonical(
 
 
 def test_convert_with_basis_records_raw_input_and_ratio_when_converted(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
     config.add_product(
         data_dir,
         key,
-        osuser,
+        writer_id,
         Product(
             id="rice-pudding", name="Rice Pudding", unit="g", conversions={"jar": Decimal("340")}
         ),
@@ -379,28 +384,30 @@ def test_convert_with_basis_records_raw_input_and_ratio_when_converted(
 
 
 def test_convert_with_basis_returns_none_for_unknown_product(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
     cfg = config.build_config(data_dir, key)
     assert cfg.convert_with_basis("nonexistent", Decimal("1"), "l") is None
 
 
 def test_convert_with_basis_returns_none_for_unconvertible_unit(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
-    config.add_product(data_dir, key, osuser, Product(id="milk", name="Milk", unit="l"))
+    config.add_product(data_dir, key, writer_id, Product(id="milk", name="Milk", unit="l"))
     cfg = config.build_config(data_dir, key)
     assert cfg.convert_with_basis("milk", Decimal("1"), "kg") is None
 
 
-def test_convert_delegates_to_convert_with_basis(data_dir: Path, osuser: str, key: bytes) -> None:
+def test_convert_delegates_to_convert_with_basis(
+    data_dir: Path, writer_id: str, key: bytes
+) -> None:
     """`convert` is a thin wrapper — this pins that it returns exactly the
     first element of `convert_with_basis`'s pair, for both the converted and
     unconverted cases, so the two can never disagree about the quantity."""
     config.add_product(
         data_dir,
         key,
-        osuser,
+        writer_id,
         Product(
             id="rice-pudding", name="Rice Pudding", unit="g", conversions={"jar": Decimal("340")}
         ),
@@ -409,3 +416,53 @@ def test_convert_delegates_to_convert_with_basis(data_dir: Path, osuser: str, ke
     result = cfg.convert_with_basis("rice-pudding", Decimal("2"), "jar")
     assert result is not None
     assert cfg.convert("rice-pudding", Decimal("2"), "jar") == result[0]
+
+
+# --- §2: build_config folds every writer's config stream ---
+
+
+def test_build_config_folds_two_writers_config_records(git_data_dir: Path, key: bytes) -> None:
+    repo_root = git_data_dir.parent
+
+    def alice_appends(data_dir: Path) -> None:
+        config.add_location(data_dir, key, "alice-mac", Location(id="fridge", name="Fridge"))
+
+    def bob_appends(data_dir: Path) -> None:
+        config.add_location(data_dir, key, "bob-linux", Location(id="pantry", name="Pantry"))
+
+    seed_writer(repo_root, key, "alice-mac", alice_appends)
+    seed_writer(repo_root, key, "bob-linux", bob_appends)
+
+    locations = config.load_locations(git_data_dir, key)
+    assert set(locations) == {"fridge", "pantry"}
+
+
+def test_build_config_tie_break_is_deterministic_on_same_ts(git_data_dir: Path, key: bytes) -> None:
+    """Two writers' records at the same `ts` resolve by `(ts, writer_id)`, not by
+    ref enumeration order (§2's build_config note)."""
+    repo_root = git_data_dir.parent
+    same_ts = datetime.now(UTC)
+
+    def make_obj(name: str) -> dict:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "ts": same_ts.isoformat(),
+            "actor": "placeholder",
+            "location": {"id": "fridge", "name": name, "parent_id": None, "metadata": {}},
+        }
+
+    def alice_appends(data_dir: Path) -> None:
+        obj = {**make_obj("Alice's Fridge"), "actor": "alice-mac"}
+        store.append(data_dir, key, writer.config_stream_id("alice-mac"), obj)
+
+    def bob_appends(data_dir: Path) -> None:
+        obj = {**make_obj("Bob's Fridge"), "actor": "bob-linux"}
+        store.append(data_dir, key, writer.config_stream_id("bob-linux"), obj)
+
+    seed_writer(repo_root, key, "alice-mac", alice_appends)
+    seed_writer(repo_root, key, "bob-linux", bob_appends)
+
+    locations = config.load_locations(git_data_dir, key)
+    # (ts, writer_id) tie-break: "bob-linux" > "alice-mac" lexicographically, so
+    # bob's record wins the same-ts collision, deterministically.
+    assert locations["fridge"].name == "Bob's Fridge"

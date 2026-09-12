@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from sumac import SCHEMA_VERSION, config, decide, events, ledger, models, paths, store
+from sumac import SCHEMA_VERSION, config, decide, events, ledger, models, paths, store, writer
 from sumac.errors import Rejected
 
 T0 = datetime(2026, 1, 1, tzinfo=None).astimezone()
@@ -69,23 +69,23 @@ def _snapshot_obj(
     }
 
 
-def test_movement_between_locations(data_dir: Path, osuser: str, key: bytes) -> None:
-    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
-    config.add_location(data_dir, key, osuser, models.Location(id="fridge", name="Fridge"))
+def test_movement_between_locations(data_dir: Path, writer_id: str, key: bytes) -> None:
+    config.add_location(data_dir, key, writer_id, models.Location(id="pantry", name="Pantry"))
+    config.add_location(data_dir, key, writer_id, models.Location(id="fridge", name="Fridge"))
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
-        _change_obj("c1", T0, osuser, "purchase", "milk", "5", "l", to_location="pantry"),
+        writer.log_stream_id(writer_id),
+        _change_obj("c1", T0, writer_id, "purchase", "milk", "5", "l", to_location="pantry"),
     )
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
+        writer.log_stream_id(writer_id),
         _change_obj(
             "c2",
             T0 + timedelta(minutes=1),
-            osuser,
+            writer_id,
             "movement",
             "milk",
             "2",
@@ -100,29 +100,29 @@ def test_movement_between_locations(data_dir: Path, osuser: str, key: bytes) -> 
 
 
 def test_snapshot_resets_and_later_changes_apply_on_top(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
-    config.add_location(data_dir, key, osuser, models.Location(id="fridge", name="Fridge"))
+    config.add_location(data_dir, key, writer_id, models.Location(id="fridge", name="Fridge"))
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
-        _change_obj("c1", T0, osuser, "purchase", "milk", "5", "l", to_location="fridge"),
+        writer.log_stream_id(writer_id),
+        _change_obj("c1", T0, writer_id, "purchase", "milk", "5", "l", to_location="fridge"),
     )
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
-        _snapshot_obj("s1", T0 + timedelta(minutes=1), osuser, "fridge", [("milk", "2", "l")]),
+        writer.log_stream_id(writer_id),
+        _snapshot_obj("s1", T0 + timedelta(minutes=1), writer_id, "fridge", [("milk", "2", "l")]),
     )
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
+        writer.log_stream_id(writer_id),
         _change_obj(
             "c2",
             T0 + timedelta(minutes=2),
-            osuser,
+            writer_id,
             "consumption",
             "milk",
             "1",
@@ -134,22 +134,22 @@ def test_snapshot_resets_and_later_changes_apply_on_top(
     assert inventory.at("fridge")["milk"].amount == Decimal("1")
 
 
-def test_supersede_drops_original(data_dir: Path, osuser: str, key: bytes) -> None:
-    config.add_location(data_dir, key, osuser, models.Location(id="fridge", name="Fridge"))
+def test_supersede_drops_original(data_dir: Path, writer_id: str, key: bytes) -> None:
+    config.add_location(data_dir, key, writer_id, models.Location(id="fridge", name="Fridge"))
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
-        _change_obj("c1", T0, osuser, "purchase", "milk", "5", "l", to_location="fridge"),
+        writer.log_stream_id(writer_id),
+        _change_obj("c1", T0, writer_id, "purchase", "milk", "5", "l", to_location="fridge"),
     )
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
+        writer.log_stream_id(writer_id),
         _change_obj(
             "c2",
             T0 + timedelta(minutes=1),
-            osuser,
+            writer_id,
             "correction",
             "milk",
             "3",
@@ -162,22 +162,22 @@ def test_supersede_drops_original(data_dir: Path, osuser: str, key: bytes) -> No
     assert inventory.at("fridge")["milk"].amount == Decimal("3")
 
 
-def test_unit_mismatch_becomes_anomaly(data_dir: Path, osuser: str, key: bytes) -> None:
-    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+def test_unit_mismatch_becomes_anomaly(data_dir: Path, writer_id: str, key: bytes) -> None:
+    config.add_location(data_dir, key, writer_id, models.Location(id="pantry", name="Pantry"))
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
-        _change_obj("c1", T0, osuser, "purchase", "flour", "1", "kg", to_location="pantry"),
+        writer.log_stream_id(writer_id),
+        _change_obj("c1", T0, writer_id, "purchase", "flour", "1", "kg", to_location="pantry"),
     )
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
+        writer.log_stream_id(writer_id),
         _change_obj(
             "c2",
             T0 + timedelta(minutes=1),
-            osuser,
+            writer_id,
             "purchase",
             "flour",
             "1",
@@ -191,22 +191,22 @@ def test_unit_mismatch_becomes_anomaly(data_dir: Path, osuser: str, key: bytes) 
     assert any(a.reason == "unit_mismatch" for a in inventory.anomalies)
 
 
-def test_zero_quantity_drops_entry(data_dir: Path, osuser: str, key: bytes) -> None:
-    config.add_location(data_dir, key, osuser, models.Location(id="fridge", name="Fridge"))
+def test_zero_quantity_drops_entry(data_dir: Path, writer_id: str, key: bytes) -> None:
+    config.add_location(data_dir, key, writer_id, models.Location(id="fridge", name="Fridge"))
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
-        _change_obj("c1", T0, osuser, "purchase", "milk", "1", "l", to_location="fridge"),
+        writer.log_stream_id(writer_id),
+        _change_obj("c1", T0, writer_id, "purchase", "milk", "1", "l", to_location="fridge"),
     )
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
+        writer.log_stream_id(writer_id),
         _change_obj(
             "c2",
             T0 + timedelta(minutes=1),
-            osuser,
+            writer_id,
             "consumption",
             "milk",
             "1",
@@ -218,21 +218,21 @@ def test_zero_quantity_drops_entry(data_dir: Path, osuser: str, key: bytes) -> N
     assert "milk" not in inventory.at("fridge")
 
 
-def test_schema_too_new_becomes_anomaly(data_dir: Path, osuser: str, key: bytes) -> None:
+def test_schema_too_new_becomes_anomaly(data_dir: Path, writer_id: str, key: bytes) -> None:
     """A too-new record (e.g. from a household member who's upgraded) must not brick
     every command for everyone else until they upgrade too — it's quarantined like any
     other unfoldable record, and the rest of the log still folds."""
-    config.add_location(data_dir, key, osuser, models.Location(id="fridge", name="Fridge"))
+    config.add_location(data_dir, key, writer_id, models.Location(id="fridge", name="Fridge"))
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
-        _change_obj("c1", T0, osuser, "purchase", "milk", "1", "l", to_location="fridge"),
+        writer.log_stream_id(writer_id),
+        _change_obj("c1", T0, writer_id, "purchase", "milk", "1", "l", to_location="fridge"),
     )
     obj = _change_obj(
         "c2",
         T0 + timedelta(minutes=1),
-        osuser,
+        writer_id,
         "purchase",
         "eggs",
         "6",
@@ -240,7 +240,7 @@ def test_schema_too_new_becomes_anomaly(data_dir: Path, osuser: str, key: bytes)
         to_location="fridge",
     )
     obj["schema_version"] = SCHEMA_VERSION + 1
-    store.append(data_dir, key, f"log:{osuser}", obj)
+    store.append(data_dir, key, writer.log_stream_id(writer_id), obj)
 
     inventory = ledger.build_inventory(data_dir, key)
     assert inventory.at("fridge")["milk"].amount == Decimal("1")
@@ -248,48 +248,48 @@ def test_schema_too_new_becomes_anomaly(data_dir: Path, osuser: str, key: bytes)
     assert any(a.reason == "schema_too_new" for a in inventory.anomalies)
 
 
-def test_verify_all_detects_actor_mismatch(data_dir: Path, osuser: str, key: bytes) -> None:
-    obj = _change_obj("c1", T0, osuser, "purchase", "milk", "1", "l", to_location="fridge")
+def test_verify_all_detects_actor_mismatch(data_dir: Path, writer_id: str, key: bytes) -> None:
+    obj = _change_obj("c1", T0, writer_id, "purchase", "milk", "1", "l", to_location="fridge")
     obj["actor"] = "someone-else"
-    store.append(data_dir, key, f"log:{osuser}", obj)
+    store.append(data_dir, key, writer.log_stream_id(writer_id), obj)
     result = ledger.verify_all(data_dir, key)
     assert not result.ok
     assert len(result.actor_mismatches) == 1
 
 
-def test_verify_all_ok_on_clean_data(data_dir: Path, osuser: str, key: bytes) -> None:
+def test_verify_all_ok_on_clean_data(data_dir: Path, writer_id: str, key: bytes) -> None:
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
-        _change_obj("c1", T0, osuser, "purchase", "milk", "1", "l", to_location="fridge"),
+        writer.log_stream_id(writer_id),
+        _change_obj("c1", T0, writer_id, "purchase", "milk", "1", "l", to_location="fridge"),
     )
     result = ledger.verify_all(data_dir, key)
     assert result.ok
 
 
-def test_diagnose_clean_log_has_no_findings(data_dir: Path, osuser: str, key: bytes) -> None:
-    config.add_location(data_dir, key, osuser, models.Location(id="fridge", name="Fridge"))
+def test_diagnose_clean_log_has_no_findings(data_dir: Path, writer_id: str, key: bytes) -> None:
+    config.add_location(data_dir, key, writer_id, models.Location(id="fridge", name="Fridge"))
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
-        _change_obj("c1", T0, osuser, "purchase", "milk", "1", "l", to_location="fridge"),
+        writer.log_stream_id(writer_id),
+        _change_obj("c1", T0, writer_id, "purchase", "milk", "1", "l", to_location="fridge"),
     )
     report = ledger.diagnose(data_dir, key)
     assert report.anomalies == ()
     assert report.total_lines == 1
 
 
-def test_diagnose_flags_unknown_location(data_dir: Path, osuser: str, key: bytes) -> None:
+def test_diagnose_flags_unknown_location(data_dir: Path, writer_id: str, key: bytes) -> None:
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
+        writer.log_stream_id(writer_id),
         _change_obj(
             "c1",
             T0,
-            osuser,
+            writer_id,
             "movement",
             "milk",
             "1",
@@ -304,22 +304,24 @@ def test_diagnose_flags_unknown_location(data_dir: Path, osuser: str, key: bytes
     assert ("unknown_location", "hob-right-below-bottom") in reasons
 
 
-def test_diagnose_does_not_raise_on_unit_mismatch(data_dir: Path, osuser: str, key: bytes) -> None:
-    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+def test_diagnose_does_not_raise_on_unit_mismatch(
+    data_dir: Path, writer_id: str, key: bytes
+) -> None:
+    config.add_location(data_dir, key, writer_id, models.Location(id="pantry", name="Pantry"))
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
-        _change_obj("c1", T0, osuser, "purchase", "flour", "1", "kg", to_location="pantry"),
+        writer.log_stream_id(writer_id),
+        _change_obj("c1", T0, writer_id, "purchase", "flour", "1", "kg", to_location="pantry"),
     )
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
+        writer.log_stream_id(writer_id),
         _change_obj(
             "c2",
             T0 + timedelta(minutes=1),
-            osuser,
+            writer_id,
             "purchase",
             "flour",
             "1",
@@ -332,23 +334,23 @@ def test_diagnose_does_not_raise_on_unit_mismatch(data_dir: Path, osuser: str, k
 
 
 def test_diagnose_does_not_raise_on_malformed_movement(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
-    obj = _change_obj("c1", T0, osuser, "movement", "milk", "1", "l", to_location="pantry")
+    obj = _change_obj("c1", T0, writer_id, "movement", "milk", "1", "l", to_location="pantry")
     obj["payload"]["from_location"] = None  # movement missing an endpoint
-    store.append(data_dir, key, f"log:{osuser}", obj)
+    store.append(data_dir, key, writer.log_stream_id(writer_id), obj)
     report = ledger.diagnose(data_dir, key)
     assert any(f.reason == "invalid_record" for f in report.anomalies)
 
 
-def test_diagnose_reports_line_failures(data_dir: Path, osuser: str, key: bytes) -> None:
+def test_diagnose_reports_line_failures(data_dir: Path, writer_id: str, key: bytes) -> None:
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
-        _change_obj("c1", T0, osuser, "purchase", "milk", "1", "l", to_location="fridge"),
+        writer.log_stream_id(writer_id),
+        _change_obj("c1", T0, writer_id, "purchase", "milk", "1", "l", to_location="fridge"),
     )
-    log_path = paths.log_path(data_dir, osuser)
+    log_path = paths.log_path(data_dir)
     with log_path.open("a", encoding="utf-8") as f:
         f.write("not-valid-base64!!!\n")
     report = ledger.diagnose(data_dir, key)
@@ -356,18 +358,18 @@ def test_diagnose_reports_line_failures(data_dir: Path, osuser: str, key: bytes)
 
 
 def test_diagnose_survives_one_bad_config_line_alongside_a_good_one(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
     """A corrupted config line becomes a line_failure anomaly and is skipped — it
     must not take a valid location registered earlier down with it. (Config reads
     go through `store.verify_stream`, which processes every line rather than
     stopping at the first bad one, so this is a config_unreadable-free path.)"""
-    config.add_location(data_dir, key, osuser, models.Location(id="fridge", name="Fridge"))
+    config.add_location(data_dir, key, writer_id, models.Location(id="fridge", name="Fridge"))
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
-        _change_obj("c1", T0, osuser, "purchase", "milk", "1", "l", to_location="fridge"),
+        writer.log_stream_id(writer_id),
+        _change_obj("c1", T0, writer_id, "purchase", "milk", "1", "l", to_location="fridge"),
     )
     config_path = paths.config_path(data_dir)
     with config_path.open("a", encoding="utf-8") as f:
@@ -380,17 +382,17 @@ def test_diagnose_survives_one_bad_config_line_alongside_a_good_one(
 
 
 def test_build_inventory_flags_unknown_location_without_applying(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
-    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+    config.add_location(data_dir, key, writer_id, models.Location(id="pantry", name="Pantry"))
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
+        writer.log_stream_id(writer_id),
         _change_obj(
             "c1",
             T0,
-            osuser,
+            writer_id,
             "movement",
             "milk",
             "1",
@@ -406,26 +408,26 @@ def test_build_inventory_flags_unknown_location_without_applying(
 
 
 def test_build_inventory_does_not_raise_on_malformed_movement(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
-    obj = _change_obj("c1", T0, osuser, "movement", "milk", "1", "l", to_location="pantry")
+    obj = _change_obj("c1", T0, writer_id, "movement", "milk", "1", "l", to_location="pantry")
     obj["payload"]["from_location"] = None  # movement missing an endpoint
-    store.append(data_dir, key, f"log:{osuser}", obj)
+    store.append(data_dir, key, writer.log_stream_id(writer_id), obj)
     inventory = ledger.build_inventory(data_dir, key)
     assert any(a.reason == "invalid_record" for a in inventory.anomalies)
 
 
 def test_build_inventory_does_not_raise_on_decrypt_failure(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
-    config.add_location(data_dir, key, osuser, models.Location(id="fridge", name="Fridge"))
+    config.add_location(data_dir, key, writer_id, models.Location(id="fridge", name="Fridge"))
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
-        _change_obj("c1", T0, osuser, "purchase", "milk", "1", "l", to_location="fridge"),
+        writer.log_stream_id(writer_id),
+        _change_obj("c1", T0, writer_id, "purchase", "milk", "1", "l", to_location="fridge"),
     )
-    log_path = paths.log_path(data_dir, osuser)
+    log_path = paths.log_path(data_dir)
     with log_path.open("a", encoding="utf-8") as f:
         f.write("not-valid-base64!!!\n")
 
@@ -435,7 +437,7 @@ def test_build_inventory_does_not_raise_on_decrypt_failure(
 
 
 def test_build_inventory_does_not_raise_on_unreadable_config(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
     """No location was ever validly registered here (the whole config file is
     one corrupted line), so `fridge` is legitimately unknown_location — this
@@ -447,8 +449,8 @@ def test_build_inventory_does_not_raise_on_unreadable_config(
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
-        _change_obj("c1", T0, osuser, "purchase", "milk", "1", "l", to_location="fridge"),
+        writer.log_stream_id(writer_id),
+        _change_obj("c1", T0, writer_id, "purchase", "milk", "1", "l", to_location="fridge"),
     )
     inventory = ledger.build_inventory(data_dir, key)
     assert any(a.reason == "line_failure" for a in inventory.anomalies)
@@ -456,15 +458,15 @@ def test_build_inventory_does_not_raise_on_unreadable_config(
 
 
 def test_build_inventory_surfaces_circular_parent_without_crashing(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
-    config.add_location(data_dir, key, osuser, models.Location(id="a", name="A", parent_id="b"))
-    config.add_location(data_dir, key, osuser, models.Location(id="b", name="B", parent_id="a"))
+    config.add_location(data_dir, key, writer_id, models.Location(id="a", name="A", parent_id="b"))
+    config.add_location(data_dir, key, writer_id, models.Location(id="b", name="B", parent_id="a"))
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
-        _change_obj("c1", T0, osuser, "purchase", "milk", "1", "l", to_location="a"),
+        writer.log_stream_id(writer_id),
+        _change_obj("c1", T0, writer_id, "purchase", "milk", "1", "l", to_location="a"),
     )
     inventory = ledger.build_inventory(data_dir, key)
     assert inventory.at("a")["milk"].amount == Decimal("1")
@@ -472,17 +474,17 @@ def test_build_inventory_surfaces_circular_parent_without_crashing(
 
 
 def test_build_inventory_folds_movement_to_retired_location(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
     """Referential integrity is monotone (§3.4): retiring a location stops new
     writes (Phase 3's job) but must not un-resolve historical ones."""
-    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
-    config.retire_location(data_dir, key, osuser, "pantry")
+    config.add_location(data_dir, key, writer_id, models.Location(id="pantry", name="Pantry"))
+    config.retire_location(data_dir, key, writer_id, "pantry")
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
-        _change_obj("c1", T0, osuser, "purchase", "milk", "1", "l", to_location="pantry"),
+        writer.log_stream_id(writer_id),
+        _change_obj("c1", T0, writer_id, "purchase", "milk", "1", "l", to_location="pantry"),
     )
     inventory = ledger.build_inventory(data_dir, key)
     assert inventory.at("pantry")["milk"].amount == Decimal("1")
@@ -490,22 +492,22 @@ def test_build_inventory_folds_movement_to_retired_location(
 
 
 def test_observed_product_units_tallies_changes_and_snapshots(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
-        _change_obj("c1", T0, osuser, "purchase", "flour", "1", "kg", to_location="pantry"),
+        writer.log_stream_id(writer_id),
+        _change_obj("c1", T0, writer_id, "purchase", "flour", "1", "kg", to_location="pantry"),
     )
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
+        writer.log_stream_id(writer_id),
         _change_obj(
             "c2",
             T0 + timedelta(minutes=1),
-            osuser,
+            writer_id,
             "purchase",
             "flour",
             "1",
@@ -516,80 +518,80 @@ def test_observed_product_units_tallies_changes_and_snapshots(
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
-        _snapshot_obj("s1", T0 + timedelta(minutes=2), osuser, "pantry", [("flour", "2", "kg")]),
+        writer.log_stream_id(writer_id),
+        _snapshot_obj("s1", T0 + timedelta(minutes=2), writer_id, "pantry", [("flour", "2", "kg")]),
     )
     observed = ledger.observed_product_units(data_dir, key)
     assert observed["flour"] == {"kg": 2, "lb": 1}
 
 
 def test_observed_product_units_includes_records_that_cannot_fold(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
     """Backfill needs what was actually written, not just what currently folds —
     a movement to an unregistered location still recorded a real unit."""
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
+        writer.log_stream_id(writer_id),
         _change_obj(
-            "c1", T0, osuser, "purchase", "milk", "1", "l", to_location="hob-right-below-bottom"
+            "c1", T0, writer_id, "purchase", "milk", "1", "l", to_location="hob-right-below-bottom"
         ),
     )
     observed = ledger.observed_product_units(data_dir, key)
     assert observed["milk"] == {"l": 1}
 
 
-def test_empty_snapshot_clears_prior_holdings(data_dir: Path, osuser: str, key: bytes) -> None:
+def test_empty_snapshot_clears_prior_holdings(data_dir: Path, writer_id: str, key: bytes) -> None:
     """The finding that drove Phase 4a's design (§3.3a): a 0-entry snapshot
     means "this location is empty" and must reset it, not be a no-op."""
-    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+    config.add_location(data_dir, key, writer_id, models.Location(id="pantry", name="Pantry"))
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
-        _change_obj("c1", T0, osuser, "purchase", "milk", "5", "l", to_location="pantry"),
+        writer.log_stream_id(writer_id),
+        _change_obj("c1", T0, writer_id, "purchase", "milk", "5", "l", to_location="pantry"),
     )
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
-        _snapshot_obj("s1", T0 + timedelta(minutes=1), osuser, "pantry", []),
+        writer.log_stream_id(writer_id),
+        _snapshot_obj("s1", T0 + timedelta(minutes=1), writer_id, "pantry", []),
     )
     inventory = ledger.build_inventory(data_dir, key)
     assert inventory.at("pantry") == {}
     assert inventory.anomalies == ()
 
 
-def test_correction_to_only_adds_stock(data_dir: Path, osuser: str, key: bytes) -> None:
-    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+def test_correction_to_only_adds_stock(data_dir: Path, writer_id: str, key: bytes) -> None:
+    config.add_location(data_dir, key, writer_id, models.Location(id="pantry", name="Pantry"))
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
-        _change_obj("c1", T0, osuser, "correction", "flour", "2", "kg", to_location="pantry"),
+        writer.log_stream_id(writer_id),
+        _change_obj("c1", T0, writer_id, "correction", "flour", "2", "kg", to_location="pantry"),
     )
     inventory = ledger.build_inventory(data_dir, key)
     assert inventory.at("pantry")["flour"].amount == Decimal("2")
     assert inventory.anomalies == ()
 
 
-def test_correction_from_only_removes_stock(data_dir: Path, osuser: str, key: bytes) -> None:
-    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+def test_correction_from_only_removes_stock(data_dir: Path, writer_id: str, key: bytes) -> None:
+    config.add_location(data_dir, key, writer_id, models.Location(id="pantry", name="Pantry"))
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
-        _change_obj("c1", T0, osuser, "purchase", "flour", "5", "kg", to_location="pantry"),
+        writer.log_stream_id(writer_id),
+        _change_obj("c1", T0, writer_id, "purchase", "flour", "5", "kg", to_location="pantry"),
     )
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
+        writer.log_stream_id(writer_id),
         _change_obj(
             "c2",
             T0 + timedelta(minutes=1),
-            osuser,
+            writer_id,
             "correction",
             "flour",
             "2",
@@ -602,21 +604,21 @@ def test_correction_from_only_removes_stock(data_dir: Path, osuser: str, key: by
 
 
 def test_correction_with_both_endpoints_becomes_upcast_failed_anomaly(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
     """A structurally-possible-but-unmapped correction shape (both from and
     to set — InventoryChange.__post_init__ doesn't constrain correction at
     all) must quarantine, not silently misapply as a two-sided movement."""
-    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
-    config.add_location(data_dir, key, osuser, models.Location(id="fridge", name="Fridge"))
+    config.add_location(data_dir, key, writer_id, models.Location(id="pantry", name="Pantry"))
+    config.add_location(data_dir, key, writer_id, models.Location(id="fridge", name="Fridge"))
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
+        writer.log_stream_id(writer_id),
         _change_obj(
             "c1",
             T0,
-            osuser,
+            writer_id,
             "correction",
             "eggs",
             "1",
@@ -631,13 +633,13 @@ def test_correction_with_both_endpoints_becomes_upcast_failed_anomaly(
     assert any(a.reason == "upcast_failed" for a in inventory.anomalies)
 
 
-def test_discovery_folds_like_purchase(data_dir: Path, osuser: str, key: bytes) -> None:
-    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+def test_discovery_folds_like_purchase(data_dir: Path, writer_id: str, key: bytes) -> None:
+    config.add_location(data_dir, key, writer_id, models.Location(id="pantry", name="Pantry"))
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
-        _change_obj("c1", T0, osuser, "discovery", "jam", "1", "jar", to_location="pantry"),
+        writer.log_stream_id(writer_id),
+        _change_obj("c1", T0, writer_id, "discovery", "jam", "1", "jar", to_location="pantry"),
     )
     inventory = ledger.build_inventory(data_dir, key)
     assert inventory.at("pantry")["jam"].amount == Decimal("1")
@@ -645,27 +647,27 @@ def test_discovery_folds_like_purchase(data_dir: Path, osuser: str, key: bytes) 
 
 
 def test_movement_neither_side_commits_when_only_destination_mismatches(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
     """_apply_sides must be atomic w.r.t. failures: a Moved whose source side
     would resolve cleanly but whose destination side hits a unit mismatch
     must leave *both* sides untouched, not just skip the bad one."""
-    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
-    config.add_location(data_dir, key, osuser, models.Location(id="fridge", name="Fridge"))
+    config.add_location(data_dir, key, writer_id, models.Location(id="pantry", name="Pantry"))
+    config.add_location(data_dir, key, writer_id, models.Location(id="fridge", name="Fridge"))
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
-        _change_obj("c1", T0, osuser, "purchase", "flour", "5", "kg", to_location="pantry"),
+        writer.log_stream_id(writer_id),
+        _change_obj("c1", T0, writer_id, "purchase", "flour", "5", "kg", to_location="pantry"),
     )
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
+        writer.log_stream_id(writer_id),
         _change_obj(
             "c2",
             T0 + timedelta(minutes=1),
-            osuser,
+            writer_id,
             "purchase",
             "flour",
             "1",
@@ -676,11 +678,11 @@ def test_movement_neither_side_commits_when_only_destination_mismatches(
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
+        writer.log_stream_id(writer_id),
         _change_obj(
             "c3",
             T0 + timedelta(minutes=2),
-            osuser,
+            writer_id,
             "movement",
             "flour",
             "1",
@@ -696,25 +698,25 @@ def test_movement_neither_side_commits_when_only_destination_mismatches(
     assert any(a.reason == "unit_mismatch" for a in inventory.anomalies)
 
 
-def test_mixed_v1_and_v2_records_fold_together(data_dir: Path, osuser: str, key: bytes) -> None:
+def test_mixed_v1_and_v2_records_fold_together(data_dir: Path, writer_id: str, key: bytes) -> None:
     """Phase 4b's acceptance criterion (§3.3a/§5): a log containing both v1
     and v2 records folds correctly. v1 keeps working through the upcaster
     forever; v2 is read natively. Both touch the same product/location so a
     mistake in either path, or in how they compose, shows up as a wrong total."""
-    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+    config.add_location(data_dir, key, writer_id, models.Location(id="pantry", name="Pantry"))
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
-        _change_obj("c1", T0, osuser, "purchase", "milk", "2", "l", to_location="pantry"),
+        writer.log_stream_id(writer_id),
+        _change_obj("c1", T0, writer_id, "purchase", "milk", "2", "l", to_location="pantry"),
     )
     v2_obj = decide.serialize_event(
         events.Acquired(product_id="milk", to="pantry", amount=Decimal("3"), unit="l"),
-        actor=osuser,
+        actor=writer_id,
         occurred_at=T0 + timedelta(minutes=1),
         cmd_id="cmd-1",
     )
-    store.append(data_dir, key, f"log:{osuser}", v2_obj)
+    store.append(data_dir, key, writer.log_stream_id(writer_id), v2_obj)
 
     inventory = ledger.build_inventory(data_dir, key)
     assert inventory.at("pantry")["milk"].amount == Decimal("5")
@@ -722,25 +724,25 @@ def test_mixed_v1_and_v2_records_fold_together(data_dir: Path, osuser: str, key:
 
 
 def test_mixed_v1_and_v2_snapshot_reset_interacts_correctly(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
     """A v2 snapshot must reset a location exactly like a v1 one does — the
     baseline-gating logic in build_inventory doesn't get to know or care
     which version produced it."""
-    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+    config.add_location(data_dir, key, writer_id, models.Location(id="pantry", name="Pantry"))
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
-        _change_obj("c1", T0, osuser, "purchase", "milk", "5", "l", to_location="pantry"),
+        writer.log_stream_id(writer_id),
+        _change_obj("c1", T0, writer_id, "purchase", "milk", "5", "l", to_location="pantry"),
     )
     v2_snapshot = decide.serialize_event(
         events.Snapshot(location_id="pantry", entries=()),
-        actor=osuser,
+        actor=writer_id,
         occurred_at=T0 + timedelta(minutes=1),
         cmd_id="cmd-1",
     )
-    store.append(data_dir, key, f"log:{osuser}", v2_snapshot)
+    store.append(data_dir, key, writer.log_stream_id(writer_id), v2_snapshot)
 
     inventory = ledger.build_inventory(data_dir, key)
     assert inventory.at("pantry") == {}
@@ -748,7 +750,7 @@ def test_mixed_v1_and_v2_snapshot_reset_interacts_correctly(
 
 
 def test_insufficient_stock_counted_actually_precedes_the_movement_after_reload(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
     """Regression test for a real bug: decide_change's `writes` list has the
     Counted correction before the movement, but that ordering only matters if
@@ -759,9 +761,9 @@ def test_insufficient_stock_counted_actually_precedes_the_movement_after_reload(
     smoke testing, not by decide.py's own unit tests, which only ever checked
     list order). Exercises the actual write -> store -> reload -> fold path,
     not just decide_change's return value, since that's what the bug needed."""
-    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
-    config.add_location(data_dir, key, osuser, models.Location(id="fridge", name="Fridge"))
-    config.add_product(data_dir, key, osuser, models.Product(id="milk", name="Milk", unit="l"))
+    config.add_location(data_dir, key, writer_id, models.Location(id="pantry", name="Pantry"))
+    config.add_location(data_dir, key, writer_id, models.Location(id="fridge", name="Fridge"))
+    config.add_product(data_dir, key, writer_id, models.Product(id="milk", name="Milk", unit="l"))
 
     cfg = config.build_config(data_dir, key)
     writes, _messages = decide.decide_change(
@@ -771,7 +773,7 @@ def test_insufficient_stock_counted_actually_precedes_the_movement_after_reload(
         unit="l",
         from_location=None,
         to_location="pantry",
-        actor=osuser,
+        actor=writer_id,
         occurred_at=T0,
         inventory=ledger.build_inventory(data_dir, key),
         cfg=cfg,
@@ -787,7 +789,7 @@ def test_insufficient_stock_counted_actually_precedes_the_movement_after_reload(
         unit="l",
         from_location="pantry",
         to_location="fridge",
-        actor=osuser,
+        actor=writer_id,
         occurred_at=T0 + timedelta(minutes=1),
         inventory=ledger.build_inventory(data_dir, key),
         cfg=cfg,
@@ -802,23 +804,23 @@ def test_insufficient_stock_counted_actually_precedes_the_movement_after_reload(
 
 
 def test_correction_cancels_target_record_from_fold(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
     """§3.6: supersedes means cancel, not replace — the targeted purchase
     must vanish from the fold entirely once corrected, and the Correction
     record itself contributes nothing on its own merits."""
-    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+    config.add_location(data_dir, key, writer_id, models.Location(id="pantry", name="Pantry"))
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
-        _change_obj("bad-1", T0, osuser, "purchase", "milk", "2", "l", to_location="pantry"),
+        writer.log_stream_id(writer_id),
+        _change_obj("bad-1", T0, writer_id, "purchase", "milk", "2", "l", to_location="pantry"),
     )
     records = ledger.load_all_records(data_dir, key)
     write = decide.decide_correct(
         target_id="bad-1",
         reason="typo, wrong product",
-        actor=osuser,
+        actor=writer_id,
         occurred_at=T0 + timedelta(minutes=1),
         records=records,
     )
@@ -830,20 +832,20 @@ def test_correction_cancels_target_record_from_fold(
 
 
 def test_load_all_records_keeps_superseded_load_records_drops_them(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
-    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+    config.add_location(data_dir, key, writer_id, models.Location(id="pantry", name="Pantry"))
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
-        _change_obj("bad-1", T0, osuser, "purchase", "milk", "2", "l", to_location="pantry"),
+        writer.log_stream_id(writer_id),
+        _change_obj("bad-1", T0, writer_id, "purchase", "milk", "2", "l", to_location="pantry"),
     )
     records = ledger.load_all_records(data_dir, key)
     write = decide.decide_correct(
         target_id="bad-1",
         reason="typo",
-        actor=osuser,
+        actor=writer_id,
         occurred_at=T0 + timedelta(minutes=1),
         records=records,
     )
@@ -854,23 +856,23 @@ def test_load_all_records_keeps_superseded_load_records_drops_them(
 
 
 def test_correcting_an_already_superseded_record_is_rejected(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
     """`decide_correct` needs the unfiltered view (`load_all_records`) to
     tell this apart from `supersede_target_missing` — a filtered view would
     make an already-corrected record look like it never existed."""
-    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+    config.add_location(data_dir, key, writer_id, models.Location(id="pantry", name="Pantry"))
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
-        _change_obj("bad-1", T0, osuser, "purchase", "milk", "2", "l", to_location="pantry"),
+        writer.log_stream_id(writer_id),
+        _change_obj("bad-1", T0, writer_id, "purchase", "milk", "2", "l", to_location="pantry"),
     )
     records = ledger.load_all_records(data_dir, key)
     write = decide.decide_correct(
         target_id="bad-1",
         reason="typo",
-        actor=osuser,
+        actor=writer_id,
         occurred_at=T0 + timedelta(minutes=1),
         records=records,
     )
@@ -881,7 +883,7 @@ def test_correcting_an_already_superseded_record_is_rejected(
         decide.decide_correct(
             target_id="bad-1",
             reason="again",
-            actor=osuser,
+            actor=writer_id,
             occurred_at=T0 + timedelta(minutes=2),
             records=records,
         )
@@ -889,20 +891,20 @@ def test_correcting_an_already_superseded_record_is_rejected(
 
 
 def test_seq_duplicate_and_duplicate_record_detected_from_a_bad_merge(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
     """Simulates a bad merge: the same physical line ends up in the segment
     twice. Doctor must flag both the structural signal (seq_duplicate) and
     the content-level one (duplicate_record) — and the fold must apply the
     record's effect exactly once regardless (docs/journal §3.7)."""
-    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+    config.add_location(data_dir, key, writer_id, models.Location(id="pantry", name="Pantry"))
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
-        _change_obj("c1", T0, osuser, "purchase", "milk", "2", "l", to_location="pantry"),
+        writer.log_stream_id(writer_id),
+        _change_obj("c1", T0, writer_id, "purchase", "milk", "2", "l", to_location="pantry"),
     )
-    log_path = paths.log_path(data_dir, osuser)
+    log_path = paths.log_path(data_dir)
     line = log_path.read_text()
     log_path.write_text(line + line)  # duplicate the one line, verbatim
 
@@ -915,20 +917,22 @@ def test_seq_duplicate_and_duplicate_record_detected_from_a_bad_merge(
     assert inventory.at("pantry")["milk"].amount == Decimal("2")  # not double-applied
 
 
-def test_seq_gap_detected_after_a_line_is_removed(data_dir: Path, osuser: str, key: bytes) -> None:
+def test_seq_gap_detected_after_a_line_is_removed(
+    data_dir: Path, writer_id: str, key: bytes
+) -> None:
     """Simulates truncation: a line disappears from the middle of a segment.
     The remaining records' stored `seq` values (0, 2) reveal that 1 is
     missing — something a naive re-count at read time could never notice."""
-    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+    config.add_location(data_dir, key, writer_id, models.Location(id="pantry", name="Pantry"))
     for i in range(3):
         store.append(
             data_dir,
             key,
-            f"log:{osuser}",
+            writer.log_stream_id(writer_id),
             _change_obj(
                 f"c{i}",
                 T0 + timedelta(seconds=i),
-                osuser,
+                writer_id,
                 "purchase",
                 "milk",
                 "1",
@@ -936,7 +940,7 @@ def test_seq_gap_detected_after_a_line_is_removed(data_dir: Path, osuser: str, k
                 to_location="pantry",
             ),
         )
-    log_path = paths.log_path(data_dir, osuser)
+    log_path = paths.log_path(data_dir)
     lines = log_path.read_text().splitlines()
     log_path.write_text("\n".join([lines[0], lines[2]]) + "\n")  # drop the middle line (seq=1)
 
@@ -1038,19 +1042,19 @@ def test_search_inventory_is_case_insensitive() -> None:
 
 
 def test_project_folds_decided_writes_without_appending_them(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
     """`project` performs the preview's arithmetic: the same fold, over
     records `decide_change` returned but nothing appended, onto a copy of the
     current inventory, leaving the on-disk state unchanged."""
-    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
-    config.add_location(data_dir, key, osuser, models.Location(id="fridge", name="Fridge"))
-    config.add_product(data_dir, key, osuser, models.Product(id="milk", name="Milk", unit="l"))
+    config.add_location(data_dir, key, writer_id, models.Location(id="pantry", name="Pantry"))
+    config.add_location(data_dir, key, writer_id, models.Location(id="fridge", name="Fridge"))
+    config.add_product(data_dir, key, writer_id, models.Product(id="milk", name="Milk", unit="l"))
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
-        _change_obj("c1", T0, osuser, "purchase", "milk", "5", "l", to_location="pantry"),
+        writer.log_stream_id(writer_id),
+        _change_obj("c1", T0, writer_id, "purchase", "milk", "5", "l", to_location="pantry"),
     )
     inventory = ledger.build_inventory(data_dir, key)
     cfg = config.build_config(data_dir, key)
@@ -1062,7 +1066,7 @@ def test_project_folds_decided_writes_without_appending_them(
         unit="l",
         from_location="pantry",
         to_location="fridge",
-        actor=osuser,
+        actor=writer_id,
         occurred_at=T0 + timedelta(minutes=1),
         inventory=inventory,
         cfg=cfg,
@@ -1080,19 +1084,21 @@ def test_project_folds_decided_writes_without_appending_them(
 
 
 def test_project_includes_the_shortfall_correction_a_subtraction_would_miss(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
     """Consuming more than the log records emits §3.5's reconciling `Counted`
     alongside the `Consumed`. Folding both gives zero; subtracting the amount
     from the holding gives -2, which is why `render.print_plan` never computed
     an "after" by subtraction."""
-    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
-    config.add_product(data_dir, key, osuser, models.Product(id="flour", name="Flour", unit="kg"))
+    config.add_location(data_dir, key, writer_id, models.Location(id="pantry", name="Pantry"))
+    config.add_product(
+        data_dir, key, writer_id, models.Product(id="flour", name="Flour", unit="kg")
+    )
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
-        _change_obj("c1", T0, osuser, "purchase", "flour", "3", "kg", to_location="pantry"),
+        writer.log_stream_id(writer_id),
+        _change_obj("c1", T0, writer_id, "purchase", "flour", "3", "kg", to_location="pantry"),
     )
     inventory = ledger.build_inventory(data_dir, key)
     cfg = config.build_config(data_dir, key)
@@ -1104,7 +1110,7 @@ def test_project_includes_the_shortfall_correction_a_subtraction_would_miss(
         unit="kg",
         from_location="pantry",
         to_location=None,
-        actor=osuser,
+        actor=writer_id,
         occurred_at=T0 + timedelta(minutes=1),
         inventory=inventory,
         cfg=cfg,
@@ -1119,14 +1125,14 @@ def test_project_includes_the_shortfall_correction_a_subtraction_would_miss(
 
 
 def test_project_over_no_writes_returns_the_same_holdings(
-    data_dir: Path, osuser: str, key: bytes
+    data_dir: Path, writer_id: str, key: bytes
 ) -> None:
-    config.add_location(data_dir, key, osuser, models.Location(id="pantry", name="Pantry"))
+    config.add_location(data_dir, key, writer_id, models.Location(id="pantry", name="Pantry"))
     store.append(
         data_dir,
         key,
-        f"log:{osuser}",
-        _change_obj("c1", T0, osuser, "purchase", "milk", "5", "l", to_location="pantry"),
+        writer.log_stream_id(writer_id),
+        _change_obj("c1", T0, writer_id, "purchase", "milk", "5", "l", to_location="pantry"),
     )
     inventory = ledger.build_inventory(data_dir, key)
     cfg = config.build_config(data_dir, key)
