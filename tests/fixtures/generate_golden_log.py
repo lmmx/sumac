@@ -16,17 +16,17 @@ test_model_properties.py's expected holdings/anomalies afterward.
 
 from __future__ import annotations
 
+import os
 import shutil
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from unittest.mock import patch
 from uuid import uuid4
 
-from sumac import config, decide, events, ledger, models, store
+from sumac import config, decide, events, ledger, models, store, writer
 
 GOLDEN_KEY = bytes(range(32))
-ACTOR = "alice"
+ACTOR = "alice-mac"  # writer id; actor is the writer id (§5)
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 
 
@@ -85,113 +85,107 @@ def main() -> None:
         shutil.rmtree(data_dir)
     data_dir.mkdir(parents=True)
 
-    with patch("getpass.getuser", return_value=ACTOR):
-        config.add_location(
-            data_dir, GOLDEN_KEY, ACTOR, models.Location(id="pantry", name="Pantry")
-        )
-        config.add_location(
-            data_dir, GOLDEN_KEY, ACTOR, models.Location(id="fridge", name="Fridge")
-        )
-        config.add_product(
-            data_dir, GOLDEN_KEY, ACTOR, models.Product(id="milk", name="Milk", unit="l")
-        )
-        config.add_product(
-            data_dir, GOLDEN_KEY, ACTOR, models.Product(id="flour", name="Flour", unit="kg")
-        )
+    os.environ[writer.WRITER_ID_ENV] = ACTOR
+    config.add_location(data_dir, GOLDEN_KEY, ACTOR, models.Location(id="pantry", name="Pantry"))
+    config.add_location(data_dir, GOLDEN_KEY, ACTOR, models.Location(id="fridge", name="Fridge"))
+    config.add_product(
+        data_dir, GOLDEN_KEY, ACTOR, models.Product(id="milk", name="Milk", unit="l")
+    )
+    config.add_product(
+        data_dir, GOLDEN_KEY, ACTOR, models.Product(id="flour", name="Flour", unit="kg")
+    )
 
-        # v1: every ChangeKind (both correction shapes) + a non-empty and an
-        # empty snapshot. Distinct microseconds so ordering is deterministic.
-        v1_records = [
-            _v1_change("v1-purchase", T0, "purchase", "milk", "2", "l", to="pantry"),
-            _v1_change("v1-consumption", T0, "consumption", "milk", "1", "l", frm="pantry"),
-            _v1_change("v1-waste", T0, "waste", "milk", "1", "l", frm="pantry"),
-            _v1_change("v1-discovery", T0, "discovery", "flour", "1", "kg", to="pantry"),
-            _v1_change("v1-correction-to", T0, "correction", "flour", "1", "kg", to="pantry"),
-            _v1_change("v1-correction-from", T0, "correction", "flour", "1", "kg", frm="pantry"),
-            _v1_change(
-                "v1-movement", T0, "movement", "flour", "1", "kg", frm="pantry", to="fridge"
-            ),
-            _v1_snapshot("v1-snapshot", T0, "fridge", [("milk", "3", "l")]),
-            _v1_snapshot("v1-snapshot-empty", T0, "pantry", []),
-        ]
-        for i, obj in enumerate(v1_records):
-            obj["ts"] = T0.replace(microsecond=i).isoformat()
-            store.append(data_dir, GOLDEN_KEY, f"log:{ACTOR}", obj)
+    # v1: every ChangeKind (both correction shapes) + a non-empty and an
+    # empty snapshot. Distinct microseconds so ordering is deterministic.
+    v1_records = [
+        _v1_change("v1-purchase", T0, "purchase", "milk", "2", "l", to="pantry"),
+        _v1_change("v1-consumption", T0, "consumption", "milk", "1", "l", frm="pantry"),
+        _v1_change("v1-waste", T0, "waste", "milk", "1", "l", frm="pantry"),
+        _v1_change("v1-discovery", T0, "discovery", "flour", "1", "kg", to="pantry"),
+        _v1_change("v1-correction-to", T0, "correction", "flour", "1", "kg", to="pantry"),
+        _v1_change("v1-correction-from", T0, "correction", "flour", "1", "kg", frm="pantry"),
+        _v1_change("v1-movement", T0, "movement", "flour", "1", "kg", frm="pantry", to="fridge"),
+        _v1_snapshot("v1-snapshot", T0, "fridge", [("milk", "3", "l")]),
+        _v1_snapshot("v1-snapshot-empty", T0, "pantry", []),
+    ]
+    for i, obj in enumerate(v1_records):
+        obj["ts"] = T0.replace(microsecond=i).isoformat()
+        store.append(data_dir, GOLDEN_KEY, writer.log_stream_id(ACTOR), obj)
 
-        cfg = config.build_config(data_dir, GOLDEN_KEY)
+    cfg = config.build_config(data_dir, GOLDEN_KEY)
 
-        # v2: every event type via the real writer.
-        inventory = ledger.build_inventory(data_dir, GOLDEN_KEY)
-        writes, _messages = decide.decide_change(
-            kind=models.ChangeKind.PURCHASE,
-            product_id="milk",
-            amount=Decimal("5"),
-            unit="l",
-            from_location=None,
-            to_location="fridge",
-            actor=ACTOR,
-            occurred_at=T0.replace(hour=1),
-            inventory=inventory,
-            cfg=cfg,
-        )
-        for w in writes:
-            store.append(data_dir, GOLDEN_KEY, w.stream, w.obj)
+    # v2: every event type via the real writer.
+    inventory = ledger.build_inventory(data_dir, GOLDEN_KEY)
+    writes, _messages = decide.decide_change(
+        kind=models.ChangeKind.PURCHASE,
+        product_id="milk",
+        amount=Decimal("5"),
+        unit="l",
+        from_location=None,
+        to_location="fridge",
+        actor=ACTOR,
+        occurred_at=T0.replace(hour=1),
+        inventory=inventory,
+        cfg=cfg,
+    )
+    for w in writes:
+        store.append(data_dir, GOLDEN_KEY, w.stream, w.obj)
 
-        inventory = ledger.build_inventory(data_dir, GOLDEN_KEY)
-        writes, _messages = decide.decide_change(
-            kind=models.ChangeKind.MOVEMENT,
-            product_id="milk",
-            amount=Decimal("2"),
-            unit="l",
-            from_location="fridge",
-            to_location="pantry",
-            actor=ACTOR,
-            occurred_at=T0.replace(hour=2),
-            inventory=inventory,
-            cfg=cfg,
-        )
-        for w in writes:
-            store.append(data_dir, GOLDEN_KEY, w.stream, w.obj)
+    inventory = ledger.build_inventory(data_dir, GOLDEN_KEY)
+    writes, _messages = decide.decide_change(
+        kind=models.ChangeKind.MOVEMENT,
+        product_id="milk",
+        amount=Decimal("2"),
+        unit="l",
+        from_location="fridge",
+        to_location="pantry",
+        actor=ACTOR,
+        occurred_at=T0.replace(hour=2),
+        inventory=inventory,
+        cfg=cfg,
+    )
+    for w in writes:
+        store.append(data_dir, GOLDEN_KEY, w.stream, w.obj)
 
-        # Insufficient-stock consumption: forces a Counted write alongside
-        # the Consumed write, covering Counted in the same pass.
-        inventory = ledger.build_inventory(data_dir, GOLDEN_KEY)
-        writes, _messages = decide.decide_change(
-            kind=models.ChangeKind.CONSUMPTION,
-            product_id="flour",
-            amount=Decimal("99"),
-            unit="kg",
-            from_location="fridge",
-            to_location=None,
-            actor=ACTOR,
-            occurred_at=T0.replace(hour=3),
-            inventory=inventory,
-            cfg=cfg,
-        )
-        for w in writes:
-            store.append(data_dir, GOLDEN_KEY, w.stream, w.obj)
+    # Insufficient-stock consumption: forces a Counted write alongside
+    # the Consumed write, covering Counted in the same pass.
+    inventory = ledger.build_inventory(data_dir, GOLDEN_KEY)
+    writes, _messages = decide.decide_change(
+        kind=models.ChangeKind.CONSUMPTION,
+        product_id="flour",
+        amount=Decimal("99"),
+        unit="kg",
+        from_location="fridge",
+        to_location=None,
+        actor=ACTOR,
+        occurred_at=T0.replace(hour=3),
+        inventory=inventory,
+        cfg=cfg,
+    )
+    for w in writes:
+        store.append(data_dir, GOLDEN_KEY, w.stream, w.obj)
 
-        # v2 snapshot, including the empty-entries case.
-        snap_obj = decide.serialize_event(
-            events.Snapshot(location_id="pantry", entries=()),
-            actor=ACTOR,
-            occurred_at=T0.replace(hour=4),
-            cmd_id=str(uuid4()),
-        )
-        store.append(data_dir, GOLDEN_KEY, f"log:{ACTOR}", snap_obj)
+    # v2 snapshot, including the empty-entries case.
+    snap_obj = decide.serialize_event(
+        events.Snapshot(location_id="pantry", entries=()),
+        actor=ACTOR,
+        occurred_at=T0.replace(hour=4),
+        cmd_id=str(uuid4()),
+    )
+    store.append(data_dir, GOLDEN_KEY, writer.log_stream_id(ACTOR), snap_obj)
 
-        # Correction: cancels the v1 waste record above (cross-schema-version
-        # supersede — v1 and v2 records share the same id namespace, no
-        # special-casing needed).
-        records = ledger.load_all_records(data_dir, GOLDEN_KEY)
-        write = decide.decide_correct(
-            target_id="v1-waste",
-            reason="golden corpus: exercise Correction/supersedes",
-            actor=ACTOR,
-            occurred_at=T0.replace(hour=5),
-            records=records,
-        )
-        store.append(data_dir, GOLDEN_KEY, write.stream, write.obj)
+    # Correction: cancels the v1 waste record above (cross-schema-version
+    # supersede — v1 and v2 records share the same id namespace, no
+    # special-casing needed).
+    records = ledger.load_all_records(data_dir, GOLDEN_KEY)
+    write = decide.decide_correct(
+        target_id="v1-waste",
+        reason="golden corpus: exercise Correction/supersedes",
+        actor=ACTOR,
+        occurred_at=T0.replace(hour=5),
+        records=records,
+    )
+    store.append(data_dir, GOLDEN_KEY, write.stream, write.obj)
 
     print("generated", data_dir)
 

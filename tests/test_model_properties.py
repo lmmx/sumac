@@ -18,11 +18,12 @@ from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, invariant, rule
 
-from sumac import config, decide, events, ledger, upcast
+from sumac import config, decide, events, ledger, upcast, writer
 from sumac.errors import Rejected
 from sumac.models import ChangeKind, Location, Product, Quantity
 from sumac.schemas import RecordSchema
@@ -35,10 +36,14 @@ GOLDEN_DATA_DIR = Path(__file__).parent / "fixtures" / "golden_log"
 GOLDEN_KEY = bytes(range(32))
 
 
-def test_golden_log_folds_to_expected_state() -> None:
+def test_golden_log_folds_to_expected_state(monkeypatch: pytest.MonkeyPatch) -> None:
     """Regenerating tests/fixtures/golden_log/ (generate_golden_log.py) changes
     its ciphertext bytes but should never change this — if it does, either
-    the generator or the fold changed behavior; check which was intended."""
+    the generator or the fold changed behavior; check which was intended.
+
+    The corpus is read in filesystem mode (§7): `SUMAC_WRITER_ID` must be set
+    to the writer id the generator sealed it under."""
+    monkeypatch.setenv(writer.WRITER_ID_ENV, "alice-mac")
     inv = ledger.build_inventory(GOLDEN_DATA_DIR, GOLDEN_KEY)
     assert inv.anomalies == ()
     assert inv.by_location == {
@@ -254,7 +259,7 @@ class PantryMachine(RuleBasedStateMachine):
             return  # rejection is a legal outcome (e.g. noop_move)
 
         for w in writes:
-            if w.stream == "config":  # not expected here (both products pre-registered)
+            if w.stream.startswith("config:"):  # not expected here (both products pre-registered)
                 continue
             record = RecordSchema.model_validate(w.obj).to_domain()
             payload = record.payload

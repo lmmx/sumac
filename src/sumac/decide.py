@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
-from sumac import SCHEMA_VERSION, config, events
+from sumac import SCHEMA_VERSION, config, events, writer
 from sumac.errors import Rejected
 from sumac.ledger import Inventory
 from sumac.models import ChangeKind, Quantity, Record
@@ -50,8 +50,8 @@ _ENDPOINT_SHAPE: dict[ChangeKind, tuple[bool, bool]] = {
 
 @dataclass(frozen=True, slots=True)
 class Write:
-    """A single write `store.append` can take verbatim: `stream` is a
-    stream_id (`"config"` or `"log:<actor>"`), `obj` the record body."""
+    """A single write `store.append` can take verbatim: `stream` is a stream_id
+    (`writer.config_stream_id` or `writer.log_stream_id`), `obj` the record body."""
 
     stream: str
     obj: dict
@@ -209,7 +209,7 @@ def _resolve_product(
     # so nothing was converted — `basis` stays `None`, same as the
     # unit-already-canonical case in `Config.convert_with_basis`.
     registration = Write(
-        "config",
+        writer.config_stream_id(actor),
         {
             "schema_version": SCHEMA_VERSION,
             "ts": occurred_at.isoformat(),
@@ -488,7 +488,7 @@ def _reconcile_shortfall(
     # inventing new envelope machinery for it.
     counted_at = occurred_at - timedelta(microseconds=1)
     write = Write(
-        f"log:{actor}",
+        writer.log_stream_id(actor),
         serialize_event(counted, actor=actor, occurred_at=counted_at, cmd_id=cmd_id),
     )
     message = f"note: {frm_side} held {held_amount} {unit}, recorded {amount} {unit} — adjusted"
@@ -543,7 +543,7 @@ def decide_change(
 
     writes.append(
         Write(
-            f"log:{actor}",
+            writer.log_stream_id(actor),
             serialize_event(event, actor=actor, occurred_at=occurred_at, cmd_id=cmd_id),
         )
     )
@@ -580,7 +580,7 @@ def decide_correct(
         raise Rejected("supersede_self", value=target_id)
 
     return Write(
-        f"log:{actor}",
+        writer.log_stream_id(actor),
         serialize_event(
             events.Correction(reason=reason),
             actor=actor,

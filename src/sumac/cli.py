@@ -23,6 +23,7 @@ from sumac import (
     config,
     decide,
     events,
+    gitrepo,
     ledger,
     models,
     paths,
@@ -31,14 +32,17 @@ from sumac import (
     render,
     review,
     store,
+    writer,
 )
 from sumac import vault as sumac_vault
 from sumac.errors import (
+    GitError,
     Rejected,
     RetireNonemptyError,
     SumacError,
     VaultExistsError,
     VaultNotFoundError,
+    WriterBranchExistsError,
 )
 
 if TYPE_CHECKING:
@@ -128,18 +132,92 @@ def _parse_snapshot_entry(spec: str) -> events.SnapshotEntry:
 
 
 @app.command()
-def init(data_dir: DataDirOption = Path("data")) -> None:
-    """Create a new vault in DATA_DIR."""
+def init(
+    data_dir: DataDirOption = Path("data"),
+    writer_id: Annotated[
+        str | None,
+        typer.Option("--writer", help="Writer id; defaults to user@host (§3)."),
+    ] = None,
+) -> None:
+    """Create a new vault in DATA_DIR, on its own `writer/<id>` branch (§2).
+
+    Once per household; everyone else runs `init-writer` against a clone."""
     vpath = paths.vault_path(data_dir)
     if vpath.exists():
         raise VaultExistsError(f"vault already exists at {vpath}")
+    wid = writer.slug(writer_id) if writer_id else writer.default_id()
+    branch_name = writer.branch(wid)
+
     passphrase = resolve_passphrase()
     vault = sumac_vault.create(passphrase)
     data_dir.mkdir(parents=True, exist_ok=True)
     doc = {"format_version": FORMAT_VERSION, **vault.to_dict()}
     vpath.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
-    paths.log_dir(data_dir).mkdir(parents=True, exist_ok=True)
-    render.print_success(f"Initialized sumac vault at {data_dir}")
+
+    repo_root = data_dir.parent
+    if gitrepo.is_repo(repo_root):
+        gitrepo.orphan_checkout(repo_root, branch_name)
+    else:
+        gitrepo.init_repo(repo_root, initial_branch=branch_name)
+
+    rel_data = gitrepo.rel_to_toplevel(data_dir)
+    gitignore_path = repo_root / ".gitignore"
+    ignore_line = (rel_data / queue.QUEUE_FILENAME).as_posix()
+    existing = gitignore_path.read_text(encoding="utf-8") if gitignore_path.exists() else ""
+    if ignore_line not in existing.splitlines():
+        prefix = existing if existing.endswith("\n") or not existing else existing + "\n"
+        gitignore_path.write_text(f"{prefix}{ignore_line}\n", encoding="utf-8")
+
+    gitrepo.commit_paths(
+        repo_root,
+        [(rel_data / paths.VAULT_FILENAME).as_posix(), ".gitignore"],
+        "sumac: root",
+    )
+    render.print_success(f"Initialized sumac vault at {data_dir} on {branch_name}")
+
+
+@app.command(name="init-writer")
+def init_writer(
+    data_dir: DataDirOption = Path("data"),
+    writer_id: Annotated[
+        str | None,
+        typer.Option("--writer", help="Writer id; defaults to user@host (§3)."),
+    ] = None,
+) -> None:
+    """Claim your own `writer/<id>` branch in a household repo you just cloned.
+
+    Run this before writing anything on a new machine: `git clone` leaves HEAD on
+    whichever writer's branch the remote's origin/HEAD names (§3, §5)."""
+    repo_root = data_dir.parent
+    wid = writer.slug(writer_id) if writer_id else writer.default_id()
+    branch_name = writer.branch(wid)
+
+    refs = gitrepo.list_writer_refs(repo_root)
+    if wid in refs:
+        raise WriterBranchExistsError(f"{branch_name} already exists")
+    if not refs:
+        raise GitError(f"no writer/* refs found in {repo_root}; nothing to join")
+
+    root = gitrepo.root_commit(repo_root, next(iter(refs.values())))
+    previous = gitrepo.current_branch(repo_root)
+    gitrepo.create_branch_from(repo_root, branch_name, root, checkout=True)
+    if previous:
+        render.print_success(f"Moved off {previous}, onto {branch_name}")
+    else:
+        render.print_success(f"Checked out {branch_name}")
+
+
+@app.command()
+def sync(data_dir: DataDirOption = Path("data")) -> None:
+    """Fetch other writers' branches; never merge, never push (§2)."""
+    repo_root = data_dir.parent
+    gitrepo.fetch_writers(repo_root)
+    refs = gitrepo.list_writer_refs(repo_root)
+    if not refs:
+        render.print_warning("no writer branches found")
+        return
+    for wid in sorted(refs):
+        render.console.print(f"  {wid}")
 
 
 @config_app.command("show")
@@ -173,7 +251,8 @@ def config_add_location(
     key = _key(data_dir)
     loc_id = id or _slugify(name)
     location = models.Location(id=loc_id, name=name, parent_id=parent)
-    config.add_location(data_dir, key, paths.current_user(), location)
+    config.add_location(data_dir, key, writer.current_id(data_dir), location)
+    store.commit_records(data_dir, 1)
     render.print_success(f"Added location {loc_id!r}")
 
 
@@ -191,7 +270,8 @@ def config_retire_location(
     if holdings:
         listing = ", ".join(f"{q.amount} {q.unit} {p}" for p, q in sorted(holdings.items()))
         raise RetireNonemptyError(f"cannot retire {id!r}: still holds {listing}")
-    config.retire_location(data_dir, key, paths.current_user(), id)
+    config.retire_location(data_dir, key, writer.current_id(data_dir), id)
+    store.commit_records(data_dir, 1)
     render.print_success(f"Retired location {id!r}")
 
 
@@ -207,7 +287,8 @@ def config_add_product(
     key = _key(data_dir)
     prod_id = id or _slugify(name)
     product = models.Product(id=prod_id, name=name, unit=unit, category=category)
-    config.add_product(data_dir, key, paths.current_user(), product)
+    config.add_product(data_dir, key, writer.current_id(data_dir), product)
+    store.commit_records(data_dir, 1)
     render.print_success(f"Added product {prod_id!r}")
 
 
@@ -219,7 +300,8 @@ def config_retire_product(
     """Retire a product. Never deletes — historical records naming it still
     resolve. Unlike a location, permitted at any time regardless of stock."""
     key = _key(data_dir)
-    config.retire_product(data_dir, key, paths.current_user(), id)
+    config.retire_product(data_dir, key, writer.current_id(data_dir), id)
+    store.commit_records(data_dir, 1)
     render.print_success(f"Retired product {id!r}")
 
 
@@ -255,11 +337,12 @@ def config_add_array(
 ) -> None:
     """Create a numbered row of sub-locations under --parent, e.g. 4 fridge shelves."""
     key = _key(data_dir)
-    actor = paths.current_user()
+    actor = writer.current_id(data_dir)
     prefix = _location_id_prefix(parent, name, id_prefix)
     for i in range(start, start + count):
         location = models.Location(id=f"{prefix}-{i}", name=f"{name} {i}", parent_id=parent)
         config.add_location(data_dir, key, actor, location)
+    store.commit_records(data_dir, count)
     render.print_success(f"Added {count} locations {prefix}-{start}..{prefix}-{start + count - 1}")
 
 
@@ -274,7 +357,7 @@ def config_add_grid(
 ) -> None:
     """Create a rows x cols grid of sub-locations under --parent, e.g. a pantry shelf grid."""
     key = _key(data_dir)
-    actor = paths.current_user()
+    actor = writer.current_id(data_dir)
     prefix = _location_id_prefix(parent, name, id_prefix)
     count = 0
     for r in range(1, rows + 1):
@@ -284,6 +367,7 @@ def config_add_grid(
             )
             config.add_location(data_dir, key, actor, location)
             count += 1
+    store.commit_records(data_dir, count)
     render.print_success(f"Added {count} locations {prefix}-r1c1..{prefix}-r{rows}c{cols}")
 
 
@@ -300,7 +384,7 @@ def add(
     """Record an inventory change: purchase, consumption, waste, discovery,
     correction, or movement between locations."""
     key = _key(data_dir)
-    actor = paths.current_user()
+    actor = writer.current_id(data_dir)
     cfg = config.build_config(data_dir, key)
     inventory = ledger.build_inventory(data_dir, key)
     writes, messages = decide.decide_change(
@@ -319,6 +403,7 @@ def add(
         render.print_warning(message)
     for w in writes:
         store.append(data_dir, key, w.stream, w.obj)
+    store.commit_records(data_dir, len(writes))
     render.print_success(f"Recorded {kind.value} of {amount} {unit} {product_id}")
 
 
@@ -332,13 +417,14 @@ def snapshot(
 ) -> None:
     """Record the full observed state of a location, resetting its products."""
     key = _key(data_dir)
-    actor = paths.current_user()
+    actor = writer.current_id(data_dir)
     parsed = tuple(_parse_snapshot_entry(e) for e in (entries or []))
     event = events.Snapshot(location_id=location_id, entries=parsed)
     obj = decide.serialize_event(
         event, actor=actor, occurred_at=datetime.now(UTC), cmd_id=str(uuid4())
     )
     store.append(data_dir, key, f"log:{actor}", obj)
+    store.commit_records(data_dir, 1)
     render.print_success(f"Recorded snapshot of {location_id!r} ({len(parsed)} entries)")
 
 
@@ -353,7 +439,7 @@ def correct(
     excluded from the fold (§3.6). To replace rather than just cancel, run
     this and then `sumac add`/`sumac snapshot` with the corrected values."""
     key = _key(data_dir)
-    actor = paths.current_user()
+    actor = writer.current_id(data_dir)
     records = ledger.load_all_records(data_dir, key)
     write = decide.decide_correct(
         target_id=record_id,
@@ -363,6 +449,7 @@ def correct(
         records=records,
     )
     store.append(data_dir, key, write.stream, write.obj)
+    store.commit_records(data_dir, 1)
     render.print_success(f"Corrected {record_id!r}: {reason}")
 
 
@@ -430,7 +517,11 @@ def log_cmd(data_dir: DataDirOption = Path("data")) -> None:
 
 @app.command()
 def verify(data_dir: DataDirOption = Path("data")) -> None:
-    """Re-open every line of every log under its own AAD; report failures."""
+    """Re-authenticate every writer's lines and check every branch's history.
+
+    Each line is re-opened under its own AAD, each record's `actor` checked against
+    the branch it lives on, and each branch's commits checked to be append-only
+    (§4). Reports failures; exits non-zero on any."""
     key = _key(data_dir)
     result = ledger.verify_all(data_dir, key)
     render.print_verify(result)
@@ -952,7 +1043,7 @@ def _apply_edit(
             unit=edited.unit,
             from_location=edited.from_location,
             to_location=edited.to_location,
-            actor=paths.current_user(),
+            actor=writer.current_id(data_dir),
             occurred_at=datetime.now(UTC),
             inventory=inventory,
             cfg=cfg,

@@ -58,7 +58,7 @@ from typing import Protocol, cast
 
 import mistralrs
 
-from sumac import config, decide, ledger, paths, render, store
+from sumac import config, decide, ledger, render, store, writer
 from sumac.errors import Rejected
 from sumac.models import ChangeKind
 
@@ -1279,7 +1279,7 @@ class AgentRunner:
                 unit=unit,
                 from_location=from_location,
                 to_location=to_location,
-                actor=paths.current_user(),
+                actor=writer.current_id(self._data_dir),
                 occurred_at=datetime.now(UTC),
                 inventory=inventory,
                 cfg=cfg,
@@ -1707,6 +1707,7 @@ class AgentRunner:
         react to, and should propagate the same way `cli.py`'s `add`
         command already lets it."""
         summaries: list[str] = []
+        total_records = 0
         for pw in plan.writes:
             cfg = config.build_config(self._data_dir, self._key)
             inventory = ledger.build_inventory(self._data_dir, self._key)
@@ -1717,7 +1718,7 @@ class AgentRunner:
                 unit=pw.unit,
                 from_location=pw.from_location,
                 to_location=pw.to_location,
-                actor=paths.current_user(),
+                actor=writer.current_id(self._data_dir),
                 occurred_at=datetime.now(UTC),
                 inventory=inventory,
                 cfg=cfg,
@@ -1726,5 +1727,7 @@ class AgentRunner:
                 render.print_warning(message)
             for w in writes:
                 store.append(self._data_dir, self._key, w.stream, w.obj)
+            total_records += len(writes)
             summaries.append(_write_summary(pw))
+        store.commit_records(self._data_dir, total_records)
         return summaries

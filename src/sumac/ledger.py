@@ -17,6 +17,7 @@ via `Anomaly`.
 
 from __future__ import annotations
 
+import os
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -27,7 +28,7 @@ from pathlib import Path
 from pydantic import ValidationError
 from sealedlog.errors import SealError
 
-from sumac import SCHEMA_VERSION, config, events, paths, store, upcast
+from sumac import SCHEMA_VERSION, config, events, gitrepo, paths, sources, store, upcast, writer
 from sumac.errors import SumacError
 from sumac.models import Anomaly, InventoryChange, InventorySnapshot, Location, Quantity, Record
 from sumac.schemas import RecordSchema
@@ -35,7 +36,7 @@ from sumac.schemas import RecordSchema
 _READ_TIME_ERRORS = (SumacError, SealError, ValidationError)
 
 
-def _check_seq(actor: str, objs: list[dict]) -> list[Anomaly]:
+def _check_seq(writer_id: str, objs: list[dict]) -> list[Anomaly]:
     """Doctor-only structural diagnostics (docs/journal §3.7): a gap in one
     segment's `seq` sequence means truncation (a line went missing), a
     repeat means a bad merge. Checked against the range starting at 0 (not
@@ -50,12 +51,12 @@ def _check_seq(actor: str, objs: list[dict]) -> list[Anomaly]:
     for obj, s in zip(objs, seqs, strict=True):
         record_id = obj.get("id") if isinstance(obj, dict) else None
         if s in seen:
-            anomalies.append(Anomaly(record_id, "seq_duplicate", f"actor={actor} seq={s}"))
+            anomalies.append(Anomaly(record_id, "seq_duplicate", f"writer={writer_id} seq={s}"))
         seen.add(s)
     if seqs:
         missing = sorted(set(range(0, max(seqs) + 1)) - seen)
         anomalies.extend(
-            Anomaly(None, "seq_gap", f"actor={actor} missing seq={m}") for m in missing
+            Anomaly(None, "seq_gap", f"writer={writer_id} missing seq={m}") for m in missing
         )
     return anomalies
 
@@ -76,12 +77,13 @@ def _load(data_dir: Path, key: bytes) -> _LoadResult:
     anomalies: list[Anomaly] = []
     parsed: list[Record] = []
 
-    for log_path in paths.all_log_paths(data_dir):
-        stream_id = f"log:{log_path.stem}"
-        objs, failures = store.verify_stream(log_path, key, stream_id)
+    for source in sources.writer_sources(data_dir):
+        stream_id = writer.log_stream_id(source.writer_id)
+        lines = source.log_text().splitlines()
+        objs, failures = store.verify_lines(lines, key, stream_id, source.label)
         for f in failures:
-            anomalies.append(Anomaly(None, "line_failure", f"{f.path}:{f.lineno}: {f.error}"))
-        anomalies.extend(_check_seq(log_path.stem, objs))
+            anomalies.append(Anomaly(None, "line_failure", f"{f.source}:{f.lineno}: {f.error}"))
+        anomalies.extend(_check_seq(source.writer_id, objs))
         for obj in objs:
             record_id = obj.get("id") if isinstance(obj, dict) else None
             version = obj.get("schema_version") if isinstance(obj, dict) else None
@@ -523,31 +525,134 @@ def build_inventory(data_dir: Path, key: bytes, as_of: datetime | None = None) -
 
 
 @dataclass(frozen=True, slots=True)
+class HistoryViolation:
+    """One place the §4 invariant fails: `from_commit`'s decoded record
+    sequence is not a prefix of `to_commit`'s (`to_commit` is `"worktree"`
+    for the checked-out writer's uncommitted state)."""
+
+    writer_id: str
+    stream_id: str
+    from_commit: str
+    to_commit: str
+    reason: str
+
+
+def _is_prefix(older: list[dict], newer: list[dict]) -> bool:
+    """§4: an exact, order-preserving prefix over *decoded* records."""
+    return len(older) <= len(newer) and older == newer[: len(older)]
+
+
+def _stream_history(
+    repo_root: Path, ref: str, rel: str, writer_id: str, stream_id: str, key: bytes
+) -> list[tuple[str, list[dict]]]:
+    commits = gitrepo.commits_touching(repo_root, ref, [rel])
+    if not commits:
+        return []
+    specs = [f"{c}:{rel}" for c in commits]
+    blobs = gitrepo.read_blobs_batch(repo_root, specs)
+    states = []
+    for c in commits:
+        text = blobs.get(f"{c}:{rel}", "")
+        objs, _failures = store.verify_lines(text.splitlines(), key, stream_id, f"{writer_id}@{c}")
+        states.append((c, objs))
+    return states
+
+
+def verify_history(data_dir: Path, key: bytes) -> list[HistoryViolation]:
+    """§4's append-only invariant, re-derived from git history every run rather
+    than a persisted checkpoint. Filesystem mode (no writer branches) has no
+    history to walk."""
+    if os.environ.get(writer.WRITER_ID_ENV) or not gitrepo.is_repo(data_dir):
+        return []
+
+    repo_root = gitrepo.toplevel(data_dir)
+    assert repo_root is not None
+    rel = gitrepo.rel_to_toplevel(data_dir)
+    log_rel = (rel / paths.LOG_FILENAME).as_posix()
+    config_rel = (rel / paths.CONFIG_FILENAME).as_posix()
+    current_writer_id = writer.id_from_branch(gitrepo.current_branch(data_dir) or "")
+
+    violations: list[HistoryViolation] = []
+    for writer_id, ref in gitrepo.list_writer_refs(data_dir).items():
+        for rel_path, stream_id_fn, worktree_path in (
+            (log_rel, writer.log_stream_id, paths.log_path(data_dir)),
+            (config_rel, writer.config_stream_id, paths.config_path(data_dir)),
+        ):
+            stream_id = stream_id_fn(writer_id)
+            states = _stream_history(repo_root, ref, rel_path, writer_id, stream_id, key)
+            for (older_c, older_objs), (newer_c, newer_objs) in zip(
+                states, states[1:], strict=False
+            ):
+                if not _is_prefix(older_objs, newer_objs):
+                    violations.append(
+                        HistoryViolation(
+                            writer_id=writer_id,
+                            stream_id=stream_id,
+                            from_commit=older_c[:8],
+                            to_commit=newer_c[:8],
+                            reason="decoded records are not an append-only prefix",
+                        )
+                    )
+
+            if writer_id != current_writer_id or not states:
+                continue
+            worktree_text = (
+                worktree_path.read_text(encoding="utf-8") if worktree_path.exists() else ""
+            )
+            worktree_objs, _failures = store.verify_lines(
+                worktree_text.splitlines(), key, stream_id, f"{writer_id}@worktree"
+            )
+            last_c, last_objs = states[-1]
+            if not _is_prefix(last_objs, worktree_objs):
+                violations.append(
+                    HistoryViolation(
+                        writer_id=writer_id,
+                        stream_id=stream_id,
+                        from_commit=last_c[:8],
+                        to_commit="worktree",
+                        reason="uncommitted worktree state is not an append-only continuation",
+                    )
+                )
+    return violations
+
+
+@dataclass(frozen=True, slots=True)
 class VerifyResult:
     ok: bool
     line_failures: list[store.LineFailure]
-    actor_mismatches: list[tuple[Path, str, str]]
+    actor_mismatches: list[tuple[str, str, str]]
+    history_violations: list[HistoryViolation]
 
 
 def verify_all(data_dir: Path, key: bytes) -> VerifyResult:
     line_failures: list[store.LineFailure] = []
-    actor_mismatches: list[tuple[Path, str, str]] = []
+    actor_mismatches: list[tuple[str, str, str]] = []
 
-    _, cfg_failures = store.verify_stream(paths.config_path(data_dir), key, store.CONFIG_STREAM_ID)
-    line_failures.extend(cfg_failures)
+    for source in sources.writer_sources(data_dir):
+        config_stream_id = writer.config_stream_id(source.writer_id)
+        _, cfg_failures = store.verify_lines(
+            source.config_text().splitlines(), key, config_stream_id, source.label
+        )
+        line_failures.extend(cfg_failures)
 
-    for log_path in paths.all_log_paths(data_dir):
-        osuser = log_path.stem
-        stream_id = f"log:{osuser}"
-        objs, failures = store.verify_stream(log_path, key, stream_id)
+        log_stream_id = writer.log_stream_id(source.writer_id)
+        objs, failures = store.verify_lines(
+            source.log_text().splitlines(), key, log_stream_id, source.label
+        )
         line_failures.extend(failures)
         for obj in objs:
             actor = obj.get("actor")
-            if actor is not None and actor != osuser:
-                actor_mismatches.append((log_path, actor, osuser))
+            if actor is not None and actor != source.writer_id:
+                actor_mismatches.append((source.label, actor, source.writer_id))
 
-    ok = not line_failures and not actor_mismatches
-    return VerifyResult(ok=ok, line_failures=line_failures, actor_mismatches=actor_mismatches)
+    history_violations = verify_history(data_dir, key)
+    ok = not line_failures and not actor_mismatches and not history_violations
+    return VerifyResult(
+        ok=ok,
+        line_failures=line_failures,
+        actor_mismatches=actor_mismatches,
+        history_violations=history_violations,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -561,7 +666,10 @@ def diagnose(data_dir: Path, key: bytes) -> DoctorReport:
     line count for context ("N anomalies out of M lines")."""
     inventory = build_inventory(data_dir, key)
     total_lines = 0
-    for log_path in paths.all_log_paths(data_dir):
-        objs, failures = store.verify_stream(log_path, key, f"log:{log_path.stem}")
+    for source in sources.writer_sources(data_dir):
+        stream_id = writer.log_stream_id(source.writer_id)
+        objs, failures = store.verify_lines(
+            source.log_text().splitlines(), key, stream_id, source.label
+        )
         total_lines += len(objs) + len(failures)
     return DoctorReport(anomalies=inventory.anomalies, total_lines=total_lines)
