@@ -136,6 +136,13 @@ implementation plan: `docs/plans/branch-per-writer.md`
 - The new root tree carries `data/vault.json` byte-identical to the legacy copy plus the same
   `.gitignore` `sumac init` writes; `merge=union` needs no removal step because every new tree is
   built from scratch
+- Fixed (2026-09-13): `_write_branches` used to build tree paths from the raw `--data-dir` string
+  as if it were already relative to `--repo`. Run from outside `--repo` with a cwd-relative
+  `--data-dir` (e.g. `--repo ../chez --data-dir ../chez/sumac_data/`), the literal `..` ended up
+  inside committed tree paths (`../chez/sumac_data/log.jsonl.enc`), which git refuses to check out.
+  `main` now resolves `data_dir` and derives the in-repo relative path via
+  `data_dir.relative_to(repo)`, so the argument's spelling relative to the caller's cwd no longer
+  matters — `--data-dir` must still name a directory inside `--repo`
 
 ### Docs
 

@@ -310,7 +310,8 @@ def main(argv: list[str] | None = None) -> int:
     mapping = _load_mapping(args)
 
     repo = args.repo.resolve()
-    data_dir = repo / args.data_dir
+    data_dir = (repo / args.data_dir).resolve()
+    rel_data_dir = data_dir.relative_to(repo).as_posix()
 
     key = sumac_vault.unlock(
         SealedVault.from_dict(json.loads((data_dir / "vault.json").read_text())),
@@ -348,7 +349,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     vault_bytes = (data_dir / "vault.json").read_bytes()
-    _write_branches(repo, args.data_dir, key, vault_bytes, per_writer_logs, per_writer_config)
+    _write_branches(repo, rel_data_dir, key, vault_bytes, per_writer_logs, per_writer_config)
     print("legacy branch left untouched")
     return 0
 
