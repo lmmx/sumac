@@ -167,7 +167,7 @@ three indicate a correctness problem in the append-only model, not just unavaila
 responsible for making atomic:
 
 ```
-remotectrl.run(repo_path, op: Callable[[], None]) -> None
+remotectrl.run(repo_path, op: Callable[[], None]) -> str
 ```
 
 Contract: `op` must produce **exactly one commit** on the currently checked-out branch. This is
@@ -176,6 +176,13 @@ the caller's responsibility to guarantee — `remotectrl` does not stage or comm
 diff isn't exactly one new commit (zero, or more than one), that's a caller bug and `remotectrl`
 raises loudly rather than attempt any push. No stronger check (e.g. requiring `op` to return the
 expected commit hash) — the snapshot/diff is sufficient and keeps the call shape simple.
+
+**Amended 2026-09-14:** `run` returns the new commit hash rather than `None`. This wasn't in the
+original design — it fell out of the snapshot/diff already computing it internally, and costs
+nothing to surface. Written down here because the implementation now deliberately deviates from
+the signature above; there was no known consumer for the hash at the time this was decided, and
+none has appeared since, but returning data the caller may want is strictly better than
+discarding it for no reason.
 
 ## 7. Post-op (after the wrapped operation, commit confirmed)
 
@@ -192,7 +199,18 @@ For each configured remote, in order:
 **Failure handling — deliberately no silent retry, no queue.** If a push fails (network down,
 rejected, whatever), `remotectrl` hard-errors. The local commit from `op` is left intact — it is
 never rolled back, since the append-only log's local copy is itself authoritative data, not a
-cache. The failure must leave a **persistent, visible marker** that surfaces on:
+cache.
+
+**Amended 2026-09-14: attempt every configured remote, don't stop at the first failure.** "In
+order" above describes iteration order, not early-exit-on-failure. If remote A fails and B is
+never attempted, B ends up in an unmarked, ambiguous state — neither "pushed" nor "known
+unpushed," just silently skipped. That's the same class of problem §7 already rules out for a
+single remote (a failure must be visible, never silently absent); stopping the loop early just
+relocates the silence to the remotes after the first failure. `remotectrl` therefore attempts
+every remote regardless of earlier failures, writes or clears each one's marker independently,
+and raises a single error aggregating every remote that failed, once all have been attempted.
+
+The failure must leave a **persistent, visible marker** that surfaces on:
 
 - the next status check (sumac's `sources` command, or a `remotectrl` status call), and
 - the *next* op attempt's preflight — so an unpushed backlog isn't silently forgotten between
