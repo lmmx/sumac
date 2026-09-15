@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Annotated
 from uuid import uuid4
 
 import typer
+from remotectrl import RemoteType
 from sealedlog import Vault
 from sealedlog.errors import SealError
 
@@ -29,6 +30,7 @@ from sumac import (
     paths,
     prompt_ui,
     queue,
+    remote_sync,
     render,
     review,
     store,
@@ -218,6 +220,61 @@ def sync(data_dir: DataDirOption = Path("data")) -> None:
         return
     for wid in sorted(refs):
         render.console.print(f"  {wid}")
+
+
+@app.command(name="sources")
+def sources_cmd(
+    setup: Annotated[
+        bool, typer.Option("--setup", help="(Re)assign each remote's sync role.")
+    ] = False,
+    data_dir: DataDirOption = Path("data"),
+) -> None:
+    """List configured remotes and their sync status, or (--setup) assign each
+    one's role (mirror/backup/unsynced). See docs/journal
+    2026-09-13-sumac-sources-design.md §3."""
+    repo_root = data_dir.parent
+    if not gitrepo.is_repo(repo_root):
+        render.print_warning("not a git repository — nothing to configure")
+        return
+
+    names = gitrepo.remote_names(repo_root)
+    config_path = repo_root / ".rc" / "remotes.toml"
+    first_time = not config_path.exists()
+
+    if setup or first_time:
+        if not names:
+            render.print_warning("no git remotes configured — nothing to assign")
+            return
+        current = remote_sync.resolve_remotes(repo_root)
+        if first_time and len(names) == 1:
+            # §3's discovery default: exactly one remote, no config yet — no
+            # prompt needed for the trivial case.
+            assignments = {names[0]: RemoteType.MIRROR}
+            render.print_success(f"{names[0]}: defaulted to mirror (only remote, no config yet)")
+        else:
+            assignments = {}
+            for name in names:
+                default_type = current.get(name, RemoteType.UNSYNCED)
+                options = [prompt_ui.Option(t.value, t.value) for t in RemoteType]
+                answer = prompt_ui.select(
+                    options, default=default_type.value, title=f"Role for remote {name!r}?"
+                )
+                assignments[name] = RemoteType(answer)
+        remote_sync.write_remotes_config(repo_root, assignments)
+        gitrepo.commit_paths(repo_root, [".rc/remotes.toml"], "sumac: configure remotes")
+        render.print_success("Updated .rc/remotes.toml")
+
+    resolved = remote_sync.resolve_remotes(repo_root)
+    rows = [
+        (
+            name,
+            resolved.get(name, RemoteType.UNSYNCED).value,
+            gitrepo.remote_url(repo_root, name) or "-",
+            remote_sync.status_text(repo_root, name, resolved.get(name, RemoteType.UNSYNCED)),
+        )
+        for name in names
+    ]
+    render.print_sources(rows)
 
 
 @config_app.command("show")

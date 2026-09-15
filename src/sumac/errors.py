@@ -10,6 +10,16 @@ class GitError(SumacError):
     2026-09-11-branch-per-user-design.md §2."""
 
 
+class SyncDivergenceError(SumacError):
+    """`remotectrl` preflight found a real ahead/behind divergence before a write.
+    See docs/journal 2026-09-13-remotectrl-design.md §5."""
+
+
+class SyncPushError(SumacError):
+    """`remotectrl` postflight failed to push to one or more remotes after a write
+    landed locally. See docs/journal 2026-09-13-remotectrl-design.md §7."""
+
+
 class NotAWriterBranchError(SumacError):
     """§2 step 3: no `SUMAC_WRITER_ID` and HEAD isn't `writer/<id>`."""
 

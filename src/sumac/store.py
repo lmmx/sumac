@@ -16,7 +16,7 @@ from sealedlog import SealedLog, aead
 from sealedlog._aad import build_aad
 from sealedlog.errors import AuthenticationError
 
-from sumac import NAMESPACE, gitrepo, paths, sources, writer
+from sumac import NAMESPACE, gitrepo, paths, remote_sync, sources, writer
 
 
 def _path_for_stream(data_dir: Path, stream_id: str) -> Path:
@@ -61,14 +61,23 @@ def commit_records(data_dir: Path, n: int) -> None:
     """One commit per command, covering every record it wrote; the message is a
     fixed literal plus a count and nothing else (§2 "Writes commit"; threat
     model in docs/FORMAT.md). Filesystem mode (§2's step 1) has no repo to
-    commit to and skips silently."""
+    commit to and skips silently.
+
+    Wrapped in `remotectrl` preflight/postflight (docs/journal
+    2026-09-14-remotectrl-integration.md §2-§3) — this is the single place every
+    write command's commit happens, so it's the single place sync wraps around."""
     if os.environ.get(writer.WRITER_ID_ENV) or not gitrepo.is_repo(data_dir):
         return
     repo_root = gitrepo.toplevel(data_dir)
     assert repo_root is not None  # `is_repo` above guarantees a toplevel
     rel_data = gitrepo.rel_to_toplevel(data_dir)
     plural = "record" if n == 1 else "records"
-    gitrepo.commit_paths(repo_root, [rel_data.as_posix()], f"sumac: {n} {plural}")
+    message = f"sumac: {n} {plural}"
+
+    def _commit() -> None:
+        gitrepo.commit_paths(repo_root, [rel_data.as_posix()], message)
+
+    remote_sync.synced_commit(repo_root, _commit)
 
 
 def iter_stream(data_dir: Path, key: bytes, stream_id: str) -> Iterator[dict]:

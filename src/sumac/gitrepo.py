@@ -100,6 +100,24 @@ def commit_paths(path: Path, rels: list[str], message: str) -> None:
     _run(path, [*_GPG_OFF, "commit", "-m", message])
 
 
+def remote_names(path: Path) -> list[str]:
+    """Names of every remote configured in this repo. See docs/journal
+    2026-09-13-sumac-sources-design.md §3."""
+    result = _run(path, ["remote"])
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def remote_url(path: Path, name: str) -> str | None:
+    """The fetch URL for a configured remote, or `None` if it has none (shouldn't
+    happen for a remote `remote_names` just listed, but `git remote get-url` can
+    still fail on a malformed config). See docs/journal
+    2026-09-13-sumac-sources-design.md §3."""
+    result = _run(path, ["remote", "get-url", name], check=False)
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
 def fetch_writers(path: Path, remote: str = "origin") -> None:
     refspec = f"refs/heads/writer/*:refs/remotes/{remote}/writer/*"
     _run(path, ["fetch", remote, refspec])

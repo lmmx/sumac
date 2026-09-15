@@ -81,6 +81,22 @@ def print_products(products: dict[str, models.Product]) -> None:
     console.print(table)
 
 
+def print_sources(rows: list[tuple[str, str, str, str]]) -> None:
+    """`sumac sources`'s listing table: (name, type, url, status) per remote.
+    See docs/journal 2026-09-13-sumac-sources-design.md §3."""
+    if not rows:
+        console.print("[yellow]no git remotes configured[/yellow]")
+        return
+    table = Table(title="Remotes")
+    table.add_column("NAME")
+    table.add_column("TYPE")
+    table.add_column("URL")
+    table.add_column("STATUS")
+    for name, type_, url, status in rows:
+        table.add_row(name, type_, url, status)
+    console.print(table)
+
+
 def print_unit_check(observed: dict[str, Counter[str]], cfg: config.Config) -> bool:
     """Returns True if every observed (product, unit) pair converts cleanly
     and no auto-registration is still unconfirmed.
