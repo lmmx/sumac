@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Annotated
 from uuid import uuid4
 
 import typer
+from remotectrl import RemoteType
 from sealedlog import Vault
 from sealedlog.errors import SealError
 
@@ -29,6 +30,7 @@ from sumac import (
     paths,
     prompt_ui,
     queue,
+    remote_sync,
     render,
     review,
     store,
@@ -72,6 +74,18 @@ def _load_vault(data_dir: Path) -> Vault:
 
 def _key(data_dir: Path) -> bytes:
     return get_key(_load_vault(data_dir))
+
+
+def _warn_staleness(data_dir: Path) -> None:
+    """Fetch configured remotes before a read and print any staleness loudly
+    above the read's own output. See docs/journal
+    2026-09-15-read-path-freshness.md §3. No-op outside a git repo, matching
+    every other remotectrl-aware command."""
+    repo_root = data_dir.parent
+    if not gitrepo.is_repo(repo_root):
+        return
+    for warning in remote_sync.fetch_before_read(repo_root):
+        render.print_warning(warning)
 
 
 # mistral.rs logs through Rust's `tracing` with an `EnvFilter` built from
@@ -218,6 +232,70 @@ def sync(data_dir: DataDirOption = Path("data")) -> None:
         return
     for wid in sorted(refs):
         render.console.print(f"  {wid}")
+
+
+@app.command(name="sources")
+def sources_cmd(
+    setup: Annotated[
+        bool, typer.Option("--setup", help="(Re)assign each remote's sync role.")
+    ] = False,
+    data_dir: DataDirOption = Path("data"),
+) -> None:
+    """List configured remotes and their sync status, or (--setup) assign each
+    one's role (mirror/backup/unsynced). See docs/journal
+    2026-09-13-sumac-sources-design.md §3."""
+    repo_root = data_dir.parent
+    if not gitrepo.is_repo(repo_root):
+        render.print_warning("not a git repository — nothing to configure")
+        return
+
+    names = gitrepo.remote_names(repo_root)
+    config_path = repo_root / ".rc" / "remotes.toml"
+    first_time = not config_path.exists()
+
+    if setup or first_time:
+        if not names:
+            render.print_warning("no git remotes configured — nothing to assign")
+            return
+        current = remote_sync.resolve_remotes(repo_root)
+        if first_time and len(names) == 1:
+            # §3's discovery default: exactly one remote, no config yet — no
+            # prompt needed for the trivial case.
+            assignments = {names[0]: RemoteType.MIRROR}
+            render.print_success(f"{names[0]}: defaulted to mirror (only remote, no config yet)")
+        else:
+            assignments = {}
+            for name in names:
+                default_type = current.get(name, RemoteType.UNSYNCED)
+                options = [prompt_ui.Option(t.value, t.value) for t in RemoteType]
+                answer = prompt_ui.select(
+                    options, default=default_type.value, title=f"Role for remote {name!r}?"
+                )
+                assignments[name] = RemoteType(answer)
+        remote_sync.write_remotes_config(repo_root, assignments)
+        gitrepo.commit_paths(repo_root, [".rc/remotes.toml"], "sumac: configure remotes")
+        render.print_success("Updated .rc/remotes.toml")
+
+    resolved = remote_sync.resolve_remotes(repo_root)
+    rows = [
+        (
+            name,
+            resolved.get(name, RemoteType.UNSYNCED).value,
+            gitrepo.remote_url(repo_root, name) or "-",
+            remote_sync.status_text(repo_root, name, resolved.get(name, RemoteType.UNSYNCED)),
+        )
+        for name in names
+    ]
+    render.print_sources(rows)
+
+    for name in names:
+        if resolved.get(name, RemoteType.UNSYNCED) != RemoteType.MIRROR:
+            continue
+        branch_rows = [
+            (s.writer_id, s.mine, s.commit_summary, s.note)
+            for s in remote_sync.branch_statuses(repo_root, name)
+        ]
+        render.print_branch_statuses(name, branch_rows)
 
 
 @config_app.command("show")
@@ -461,6 +539,7 @@ def status(
     """Show current inventory. Given a location, includes its sub-locations
     (shelves, doors, grid cells, ...), not just that exact node."""
     key = _key(data_dir)
+    _warn_staleness(data_dir)
     inventory = ledger.build_inventory(data_dir, key)
     locations = ledger.load_locations_or_empty(data_dir, key)
     scope = config.descendants(locations, location) if location else None
@@ -490,6 +569,7 @@ def find(
     one is given (e.g. --exact --whole-word shows both, not substring);
     with none given, shows every kind."""
     key = _key(data_dir)
+    _warn_staleness(data_dir)
     inventory = ledger.build_inventory(data_dir, key)
     locations = ledger.load_locations_or_empty(data_dir, key)
     render.print_anomaly_banner(inventory.anomalies)
@@ -589,6 +669,7 @@ def ask(
     pending and "retry N" revisits one.
     """
     key = _key(data_dir)
+    _warn_staleness(data_dir)
     llm = _import_llm(verbose=debug)
     view = _AskView(trace=trace, stats=stats, debug=debug)
 

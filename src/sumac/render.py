@@ -81,6 +81,43 @@ def print_products(products: dict[str, models.Product]) -> None:
     console.print(table)
 
 
+def print_sources(rows: list[tuple[str, str, str, str]]) -> None:
+    """`sumac sources`'s listing table: (name, type, url, status) per remote.
+    See docs/journal 2026-09-13-sumac-sources-design.md §3."""
+    if not rows:
+        console.print("[yellow]no git remotes configured[/yellow]")
+        return
+    table = Table(title="Remotes")
+    table.add_column("NAME")
+    table.add_column("TYPE")
+    table.add_column("URL")
+    table.add_column("STATUS")
+    for name, type_, url, status in rows:
+        table.add_row(name, type_, url, status)
+    console.print(table)
+
+
+def print_branch_statuses(
+    remote: str, rows: list[tuple[str, bool, str | None, str | None]]
+) -> None:
+    """Per-writer-branch breakdown for one `mirror` remote — the per-branch view
+    the single-row-per-remote table above can't represent. See docs/journal
+    2026-09-16-sources-per-branch-visibility-gap.md. `(writer_id, mine,
+    commit_summary, note)` per row; `commit_summary`/`note` are `None` when
+    there's nothing to show (never fetched yet / nothing to flag)."""
+    if not rows:
+        return
+    table = Table(title=f"{remote} — writer branches")
+    table.add_column("WRITER")
+    table.add_column("WHO")
+    table.add_column("LAST COMMIT")
+    table.add_column("NOTE")
+    for writer_id, mine, commit_summary, note in rows:
+        who = "mine" if mine else "theirs"
+        table.add_row(writer_id, who, commit_summary or "never fetched", note or "")
+    console.print(table)
+
+
 def print_unit_check(observed: dict[str, Counter[str]], cfg: config.Config) -> bool:
     """Returns True if every observed (product, unit) pair converts cleanly
     and no auto-registration is still unconfirmed.
