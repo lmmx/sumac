@@ -69,6 +69,32 @@ def list_writer_refs(path: Path) -> dict[str, str]:
     return {**remotes, **locals_}
 
 
+def remote_writer_ids(path: Path, remote: str) -> set[str]:
+    """Writer ids with a `writer/*` ref under `refs/remotes/<remote>/` — scoped
+    to one remote, unlike `list_writer_refs` (which merges every remote's
+    tracking refs together, picking one arbitrarily on a name collision).
+    Used by `sumac sources`'s per-branch view (docs/journal
+    2026-09-16-sources-per-branch-visibility-gap.md) to know which writer
+    branches a specific remote actually has, regardless of what's local."""
+    prefix = f"refs/remotes/{remote}/writer/"
+    result = _run(path, ["for-each-ref", "--format=%(refname)", f"refs/remotes/{remote}"])
+    return {
+        line.strip().removeprefix(prefix)
+        for line in result.stdout.splitlines()
+        if line.strip().startswith(prefix)
+    }
+
+
+def local_writer_ids(path: Path) -> set[str]:
+    """Writer ids with a local `refs/heads/writer/*` branch."""
+    result = _run(path, ["for-each-ref", "--format=%(refname)", "refs/heads/writer"])
+    return {
+        line.strip().removeprefix("refs/heads/writer/")
+        for line in result.stdout.splitlines()
+        if line.strip().startswith("refs/heads/writer/")
+    }
+
+
 def read_blob(path: Path, ref: str, rel: str) -> str:
     result = _run(path, ["cat-file", "blob", f"{ref}:{rel}"], check=False)
     if result.returncode != 0:
@@ -126,6 +152,34 @@ def fast_forward_to(path: Path, ref: str) -> None:
     succeeds cleanly or fails. See docs/journal
     2026-09-15-read-path-freshness.md §2 (own-branch resync before a read)."""
     _run(path, ["merge", "--ff-only", ref])
+
+
+def fast_forward_branch(path: Path, branch: str, ref: str) -> None:
+    """Fast-forward `branch` (any local branch, not necessarily checked out) to
+    `ref`, or raise `GitError` if that isn't a clean fast-forward. `git merge
+    --ff-only` only ever operates on `HEAD`, so a branch that isn't currently
+    checked out needs a different mechanism: `git fetch . <ref>:<branch>` — a
+    plain (non-forced) refspec fetched from the repo itself, which git rejects
+    outright as `[rejected] ... (non-fast-forward)` unless `branch` is a strict
+    ancestor of `ref`. Confirmed by hand in both directions before relying on
+    this. `branch` must not be the currently checked-out branch — git itself
+    refuses that ("refusing to fetch into branch ... checked out"); use
+    `fast_forward_to` for the checked-out branch instead. See docs/journal
+    2026-09-16-mirror-other-writer-branch-convergence.md §4 (resyncing every
+    writer's branch on a mirror, not just the current writer's own)."""
+    _run(path, ["fetch", ".", f"{ref}:{branch}"])
+
+
+def ref_summary(path: Path, ref: str) -> str | None:
+    """`"<short hash> <relative time>"` for `ref`'s tip commit, or `None` if
+    `ref` doesn't resolve. Used by `sumac sources`'s per-branch view (docs/journal
+    2026-09-16-sources-per-branch-visibility-gap.md) to show what a fetch
+    actually pulled for a writer branch, without inventing any health verdict
+    about it."""
+    result = _run(path, ["log", "-1", "--format=%h %cr", ref], check=False)
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
 
 
 def fetch_writers(path: Path, remote: str = "origin") -> None:

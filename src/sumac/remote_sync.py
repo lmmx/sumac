@@ -6,6 +6,7 @@ contract. See docs/journal 2026-09-13-remotectrl-design.md §5-§7,
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from remotectrl import DivergenceError, GitError, PushError
@@ -31,24 +32,141 @@ def resolve_remotes(repo_root: Path) -> dict[str, RemoteType]:
     return resolve(repo_root)
 
 
+@dataclass(frozen=True, slots=True)
+class _RemoteSync:
+    """Result of fetching and resyncing one remote once. `own_warning` is set
+    only if the current writer's own branch has a real, unresolvable
+    divergence (mirror) or the backup-should-never-be-ahead case; a mirror's
+    own-branch divergence that *can* be resolved is fast-forwarded silently as
+    a side effect of computing this, not reported. `other_warnings` maps
+    writer_id -> warning for every *other* local writer branch this repo
+    couldn't cleanly fast-forward (mirror only) — see docs/journal
+    2026-09-16-mirror-other-writer-branch-convergence.md."""
+
+    preamble: list[str]
+    own_warning: str | None
+    other_warnings: dict[str, str]
+
+
+def _sync_remote(repo_root: Path, remote: str, remote_type: RemoteType) -> _RemoteSync:
+    """Fetch `remote` and resync every local branch it can (own branch via
+    `git merge --ff-only` on `HEAD`; every other local writer branch via
+    `gitrepo.fast_forward_branch`, since that's the only mechanism that can
+    move a branch that isn't checked out). Shared by `fetch_before_read`,
+    `status_text`, and `branch_statuses` so all three see the exact same
+    fetch+resync, not three slightly different reimplementations."""
+    branch = current_branch(repo_root)
+    preamble: list[str] = []
+
+    pending = read_marker(repo_root, remote)
+    if pending is not None:
+        preamble.append(
+            f"{remote}: {pending.commits} commit(s) still unpushed since "
+            f"{pending.since} (last attempt: {pending.last_attempt_error})"
+        )
+
+    behavior = BEHAVIOR[remote_type]
+    if not behavior.fetch:
+        return _RemoteSync(preamble, None, {})
+
+    try:
+        fetch_all(repo_root, remote)
+    except GitError as e:
+        preamble.append(f"{remote}: {e}")
+        return _RemoteSync(preamble, None, {})
+
+    own_warning: str | None = None
+    if behavior.check_own_branch:
+        if remote_type == RemoteType.MIRROR:
+            own_warning = _resync_branch(repo_root, remote, branch, mine=True)
+        else:
+            own_ref = f"refs/remotes/{remote}/{branch}"
+            if ref_exists(repo_root, own_ref):
+                ahead, behind = ahead_behind(repo_root, branch, own_ref)
+                if behind > 0:
+                    own_warning = (
+                        f"{remote}: local branch {branch!r} has "
+                        f"{_own_branch_divergence_text(branch, ahead, behind)} — "
+                        "a backup remote should never be ahead of local"
+                    )
+
+    other_warnings: dict[str, str] = {}
+    if behavior.check_other_branches:
+        for other in local_branches(repo_root):
+            if other == branch:
+                continue
+            warning = _resync_branch(repo_root, remote, other, mine=False)
+            if warning:
+                other_warnings[other.removeprefix("writer/")] = warning
+
+    return _RemoteSync(preamble, own_warning, other_warnings)
+
+
 def status_text(repo_root: Path, name: str, remote_type: RemoteType) -> str:
     """Human-readable status for one remote, for `sumac sources` (docs/journal
-    2026-09-13-sumac-sources-design.md §3's STATUS column). Runs preflight for
-    just this one remote so one remote's divergence doesn't stop the rest of a
-    multi-remote listing from being checked."""
+    2026-09-13-sumac-sources-design.md §3's STATUS column; honesty fix in
+    2026-09-16-mirror-other-writer-branch-convergence.md §5). "Up to date"
+    means my own branch is current AND every other writer's local branch
+    (where one exists) resynced cleanly — not just my own, which is what this
+    column meant before that fix."""
     if remote_type == RemoteType.UNSYNCED:
         return "unsynced"
-    try:
-        warnings = run_preflight(repo_root, {name: remote_type})
-    except DivergenceError as e:
-        # `e`'s own message already says "diverged (...)" when ahead and behind
-        # are both nonzero (fixed 2026-09-16 — see this module's
-        # `_own_branch_divergence_text`, and remotectrl's own preflight.py fix),
-        # so this no longer prefixes a second, redundant "diverged:".
-        return str(e)
-    if warnings:
-        return "; ".join(w.message for w in warnings)
+    result = _sync_remote(repo_root, name, remote_type)
+    if result.preamble:
+        return "; ".join(result.preamble)
+    # Every problem found gets surfaced — an own-branch divergence must never
+    # silently hide a simultaneous other-writer resync failure, or vice versa
+    # (a review caught this: an earlier version of this function returned
+    # only `own_warning` whenever it was set, dropping `other_warnings`
+    # entirely even when both were nonempty at once).
+    parts = []
+    if result.own_warning:
+        parts.append(result.own_warning)
+    if result.other_warnings:
+        detail = "; ".join(f"writer/{wid} out of date" for wid in sorted(result.other_warnings))
+        parts.append(f"partial ({detail})")
+    if parts:
+        return "; ".join(parts)
     return "up to date"
+
+
+@dataclass(frozen=True, slots=True)
+class BranchStatus:
+    """One writer branch's state on one remote, for `sumac sources`'s per-branch
+    view (docs/journal 2026-09-16-sources-per-branch-visibility-gap.md). `note`
+    is `None` when there's nothing to flag — for `mine=False` this only ever
+    means "this repo hasn't committed here by mistake, and could cleanly
+    fast-forward if it had a local branch to resync," never a claim that the
+    other writer's branch is itself healthy; this machine has no way to know
+    that beyond what's already been pushed."""
+
+    writer_id: str
+    mine: bool
+    commit_summary: str | None
+    note: str | None
+
+
+def branch_statuses(repo_root: Path, remote: str) -> list[BranchStatus]:
+    """Every writer branch known on `remote` (local `writer/*` heads, unioned
+    with that remote's own `refs/remotes/<remote>/writer/*` tracking refs) —
+    the per-branch breakdown a single per-remote STATUS row can't represent.
+    Resyncs the same way `status_text` does (mirror only; `backup` is
+    single-owner by definition, so there's only ever one branch to show —
+    keep using `status_text` for those)."""
+    branch = current_branch(repo_root)
+    local_ids = gitrepo.local_writer_ids(repo_root)
+    writer_ids = sorted(local_ids | gitrepo.remote_writer_ids(repo_root, remote))
+    sync = _sync_remote(repo_root, remote, RemoteType.MIRROR)
+
+    rows = []
+    for writer_id in writer_ids:
+        their_branch = f"writer/{writer_id}"
+        mine = their_branch == branch
+        ref = f"refs/remotes/{remote}/{their_branch}"
+        commit_summary = gitrepo.ref_summary(repo_root, ref)
+        note = sync.own_warning if mine else sync.other_warnings.get(writer_id)
+        rows.append(BranchStatus(writer_id, mine, commit_summary, note))
+    return rows
 
 
 def _preflight_messages(repo_root: Path, remotes: dict[str, RemoteType]) -> list[str]:
@@ -79,19 +197,37 @@ def _own_branch_divergence_text(branch: str, ahead: int, behind: int) -> str:
     return f"{ahead} commit(s) ahead"
 
 
-def _resync_own_branch(repo_root: Path, remote: str, branch: str) -> str | None:
-    """A mirror's own-branch divergence means this same writer identity pushed
-    from another device (§2 of the household scenario: one writer, possibly
-    several machines) — safe to fast-forward, unlike another writer's branch
-    (never merged, per remotectrl-design.md §7's "no local fast-forward/merge of
-    other writers' branches" — a rule scoped to *other* branches, silent on a
-    writer's own). Returns `None` on a successful resync (or nothing to do), or
-    a warning message if fast-forward wasn't possible."""
+def _resync_branch(repo_root: Path, remote: str, branch: str, *, mine: bool) -> str | None:
+    """Fast-forward `branch` to `remote`'s copy of it, or return a warning if
+    that isn't possible. Handles both roles a branch can have on a mirror:
+
+    - `mine=True` (the currently-checked-out branch): being ahead is normal
+      (that's just local work not yet pushed); being behind means this same
+      writer identity pushed from another device (§2's household scenario) —
+      safe to fast-forward via `git merge --ff-only` on `HEAD`.
+    - `mine=False` (any other writer's branch): being ahead is the anomaly —
+      this repo committed on a branch it doesn't own, per remotectrl-design.md
+      §5 — and cannot be resolved by fast-forwarding (there's nothing to
+      forward past a local-only commit). Being behind is the routine case a
+      `mirror` is supposed to actually converge, not just tolerate — see
+      docs/journal 2026-09-16-mirror-other-writer-branch-convergence.md; safe
+      to fast-forward via `gitrepo.fast_forward_branch`, since this repo never
+      writes to a branch it doesn't own, so there's no local history to
+      protect against.
+
+    A real ahead+behind divergence (either role) can never be resolved
+    automatically — returns a warning, same wording either way
+    (`_own_branch_divergence_text`)."""
     ref = f"refs/remotes/{remote}/{branch}"
     if not ref_exists(repo_root, ref):
         return None
     ahead, behind = ahead_behind(repo_root, branch, ref)
     if behind == 0:
+        if not mine and ahead > 0:
+            return (
+                f"{remote}: local branch {branch!r} is {ahead} commit(s) "
+                "ahead of a branch it doesn't own"
+            )
         return None
     if ahead > 0:
         return (
@@ -100,75 +236,35 @@ def _resync_own_branch(repo_root: Path, remote: str, branch: str) -> str | None:
             "cannot fast-forward, resolve manually"
         )
     try:
-        gitrepo.fast_forward_to(repo_root, ref)
+        if mine:
+            gitrepo.fast_forward_to(repo_root, ref)
+        else:
+            gitrepo.fast_forward_branch(repo_root, branch, ref)
     except GitError as e:
         return f"{remote}: fast-forward of {branch!r} failed: {e}"
     return None
 
 
 def fetch_before_read(repo_root: Path) -> list[str]:
-    """Fetch every configured remote before a read, per docs/journal
-    2026-09-15-read-path-freshness.md §2-3. A mirror's own-branch divergence is
-    actually resynced (fast-forwarded) rather than just reported, since the
-    fetch that already ran leaves the fresh data sitting in a remote-tracking
-    ref — the read path's own commit and worktree are what's stale, and that's
-    fixable, not just something to warn about. Everything else that would block
-    a write (a backup remote ahead of local, or a mirror's *other*-branch ahead
-    of a branch it doesn't own — never auto-merged, see `_resync_own_branch`)
-    still only warns here, never blocks: reading stale data is recoverable in a
-    way committing on top of it is not."""
+    """Fetch and resync every configured remote before a read, per docs/journal
+    2026-09-15-read-path-freshness.md §2-3 and
+    2026-09-16-mirror-other-writer-branch-convergence.md. A mirror's own
+    branch, and every other writer's *local* branch (where one exists), are
+    fast-forwarded as a side effect of computing this — the fetch alone only
+    ever updates a remote-tracking ref, never the local branches that older
+    code (or a stale/testing clone) might still be reading from. Everything
+    that can't be resolved automatically (a real divergence, a backup ahead of
+    local, this repo having committed somewhere it doesn't own) still only
+    warns here, never blocks: reading stale data is recoverable in a way
+    committing on top of it is not."""
     remotes = resolve_remotes(repo_root)
     messages: list[str] = []
-    branch = current_branch(repo_root)
-
     for remote, remote_type in remotes.items():
-        pending = read_marker(repo_root, remote)
-        if pending is not None:
-            messages.append(
-                f"{remote}: {pending.commits} commit(s) still unpushed since "
-                f"{pending.since} (last attempt: {pending.last_attempt_error})"
-            )
-
-        behavior = BEHAVIOR[remote_type]
-        if not behavior.fetch:
-            continue
-
-        try:
-            fetch_all(repo_root, remote)
-        except GitError as e:
-            messages.append(f"{remote}: {e}")
-            continue
-
-        if behavior.check_own_branch:
-            if remote_type == RemoteType.MIRROR:
-                warning = _resync_own_branch(repo_root, remote, branch)
-                if warning:
-                    messages.append(warning)
-            else:
-                own_ref = f"refs/remotes/{remote}/{branch}"
-                if ref_exists(repo_root, own_ref):
-                    ahead, behind = ahead_behind(repo_root, branch, own_ref)
-                    if behind > 0:
-                        messages.append(
-                            f"{remote}: local branch {branch!r} has "
-                            f"{_own_branch_divergence_text(branch, ahead, behind)} — "
-                            "a backup remote should never be ahead of local"
-                        )
-
-        if behavior.check_other_branches:
-            for other in local_branches(repo_root):
-                if other == branch:
-                    continue
-                other_ref = f"refs/remotes/{remote}/{other}"
-                if not ref_exists(repo_root, other_ref):
-                    continue
-                ahead, _ = ahead_behind(repo_root, other, other_ref)
-                if ahead > 0:
-                    messages.append(
-                        f"{remote}: local branch {other!r} is {ahead} commit(s) "
-                        "ahead of a branch it doesn't own"
-                    )
-
+        result = _sync_remote(repo_root, remote, remote_type)
+        messages.extend(result.preamble)
+        if result.own_warning:
+            messages.append(result.own_warning)
+        messages.extend(result.other_warnings.values())
     return messages
 
 

@@ -288,6 +288,15 @@ def sources_cmd(
     ]
     render.print_sources(rows)
 
+    for name in names:
+        if resolved.get(name, RemoteType.UNSYNCED) != RemoteType.MIRROR:
+            continue
+        branch_rows = [
+            (s.writer_id, s.mine, s.commit_summary, s.note)
+            for s in remote_sync.branch_statuses(repo_root, name)
+        ]
+        render.print_branch_statuses(name, branch_rows)
+
 
 @config_app.command("show")
 def config_show(

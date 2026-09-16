@@ -9,7 +9,7 @@ dependencies = [
     "pydantic>=2",
     "rich>=13",
     "typer>=0.12",
-    "remotectrl>=0.1.0",
+    "remotectrl>=0.1.1",
 ]
 
 [project.scripts]
@@ -59,7 +59,6 @@ conflicts = [
 ]
 
 [tool.uv.sources]
-remotectrl = { path = "/mnt/remotectrl", editable = true }
 mistralrs = [
     { path = "vendor/wheels/mistralrs-0.9.2-cp310-abi3-manylinux_2_39_x86_64.whl", group = "ask-cuda" },
 ]

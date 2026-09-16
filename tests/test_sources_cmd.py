@@ -224,6 +224,122 @@ def test_sources_reports_explicit_divergence_not_just_behind(tmp_path: Path) -> 
     assert "1commitsbehind" not in condensed
 
 
+def test_sources_shows_per_branch_view_for_other_writers(tmp_path: Path) -> None:
+    """docs/journal 2026-09-16-sources-per-branch-visibility-gap.md: the fetch
+    always worked (traced and confirmed), but nothing ever displayed another
+    writer's branch state — `sources` only ever reported on the current
+    writer's own branch, collapsed into one row per remote. This is the exact
+    scenario reported: on `writer/lm`, another writer (`cm`) pushes to their
+    own branch on a mirror remote — `sources` must now show that branch's
+    fresh state explicitly, not silently."""
+    data_dir = tmp_path / "data"
+    _init(data_dir)  # writer/alice-mac, per _init's fixed --writer
+    repo_root = data_dir.parent
+
+    remote = tmp_path / "remote"
+    _git(tmp_path, "clone", "-q", "-b", "writer/alice-mac", str(repo_root), str(remote))
+    _git(remote, "config", "user.email", "test@example.invalid")
+    _git(remote, "config", "user.name", "Test")
+    _git(remote, "remote", "remove", "origin")
+    _git(remote, "config", "receive.denyCurrentBranch", "updateInstead")
+    _git(remote, "branch", "writer/bob-laptop")
+
+    # bob pushes new work to his own branch, from a separate clone
+    bob = tmp_path / "bob"
+    _git(tmp_path, "clone", "-q", "-b", "writer/bob-laptop", str(remote), str(bob))
+    _git(bob, "config", "user.email", "test@example.invalid")
+    _git(bob, "config", "user.name", "Test")
+    (bob / "bob-work.txt").write_text("bob's inventory update\n")
+    _git(bob, "add", "bob-work.txt")
+    _git(bob, "commit", "-q", "-m", "bob's commit")
+    _git(bob, "push", "-q", "origin", "writer/bob-laptop")
+    bob_head = _git(bob, "rev-parse", "writer/bob-laptop").stdout.strip()
+
+    _git(repo_root, "remote", "add", "umbrel", str(remote))
+    (repo_root / ".rc").mkdir(exist_ok=True)
+    (repo_root / ".rc" / "remotes.toml").write_text('[remotes]\numbrel = "mirror"\n')
+
+    # before: alice's clone has never fetched bob's branch at all
+    before = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo_root),
+            "rev-parse",
+            "--verify",
+            "-q",
+            "refs/remotes/umbrel/writer/bob-laptop",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert before.returncode != 0
+
+    result = _run(data_dir, "sources")
+    assert result.exit_code == 0, result.output
+    assert "bob-laptop" in result.output
+    assert "theirs" in result.output
+    assert "alice-mac" in result.output
+    assert "mine" in result.output
+
+    # the fetch that sources triggered must have actually landed bob's commit
+    fetched = _git(repo_root, "rev-parse", "refs/remotes/umbrel/writer/bob-laptop").stdout.strip()
+    assert fetched == bob_head
+
+    # the positive case matters as much as the failure case: another writer's
+    # branch simply advancing, with a clean resync, must still read "up to
+    # date" at the top level — a stub that always says "partial" whenever any
+    # other writer branch exists (divergent or not) must not pass this.
+    condensed = re.sub(r"[^\w]", "", result.output)
+    assert "uptodate" in condensed
+    assert "partial" not in condensed
+
+
+def test_sources_status_shows_partial_when_other_writer_cannot_fast_forward(
+    tmp_path: Path,
+) -> None:
+    """Case 4 (docs/journal 2026-09-16-mirror-other-writer-branch-convergence.md
+    §5): the top-level STATUS column must not say "up to date" when another
+    writer's local branch on this machine has diverged and couldn't be
+    resynced — that's exactly the "technically true about a narrow thing, read
+    as a broader claim" bug the ahead/behind fix already closed once tonight."""
+    data_dir = tmp_path / "data"
+    _init(data_dir)
+    repo_root = data_dir.parent
+
+    remote = tmp_path / "remote"
+    _git(tmp_path, "clone", "-q", "-b", "writer/alice-mac", str(repo_root), str(remote))
+    _git(remote, "config", "user.email", "test@example.invalid")
+    _git(remote, "config", "user.name", "Test")
+    _git(remote, "remote", "remove", "origin")
+    _git(remote, "config", "receive.denyCurrentBranch", "updateInstead")
+    _git(remote, "branch", "writer/bob-laptop")
+
+    bob = tmp_path / "bob"
+    _git(tmp_path, "clone", "-q", "-b", "writer/bob-laptop", str(remote), str(bob))
+    _git(bob, "config", "user.email", "test@example.invalid")
+    _git(bob, "config", "user.name", "Test")
+    _git(bob, "commit", "--allow-empty", "-q", "-m", "bob's new work")
+    _git(bob, "push", "-q", "origin", "writer/bob-laptop")
+
+    # alice's machine already has a local, now-divergent copy of bob's branch
+    _git(repo_root, "branch", "writer/bob-laptop", "writer/alice-mac")
+    _git(repo_root, "checkout", "-q", "writer/bob-laptop")
+    _git(repo_root, "commit", "--allow-empty", "-q", "-m", "divergent local commit")
+    _git(repo_root, "checkout", "-q", "writer/alice-mac")
+
+    _git(repo_root, "remote", "add", "umbrel", str(remote))
+    (repo_root / ".rc").mkdir(exist_ok=True)
+    (repo_root / ".rc" / "remotes.toml").write_text('[remotes]\numbrel = "mirror"\n')
+
+    result = _run(data_dir, "sources")
+    assert result.exit_code == 0, result.output
+    condensed = re.sub(r"[^\w]", "", result.output)
+    assert "uptodate" not in condensed
+    assert "partial" in condensed
+    assert "bob" in condensed and "laptop" in condensed
+
+
 def test_setup_with_two_remotes_prompts_per_remote(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     _init(data_dir)

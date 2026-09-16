@@ -221,6 +221,45 @@ def test_fetch_before_read_warns_when_own_branch_fast_forward_is_impossible(
     assert "cannot fast-forward" in warnings[0]
 
 
+def test_status_text_reports_own_and_other_branch_problems_together(
+    git_data_dir: Path, tmp_path: Path
+) -> None:
+    """A review caught this: `status_text` must not drop an own-branch
+    divergence's message just because another writer's branch also has a
+    problem at the same time (or vice versa) — both must be visible, same
+    standard as the ahead/behind display fix earlier tonight."""
+    repo_root = git_data_dir.parent
+    remote = _clone_remote(repo_root, tmp_path)
+
+    # own branch (alice-mac) diverges: remote has a commit local lacks, and
+    # local has a commit the remote lacks — cannot auto-resolve.
+    _git(remote, "commit", "--allow-empty", "-q", "-m", "from another device")
+    _git(repo_root, "commit", "--allow-empty", "-q", "-m", "local-only commit")
+
+    # another writer's branch also diverges, independently.
+    _git(remote, "branch", "writer/bob-laptop")
+    bob = tmp_path / "bob"
+    _git(tmp_path, "clone", "-q", "-b", "writer/bob-laptop", str(remote), str(bob))
+    _git(bob, "config", "user.email", "test@example.invalid")
+    _git(bob, "config", "user.name", "Test")
+    _git(bob, "commit", "--allow-empty", "-q", "-m", "bob's new work")
+    _git(bob, "push", "-q", "origin", "writer/bob-laptop")
+    _git(repo_root, "branch", "writer/bob-laptop", "writer/alice-mac")
+    _git(repo_root, "checkout", "-q", "writer/bob-laptop")
+    _git(repo_root, "commit", "--allow-empty", "-q", "-m", "divergent local commit")
+    _git(repo_root, "checkout", "-q", "writer/alice-mac")
+
+    _git(repo_root, "remote", "add", "umbrel", str(remote))
+    _write_remotes_config(repo_root, '[remotes]\numbrel = "mirror"\n')
+
+    from remotectrl.config import RemoteType
+
+    text = remote_sync.status_text(repo_root, "umbrel", RemoteType.MIRROR)
+    assert "cannot fast-forward" in text  # own-branch problem
+    assert "writer/bob-laptop" in text and "partial" in text  # other-writer problem
+    assert text != "up to date"
+
+
 def test_fetch_before_read_warns_on_mirror_other_branch_ahead(
     git_data_dir: Path, tmp_path: Path
 ) -> None:
@@ -239,6 +278,99 @@ def test_fetch_before_read_warns_on_mirror_other_branch_ahead(
     assert len(warnings) == 1
     assert "writer/bob-laptop" in warnings[0]
     assert "ahead" in warnings[0]
+
+
+def test_fetch_before_read_no_local_branch_for_other_writer_is_unaffected(
+    git_data_dir: Path, tmp_path: Path
+) -> None:
+    """Case 1 (docs/journal 2026-09-16-mirror-other-writer-branch-convergence.md):
+    the common case — no local branch exists for another writer at all — must
+    be unaffected by the convergence fix. Nothing to fast-forward; reads
+    already worked via the tracking ref alone."""
+    repo_root = git_data_dir.parent
+    remote = _clone_remote(repo_root, tmp_path)
+    _git(remote, "branch", "writer/bob-laptop")
+    _git(repo_root, "remote", "add", "umbrel", str(remote))
+    _write_remotes_config(repo_root, '[remotes]\numbrel = "mirror"\n')
+
+    warnings = remote_sync.fetch_before_read(repo_root)
+    assert warnings == []
+    # no local branch for bob was created as a side effect
+    local_heads = _git(repo_root, "for-each-ref", "--format=%(refname)", "refs/heads").stdout
+    assert "writer/bob-laptop" not in local_heads
+    # but the tracking ref is there and fresh, which is what reads use
+    assert (
+        _git(
+            repo_root, "rev-parse", "--verify", "-q", "refs/remotes/umbrel/writer/bob-laptop"
+        ).returncode
+        == 0
+    )
+
+
+def test_fetch_before_read_fast_forwards_stale_local_branch_of_another_writer(
+    git_data_dir: Path, tmp_path: Path
+) -> None:
+    """Case 2, the actual bug case: a local branch for another writer already
+    exists (shared/testing machine) and is stale — must be fast-forwarded to
+    match the remote, not just left behind while the tracking ref updates."""
+    repo_root = git_data_dir.parent
+    remote = _clone_remote(repo_root, tmp_path)
+    _git(remote, "branch", "writer/bob-laptop")
+
+    # bob pushes new work to his own branch from a separate clone
+    bob = tmp_path / "bob"
+    _git(tmp_path, "clone", "-q", "-b", "writer/bob-laptop", str(remote), str(bob))
+    _git(bob, "config", "user.email", "test@example.invalid")
+    _git(bob, "config", "user.name", "Test")
+    _git(bob, "commit", "--allow-empty", "-q", "-m", "bob's new work")
+    _git(bob, "push", "-q", "origin", "writer/bob-laptop")
+    bob_head = _git(bob, "rev-parse", "writer/bob-laptop").stdout.strip()
+
+    # this repo already has a *stale* local branch for bob (e.g. a shared
+    # machine that once ran init-writer under his id)
+    _git(repo_root, "branch", "writer/bob-laptop", "writer/alice-mac")
+    stale_head = _git(repo_root, "rev-parse", "writer/bob-laptop").stdout.strip()
+    assert stale_head != bob_head
+
+    _git(repo_root, "remote", "add", "umbrel", str(remote))
+    _write_remotes_config(repo_root, '[remotes]\numbrel = "mirror"\n')
+
+    warnings = remote_sync.fetch_before_read(repo_root)
+    assert warnings == []
+    assert _git(repo_root, "rev-parse", "writer/bob-laptop").stdout.strip() == bob_head
+
+
+def test_fetch_before_read_warns_when_other_writer_branch_cannot_fast_forward(
+    git_data_dir: Path, tmp_path: Path
+) -> None:
+    """Case 3: another writer's local branch has diverged (shouldn't normally
+    happen, but must fail safely, not crash or guess) — falls back to a
+    warning, same shape as the own-branch fallback."""
+    repo_root = git_data_dir.parent
+    remote = _clone_remote(repo_root, tmp_path)
+    _git(remote, "branch", "writer/bob-laptop")
+
+    bob = tmp_path / "bob"
+    _git(tmp_path, "clone", "-q", "-b", "writer/bob-laptop", str(remote), str(bob))
+    _git(bob, "config", "user.email", "test@example.invalid")
+    _git(bob, "config", "user.name", "Test")
+    _git(bob, "commit", "--allow-empty", "-q", "-m", "bob's new work")
+    _git(bob, "push", "-q", "origin", "writer/bob-laptop")
+
+    # this repo's local copy of bob's branch has a commit of its own — a real
+    # divergence, not just staleness
+    _git(repo_root, "branch", "writer/bob-laptop", "writer/alice-mac")
+    _git(repo_root, "checkout", "-q", "writer/bob-laptop")
+    _git(repo_root, "commit", "--allow-empty", "-q", "-m", "divergent local commit")
+    _git(repo_root, "checkout", "-q", "writer/alice-mac")
+
+    _git(repo_root, "remote", "add", "umbrel", str(remote))
+    _write_remotes_config(repo_root, '[remotes]\numbrel = "mirror"\n')
+
+    warnings = remote_sync.fetch_before_read(repo_root)
+    assert len(warnings) == 1
+    assert "writer/bob-laptop" in warnings[0]
+    assert "cannot fast-forward" in warnings[0]
 
 
 def test_fetch_before_read_warns_on_transport_failure(git_data_dir: Path) -> None:
