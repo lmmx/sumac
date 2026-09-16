@@ -156,12 +156,12 @@ def test_fetch_before_read_warns_but_never_raises_on_divergence(
     assert "behind" in warnings[0]
 
 
-def test_fetch_before_read_multiple_remotes_only_reports_first_divergence(
+def test_fetch_before_read_multiple_diverged_remotes_all_reported(
     git_data_dir: Path, tmp_path: Path
 ) -> None:
-    """Known limitation, docs/journal 2026-09-15-read-path-freshness.md §4:
-    `run_preflight` raises on the first divergence and checks no further remote,
-    so a second diverged remote goes unreported by this call alone."""
+    """§4: unlike `run_preflight` (which stops at the first divergence),
+    `fetch_before_read` runs its own loop and checks every configured remote
+    regardless of what an earlier one found."""
     repo_root = git_data_dir.parent
     bad_a = _clone_remote(repo_root, tmp_path, name="bad-a")
     _git(bad_a, "commit", "--allow-empty", "-q", "-m", "diverged a")
@@ -172,7 +172,73 @@ def test_fetch_before_read_multiple_remotes_only_reports_first_divergence(
     _write_remotes_config(repo_root, '[remotes]\nbad-a = "backup"\nbad-b = "backup"\n')
 
     warnings = remote_sync.fetch_before_read(repo_root)
+    assert len(warnings) == 2
+    assert any("bad-a" in w for w in warnings)
+    assert any("bad-b" in w for w in warnings)
+
+
+def test_fetch_before_read_fast_forwards_own_branch_on_a_mirror(
+    git_data_dir: Path, tmp_path: Path
+) -> None:
+    """§2: a mirror's own-branch divergence is the routine multi-device case —
+    resynced via fast-forward, not just reported."""
+    repo_root = git_data_dir.parent
+    remote = _clone_remote(repo_root, tmp_path)
+    (remote / "data" / "from-another-device.txt").write_text("written elsewhere\n")
+    _git(remote, "add", "data/from-another-device.txt")
+    _git(remote, "commit", "-q", "-m", "from another device")
+    _git(repo_root, "remote", "add", "umbrel", str(remote))
+    _write_remotes_config(repo_root, '[remotes]\numbrel = "mirror"\n')
+
+    marker = repo_root / "data" / "from-another-device.txt"
+    assert not marker.exists()
+
+    warnings = remote_sync.fetch_before_read(repo_root)
+    assert warnings == []
+    local_head = _git(repo_root, "rev-parse", "HEAD").stdout.strip()
+    remote_head = _git(remote, "rev-parse", "writer/alice-mac").stdout.strip()
+    assert local_head == remote_head
+    # the fast-forward must update the worktree, not just the branch ref —
+    # this is what makes `_worktree_source`'s later read actually fresh (§2a)
+    assert marker.read_text() == "written elsewhere\n"
+
+
+def test_fetch_before_read_warns_when_own_branch_fast_forward_is_impossible(
+    git_data_dir: Path, tmp_path: Path
+) -> None:
+    """§2: if local *also* has a commit the mirror lacks, fast-forward can't
+    succeed cleanly — falls back to a warning instead of guessing."""
+    repo_root = git_data_dir.parent
+    remote = _clone_remote(repo_root, tmp_path)
+    _git(remote, "commit", "--allow-empty", "-q", "-m", "from another device")
+    _git(repo_root, "commit", "--allow-empty", "-q", "-m", "local-only commit")
+    _git(repo_root, "remote", "add", "umbrel", str(remote))
+    _write_remotes_config(repo_root, '[remotes]\numbrel = "mirror"\n')
+
+    warnings = remote_sync.fetch_before_read(repo_root)
     assert len(warnings) == 1
+    assert "umbrel" in warnings[0]
+    assert "cannot fast-forward" in warnings[0]
+
+
+def test_fetch_before_read_warns_on_mirror_other_branch_ahead(
+    git_data_dir: Path, tmp_path: Path
+) -> None:
+    """§2: a mirror's *other*-branch being ahead of a branch it doesn't own is
+    anomalous, not routine — warned, never auto-merged."""
+    repo_root = git_data_dir.parent
+    remote = _clone_remote(repo_root, tmp_path)
+    _git(repo_root, "branch", "writer/bob-laptop")
+    _git(repo_root, "remote", "add", "umbrel", str(remote))
+    _git(repo_root, "push", "-q", "umbrel", "writer/bob-laptop")
+    _git(repo_root, "commit", "--allow-empty", "-q", "-m", "committed on bob's branch by mistake")
+    _git(repo_root, "update-ref", "refs/heads/writer/bob-laptop", "HEAD")
+    _write_remotes_config(repo_root, '[remotes]\numbrel = "mirror"\n')
+
+    warnings = remote_sync.fetch_before_read(repo_root)
+    assert len(warnings) == 1
+    assert "writer/bob-laptop" in warnings[0]
+    assert "ahead" in warnings[0]
 
 
 def test_fetch_before_read_warns_on_transport_failure(git_data_dir: Path) -> None:

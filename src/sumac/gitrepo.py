@@ -118,6 +118,16 @@ def remote_url(path: Path, name: str) -> str | None:
     return result.stdout.strip() or None
 
 
+def fast_forward_to(path: Path, ref: str) -> None:
+    """Fast-forward the checked-out branch to `ref` (a remote-tracking ref) and
+    update the worktree to match, or raise `GitError` if that isn't possible
+    (e.g. local has diverged commits `ref` doesn't). `--ff-only` guarantees this
+    never invents a merge commit or silently drops local work — it either
+    succeeds cleanly or fails. See docs/journal
+    2026-09-15-read-path-freshness.md §2 (own-branch resync before a read)."""
+    _run(path, ["merge", "--ff-only", ref])
+
+
 def fetch_writers(path: Path, remote: str = "origin") -> None:
     refspec = f"refs/heads/writer/*:refs/remotes/{remote}/writer/*"
     _run(path, ["fetch", remote, refspec])

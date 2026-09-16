@@ -8,13 +8,22 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from remotectrl import DivergenceError, PushError
+from remotectrl import DivergenceError, GitError, PushError
+from remotectrl.behavior import BEHAVIOR
 from remotectrl.config import RemoteType, resolve
+from remotectrl.gitwrap import (
+    ahead_behind,
+    current_branch,
+    fetch_all,
+    local_branches,
+    ref_exists,
+)
+from remotectrl.markers import read_marker
 from remotectrl.onecommit import run_op
 from remotectrl.postflight import run_postflight
 from remotectrl.preflight import run_preflight
 
-from sumac import render
+from sumac import gitrepo, render
 from sumac.errors import SyncDivergenceError, SyncPushError
 
 
@@ -32,7 +41,11 @@ def status_text(repo_root: Path, name: str, remote_type: RemoteType) -> str:
     try:
         warnings = run_preflight(repo_root, {name: remote_type})
     except DivergenceError as e:
-        return f"diverged: {e}"
+        # `e`'s own message already says "diverged (...)" when ahead and behind
+        # are both nonzero (fixed 2026-09-16 — see this module's
+        # `_own_branch_divergence_text`, and remotectrl's own preflight.py fix),
+        # so this no longer prefixes a second, redundant "diverged:".
+        return str(e)
     if warnings:
         return "; ".join(w.message for w in warnings)
     return "up to date"
@@ -47,24 +60,116 @@ def _preflight_messages(repo_root: Path, remotes: dict[str, RemoteType]) -> list
     return [f"{w.remote}: {w.message}" for w in warnings]
 
 
+def _own_branch_divergence_text(branch: str, ahead: int, behind: int) -> str:
+    """Unambiguous ahead/behind wording for a branch's own-remote divergence.
+
+    A real bug found 2026-09-16: an earlier version of this module (and, at the
+    time, `remotectrl.preflight` itself — fixed there too, see that package's
+    2026-09-16 journal entry) only ever mentioned `behind` in this message,
+    silently dropping `ahead` even when both were nonzero — a real divergence
+    (committed on the wrong branch locally, which is also missing the remote's
+    commit) read as "just behind, will resolve on its own" when it actually
+    needed manual resolution. Every caller in this module must go through this
+    function rather than formatting `ahead`/`behind` inline, so a fix here
+    covers every display site at once."""
+    if ahead and behind:
+        return f"diverged ({ahead} ahead, {behind} behind)"
+    if behind:
+        return f"{behind} commit(s) behind"
+    return f"{ahead} commit(s) ahead"
+
+
+def _resync_own_branch(repo_root: Path, remote: str, branch: str) -> str | None:
+    """A mirror's own-branch divergence means this same writer identity pushed
+    from another device (§2 of the household scenario: one writer, possibly
+    several machines) — safe to fast-forward, unlike another writer's branch
+    (never merged, per remotectrl-design.md §7's "no local fast-forward/merge of
+    other writers' branches" — a rule scoped to *other* branches, silent on a
+    writer's own). Returns `None` on a successful resync (or nothing to do), or
+    a warning message if fast-forward wasn't possible."""
+    ref = f"refs/remotes/{remote}/{branch}"
+    if not ref_exists(repo_root, ref):
+        return None
+    ahead, behind = ahead_behind(repo_root, branch, ref)
+    if behind == 0:
+        return None
+    if ahead > 0:
+        return (
+            f"{remote}: local branch {branch!r} has "
+            f"{_own_branch_divergence_text(branch, ahead, behind)} — "
+            "cannot fast-forward, resolve manually"
+        )
+    try:
+        gitrepo.fast_forward_to(repo_root, ref)
+    except GitError as e:
+        return f"{remote}: fast-forward of {branch!r} failed: {e}"
+    return None
+
+
 def fetch_before_read(repo_root: Path) -> list[str]:
     """Fetch every configured remote before a read, per docs/journal
-    2026-09-15-read-path-freshness.md §2-3. Unlike `synced_commit`'s preflight, a
-    real divergence never blocks here — reading stale data is recoverable in a
-    way committing on top of it is not, so `DivergenceError` is folded into the
-    same warning channel as an ordinary transport failure instead of raised.
-
-    Note: `run_preflight` raises on the *first* divergence it finds and checks no
-    further remote after that (remotectrl's own preflight, unlike its postflight,
-    was never amended to attempt every remote) — with two remotes both diverged,
-    only the first is ever reported here. Not fixed in this pass: it's
-    remotectrl's own iteration order, not sumac's; see docs/journal
-    2026-09-15-read-path-freshness.md §4."""
+    2026-09-15-read-path-freshness.md §2-3. A mirror's own-branch divergence is
+    actually resynced (fast-forwarded) rather than just reported, since the
+    fetch that already ran leaves the fresh data sitting in a remote-tracking
+    ref — the read path's own commit and worktree are what's stale, and that's
+    fixable, not just something to warn about. Everything else that would block
+    a write (a backup remote ahead of local, or a mirror's *other*-branch ahead
+    of a branch it doesn't own — never auto-merged, see `_resync_own_branch`)
+    still only warns here, never blocks: reading stale data is recoverable in a
+    way committing on top of it is not."""
     remotes = resolve_remotes(repo_root)
-    try:
-        return _preflight_messages(repo_root, remotes)
-    except DivergenceError as e:
-        return [str(e)]
+    messages: list[str] = []
+    branch = current_branch(repo_root)
+
+    for remote, remote_type in remotes.items():
+        pending = read_marker(repo_root, remote)
+        if pending is not None:
+            messages.append(
+                f"{remote}: {pending.commits} commit(s) still unpushed since "
+                f"{pending.since} (last attempt: {pending.last_attempt_error})"
+            )
+
+        behavior = BEHAVIOR[remote_type]
+        if not behavior.fetch:
+            continue
+
+        try:
+            fetch_all(repo_root, remote)
+        except GitError as e:
+            messages.append(f"{remote}: {e}")
+            continue
+
+        if behavior.check_own_branch:
+            if remote_type == RemoteType.MIRROR:
+                warning = _resync_own_branch(repo_root, remote, branch)
+                if warning:
+                    messages.append(warning)
+            else:
+                own_ref = f"refs/remotes/{remote}/{branch}"
+                if ref_exists(repo_root, own_ref):
+                    ahead, behind = ahead_behind(repo_root, branch, own_ref)
+                    if behind > 0:
+                        messages.append(
+                            f"{remote}: local branch {branch!r} has "
+                            f"{_own_branch_divergence_text(branch, ahead, behind)} — "
+                            "a backup remote should never be ahead of local"
+                        )
+
+        if behavior.check_other_branches:
+            for other in local_branches(repo_root):
+                if other == branch:
+                    continue
+                other_ref = f"refs/remotes/{remote}/{other}"
+                if not ref_exists(repo_root, other_ref):
+                    continue
+                ahead, _ = ahead_behind(repo_root, other, other_ref)
+                if ahead > 0:
+                    messages.append(
+                        f"{remote}: local branch {other!r} is {ahead} commit(s) "
+                        "ahead of a branch it doesn't own"
+                    )
+
+    return messages
 
 
 def write_remotes_config(repo_root: Path, assignments: dict[str, RemoteType]) -> None:

@@ -9,6 +9,7 @@ unrelated optional dependency.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -186,6 +187,41 @@ def test_ask_calls_warn_staleness_before_loading_the_model(
     result = _run(data_dir, "ask", "where is the pork?")
     assert calls == [data_dir]
     assert "origin" in result.output
+
+
+def test_sources_reports_explicit_divergence_not_just_behind(tmp_path: Path) -> None:
+    """A real bug found 2026-09-16: `sumac sources` displayed "1 commit(s) behind"
+    for a branch that was actually 1 ahead AND 1 behind — a real divergence that
+    needs manual resolution, misread as routine staleness that would "resolve on
+    its own". See docs/journal 2026-09-16-ahead-behind-divergence-message-bug.md.
+    """
+    data_dir = tmp_path / "data"
+    _init(data_dir)
+    repo_root = data_dir.parent
+
+    remote = tmp_path / "remote"
+    _git(tmp_path, "clone", "-q", "-b", "writer/alice-mac", str(repo_root), str(remote))
+    _git(remote, "config", "user.email", "test@example.invalid")
+    _git(remote, "config", "user.name", "Test")
+    _git(remote, "remote", "remove", "origin")
+    _git(remote, "commit", "--allow-empty", "-q", "-m", "someone else's commit on this branch")
+
+    _git(repo_root, "remote", "add", "umbrel", str(remote))
+    _git(repo_root, "commit", "--allow-empty", "-q", "-m", "committed on the wrong branch")
+    (repo_root / ".rc").mkdir(exist_ok=True)
+    (repo_root / ".rc" / "remotes.toml").write_text('[remotes]\numbrel = "mirror"\n')
+
+    result = _run(data_dir, "sources")
+    assert result.exit_code == 0, result.output
+    # Rich wraps the STATUS cell across lines/box-drawing chars at narrow
+    # widths, so strip everything but word characters before matching.
+    condensed = re.sub(r"[^\w]", "", result.output)
+    assert "1ahead1behind" in condensed
+    assert "diverged" in condensed
+    # the bug: this used to say "1 commit(s) behind" alone, never mentioning
+    # ahead at all — assert that exact wrong wording is gone, not just that the
+    # right wording is present.
+    assert "1commitsbehind" not in condensed
 
 
 def test_setup_with_two_remotes_prompts_per_remote(tmp_path: Path) -> None:
