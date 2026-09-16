@@ -38,6 +38,35 @@ def status_text(repo_root: Path, name: str, remote_type: RemoteType) -> str:
     return "up to date"
 
 
+def _preflight_messages(repo_root: Path, remotes: dict[str, RemoteType]) -> list[str]:
+    """`run_preflight`'s warnings, formatted as `"<remote>: <message>"` — the one
+    formatting rule shared by every non-raising caller of preflight in this
+    module. Does not catch `DivergenceError`; callers decide whether that's fatal
+    (`synced_commit`) or just another warning (`fetch_before_read`)."""
+    warnings = run_preflight(repo_root, remotes)
+    return [f"{w.remote}: {w.message}" for w in warnings]
+
+
+def fetch_before_read(repo_root: Path) -> list[str]:
+    """Fetch every configured remote before a read, per docs/journal
+    2026-09-15-read-path-freshness.md §2-3. Unlike `synced_commit`'s preflight, a
+    real divergence never blocks here — reading stale data is recoverable in a
+    way committing on top of it is not, so `DivergenceError` is folded into the
+    same warning channel as an ordinary transport failure instead of raised.
+
+    Note: `run_preflight` raises on the *first* divergence it finds and checks no
+    further remote after that (remotectrl's own preflight, unlike its postflight,
+    was never amended to attempt every remote) — with two remotes both diverged,
+    only the first is ever reported here. Not fixed in this pass: it's
+    remotectrl's own iteration order, not sumac's; see docs/journal
+    2026-09-15-read-path-freshness.md §4."""
+    remotes = resolve_remotes(repo_root)
+    try:
+        return _preflight_messages(repo_root, remotes)
+    except DivergenceError as e:
+        return [str(e)]
+
+
 def write_remotes_config(repo_root: Path, assignments: dict[str, RemoteType]) -> None:
     """Overwrites `.rc/remotes.toml` with exactly `assignments` — the caller
     (`sumac sources --setup`) is expected to pass a role for every currently
@@ -61,11 +90,11 @@ def synced_commit(repo_root: Path, op: Callable[[], None]) -> str:
     remotes = resolve_remotes(repo_root)
 
     try:
-        warnings = run_preflight(repo_root, remotes)
+        warnings = _preflight_messages(repo_root, remotes)
     except DivergenceError as e:
         raise SyncDivergenceError(str(e)) from e
     for warning in warnings:
-        render.print_warning(f"{warning.remote}: {warning.message}")
+        render.print_warning(warning)
 
     commit = run_op(repo_root, op)
 

@@ -76,6 +76,18 @@ def _key(data_dir: Path) -> bytes:
     return get_key(_load_vault(data_dir))
 
 
+def _warn_staleness(data_dir: Path) -> None:
+    """Fetch configured remotes before a read and print any staleness loudly
+    above the read's own output. See docs/journal
+    2026-09-15-read-path-freshness.md §3. No-op outside a git repo, matching
+    every other remotectrl-aware command."""
+    repo_root = data_dir.parent
+    if not gitrepo.is_repo(repo_root):
+        return
+    for warning in remote_sync.fetch_before_read(repo_root):
+        render.print_warning(warning)
+
+
 # mistral.rs logs through Rust's `tracing` with an `EnvFilter` built from
 # `RUST_LOG` (confirmed against the built extension: it carries the `RUST_LOG`
 # string and `tracing_subscriber::filter::env` symbols from `mistralrs_core`).
@@ -518,6 +530,7 @@ def status(
     """Show current inventory. Given a location, includes its sub-locations
     (shelves, doors, grid cells, ...), not just that exact node."""
     key = _key(data_dir)
+    _warn_staleness(data_dir)
     inventory = ledger.build_inventory(data_dir, key)
     locations = ledger.load_locations_or_empty(data_dir, key)
     scope = config.descendants(locations, location) if location else None
@@ -547,6 +560,7 @@ def find(
     one is given (e.g. --exact --whole-word shows both, not substring);
     with none given, shows every kind."""
     key = _key(data_dir)
+    _warn_staleness(data_dir)
     inventory = ledger.build_inventory(data_dir, key)
     locations = ledger.load_locations_or_empty(data_dir, key)
     render.print_anomaly_banner(inventory.anomalies)
@@ -646,6 +660,7 @@ def ask(
     pending and "retry N" revisits one.
     """
     key = _key(data_dir)
+    _warn_staleness(data_dir)
     llm = _import_llm(verbose=debug)
     view = _AskView(trace=trace, stats=stats, debug=debug)
 

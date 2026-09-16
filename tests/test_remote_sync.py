@@ -134,6 +134,57 @@ def test_multiple_remotes_one_fails_postflight_other_still_receives_push(
     assert local_head == good_head
 
 
+def test_fetch_before_read_is_a_noop_with_no_remotes(git_data_dir: Path) -> None:
+    repo_root = git_data_dir.parent
+    assert remote_sync.fetch_before_read(repo_root) == []
+
+
+def test_fetch_before_read_warns_but_never_raises_on_divergence(
+    git_data_dir: Path, tmp_path: Path
+) -> None:
+    """docs/journal 2026-09-15-read-path-freshness.md §2: a real ahead/behind
+    divergence that would block a write must only ever warn for a read."""
+    repo_root = git_data_dir.parent
+    remote = _clone_remote(repo_root, tmp_path)
+    _git(remote, "commit", "--allow-empty", "-q", "-m", "someone else wrote here")
+    _git(repo_root, "remote", "add", "origin", str(remote))
+    _write_remotes_config(repo_root, '[remotes]\norigin = "backup"\n')
+
+    warnings = remote_sync.fetch_before_read(repo_root)
+    assert len(warnings) == 1
+    assert "origin" in warnings[0]
+    assert "behind" in warnings[0]
+
+
+def test_fetch_before_read_multiple_remotes_only_reports_first_divergence(
+    git_data_dir: Path, tmp_path: Path
+) -> None:
+    """Known limitation, docs/journal 2026-09-15-read-path-freshness.md §4:
+    `run_preflight` raises on the first divergence and checks no further remote,
+    so a second diverged remote goes unreported by this call alone."""
+    repo_root = git_data_dir.parent
+    bad_a = _clone_remote(repo_root, tmp_path, name="bad-a")
+    _git(bad_a, "commit", "--allow-empty", "-q", "-m", "diverged a")
+    bad_b = _clone_remote(repo_root, tmp_path, name="bad-b")
+    _git(bad_b, "commit", "--allow-empty", "-q", "-m", "diverged b")
+    _git(repo_root, "remote", "add", "bad-a", str(bad_a))
+    _git(repo_root, "remote", "add", "bad-b", str(bad_b))
+    _write_remotes_config(repo_root, '[remotes]\nbad-a = "backup"\nbad-b = "backup"\n')
+
+    warnings = remote_sync.fetch_before_read(repo_root)
+    assert len(warnings) == 1
+
+
+def test_fetch_before_read_warns_on_transport_failure(git_data_dir: Path) -> None:
+    repo_root = git_data_dir.parent
+    _git(repo_root, "remote", "add", "origin", "/nonexistent/does-not-exist")
+    _write_remotes_config(repo_root, '[remotes]\norigin = "mirror"\n')
+
+    warnings = remote_sync.fetch_before_read(repo_root)
+    assert len(warnings) == 1
+    assert "origin" in warnings[0]
+
+
 def test_remote_names_lists_configured_remotes(git_data_dir: Path) -> None:
     repo_root = git_data_dir.parent
     assert gitrepo.remote_names(repo_root) == []
